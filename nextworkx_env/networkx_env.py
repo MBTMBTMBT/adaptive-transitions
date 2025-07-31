@@ -260,7 +260,7 @@ def test_environment(config_path: str, num_episodes: int = 3):
 
 
 if __name__ == "__main__":
-    config_files = ["./mdps/chain.json", "./mdps/grid.json", "./mdps/branching.json",]
+    config_files = ["../mdp_network/mdps/chain.json", "../mdp_network/mdps/grid.json", "../mdp_network/mdps/branching.json",]
     for config_file in config_files:
         test_environment(config_file, num_episodes=1)
     print("\nAll tests completed!")
