@@ -89,10 +89,6 @@ class MDPNetwork:
 
     def sample_next_state(self, state: int, action: int, rng: np.random.Generator) -> int:
         """Sample next state based on transition probabilities."""
-        if action == 0:
-            # Action 0 is "no movement" - stay in current state
-            return state
-
         probs = self.get_transition_probabilities(state, action)
 
         if not probs:

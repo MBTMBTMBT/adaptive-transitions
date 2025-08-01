@@ -2,6 +2,8 @@ from typing import Dict, List, Tuple, Optional, Any
 import csv
 import os
 
+import numpy as np
+
 
 class QTable:
     """
@@ -179,25 +181,58 @@ class ValueTable:
 class PolicyTable:
     """
     Policy table representation for MDP policies.
+    Supports probabilistic policies (action probability distributions).
     Supports CSV import/export functionality.
     """
 
-    def __init__(self, policy: Optional[Dict[int, int]] = None):
+    def __init__(self, policy: Optional[Dict[int, Dict[int, float]]] = None):
         """
         Initialize Policy table.
 
         Args:
-            policy: Dictionary mapping state -> action
+            policy: Dictionary mapping state -> {action: probability}
         """
         self.policy = policy if policy is not None else {}
 
+    def get_action_probabilities(self, state: int) -> Dict[int, float]:
+        """Get action probability distribution for a state."""
+        return self.policy.get(state, {0: 1.0})
+
+    def set_action_probabilities(self, state: int, action_probs: Dict[int, float]):
+        """Set action probability distribution for a state."""
+        # Normalize probabilities to sum to 1
+        total_prob = sum(action_probs.values())
+        if total_prob > 0:
+            normalized_probs = {action: prob / total_prob for action, prob in action_probs.items()}
+        else:
+            # If all probabilities are zero, default to uniform distribution
+            num_actions = len(action_probs)
+            normalized_probs = {action: 1.0 / num_actions for action in action_probs.keys()}
+
+        self.policy[state] = normalized_probs
+
     def get_action(self, state: int) -> int:
-        """Get action for a state."""
-        return self.policy.get(state, 0)
+        """Get most likely action for a state (for compatibility)."""
+        action_probs = self.get_action_probabilities(state)
+        if not action_probs:
+            return 0
+        return max(action_probs, key=action_probs.get)
 
     def set_action(self, state: int, action: int):
-        """Set action for a state."""
-        self.policy[state] = action
+        """Set deterministic action for a state (for compatibility)."""
+        self.policy[state] = {action: 1.0}
+
+    def sample_action(self, state: int, rng: np.random.Generator) -> int:
+        """Sample an action according to the policy distribution."""
+        action_probs = self.get_action_probabilities(state)
+        actions = list(action_probs.keys())
+        probabilities = list(action_probs.values())
+        return rng.choice(actions, p=probabilities)
+
+    def get_action_probability(self, state: int, action: int) -> float:
+        """Get probability of taking a specific action in a state."""
+        action_probs = self.get_action_probabilities(state)
+        return action_probs.get(action, 0.0)
 
     def get_most_common_action(self) -> Tuple[int, int]:
         """
@@ -210,8 +245,9 @@ class PolicyTable:
             return 0, 0
 
         action_counts = {}
-        for action in self.policy.values():
-            action_counts[action] = action_counts.get(action, 0) + 1
+        for state_policy in self.policy.values():
+            most_likely_action = max(state_policy, key=state_policy.get)
+            action_counts[most_likely_action] = action_counts.get(most_likely_action, 0) + 1
 
         most_common_action = max(action_counts, key=action_counts.get)
         count = action_counts[most_common_action]
@@ -223,24 +259,28 @@ class PolicyTable:
 
     def get_all_actions(self) -> List[int]:
         """Get all unique actions in the Policy table."""
-        return list(set(self.policy.values()))
+        all_actions = set()
+        for state_policy in self.policy.values():
+            all_actions.update(state_policy.keys())
+        return list(all_actions)
 
     def export_to_csv(self, file_path: str):
         """
         Export Policy table to CSV file.
-        CSV format: state,action
+        CSV format: state,action,probability
         """
         with open(file_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['state', 'action'])
+            writer.writerow(['state', 'action', 'probability'])
 
             for state in sorted(self.policy.keys()):
-                writer.writerow([state, self.policy[state]])
+                for action, prob in sorted(self.policy[state].items()):
+                    writer.writerow([state, action, prob])
 
     def import_from_csv(self, file_path: str):
         """
         Import Policy table from CSV file.
-        CSV format: state,action
+        CSV format: state,action,probability
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"CSV file not found: {file_path}")
@@ -253,11 +293,75 @@ class PolicyTable:
             for row in reader:
                 state = int(row['state'])
                 action = int(row['action'])
-                self.policy[state] = action
+                probability = float(row['probability'])
+
+                if state not in self.policy:
+                    self.policy[state] = {}
+                self.policy[state][action] = probability
 
     def __str__(self) -> str:
         """String representation of Policy table."""
         result = "Policy Table:\n"
         for state in sorted(self.policy.keys()):
-            result += f"State {state}: A={self.policy[state]}\n"
+            result += f"State {state}: "
+            action_strs = []
+            for action, prob in sorted(self.policy[state].items()):
+                action_strs.append(f"A{action}={prob:.3f}")
+            result += "{" + ", ".join(action_strs) + "}\n"
         return result
+
+
+def q_table_to_policy(q_table: QTable,
+                      states: List[int],
+                      num_actions: int,
+                      temperature: float = 1.0) -> PolicyTable:
+    """
+    Convert Q-table to policy using softmax (Boltzmann) distribution.
+
+    Args:
+        q_table: Q-table containing state-action values
+        states: List of all states
+        num_actions: Number of possible actions
+        temperature: Temperature parameter for softmax
+                    - temperature > 1: more exploration (more uniform)
+                    - temperature = 1: standard softmax
+                    - temperature < 1: more exploitation (more peaked)
+                    - temperature → 0: approaches greedy policy
+
+    Returns:
+        PolicyTable with probabilistic action distributions
+    """
+    policy = PolicyTable()
+
+    for state in states:
+        # Get Q-values for all actions in this state
+        q_values = []
+        for action in range(num_actions):
+            q_values.append(q_table.get_q_value(state, action))
+
+        # Convert to numpy array for easier computation
+        q_array = np.array(q_values)
+
+        # Apply temperature scaling and softmax
+        if temperature > 0:
+            # Scale by temperature
+            scaled_q = q_array / temperature
+            # Subtract max for numerical stability
+            scaled_q = scaled_q - np.max(scaled_q)
+            # Compute softmax
+            exp_q = np.exp(scaled_q)
+            probabilities = exp_q / np.sum(exp_q)
+        else:
+            # Temperature = 0 means greedy policy
+            probabilities = np.zeros(num_actions)
+            best_action = np.argmax(q_values)
+            probabilities[best_action] = 1.0
+
+        # Create action probability dictionary
+        action_probs = {}
+        for action in range(num_actions):
+            action_probs[action] = float(probabilities[action])
+
+        policy.set_action_probabilities(state, action_probs)
+
+    return policy

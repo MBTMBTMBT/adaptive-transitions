@@ -1,11 +1,9 @@
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import networkx as nx
-from typing import Dict, List, Tuple, Optional, Any
-import numpy as np
+import random
 import os
-from mdp_tables import QTable, ValueTable, PolicyTable
-from mdp_network import MDPNetwork
+from mdp_tables import q_table_to_policy
 from solvers import *
 
 
@@ -16,28 +14,34 @@ def ensure_output_dir(output_dir: str = "output_plots"):
     return output_dir
 
 
-def get_node_layout(states, layout_type="linear"):
-    """Generate node positions for different layout types."""
-    if layout_type == "linear":
-        return {state: (state * 2, 0) for state in states}
-    elif layout_type == "circular":
-        n = len(states)
-        return {state: (3 * np.cos(2 * np.pi * i / n), 3 * np.sin(2 * np.pi * i / n))
-                for i, state in enumerate(states)}
-    else:
-        return {state: (state * 2, 0) for state in states}
+def create_random_policy(mdp_network: MDPNetwork, seed: Optional[int] = None) -> PolicyTable:
+    """Create a uniform probabilistic policy for the MDP."""
+    policy = PolicyTable()
+    for state in mdp_network.states:
+        if mdp_network.is_terminal_state(state):
+            # Terminal states have deterministic action 0
+            policy.set_action(state, 0)
+        else:
+            # Create uniform probability distribution over actions
+            uniform_prob = 1.0 / mdp_network.num_actions
+
+            action_probs = {}
+            for action in range(mdp_network.num_actions):
+                action_probs[action] = uniform_prob
+
+            policy.set_action_probabilities(state, action_probs)
+
+    return policy
 
 
-def plot_mdp_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str, save_path: Optional[str] = None):
+def plot_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str, save_path: Optional[str] = None):
     """Plot state values on the MDP network graph with color and numerical labels."""
     G = mdp_network.get_graph_copy()
-
-    # Create figure with proper aspect ratio
     fig, ax = plt.subplots(figsize=(12, 6))
 
     # Get layout
     states = sorted(mdp_network.states)
-    pos = get_node_layout(states, "linear")
+    pos = {state: (state * 2, 0) for state in states}
 
     # Get values and normalize for colors
     values = [value_table.get_value(state) for state in states]
@@ -48,10 +52,9 @@ def plot_mdp_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str
     else:
         norm = plt.Normalize(vmin=0, vmax=1)
 
-    # Create colormap
-    cmap = plt.cm.RdYlGn  # Red-Yellow-Green colormap
+    cmap = plt.cm.RdYlGn
 
-    # Draw edges first (so they appear behind nodes)
+    # Draw edges first
     nx.draw_networkx_edges(G, pos, edge_color='#666666', alpha=0.5, arrows=True,
                            arrowsize=15, arrowstyle='->', width=1.5, ax=ax)
 
@@ -68,13 +71,11 @@ def plot_mdp_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str
         is_start = state in mdp_network.start_states
 
         # State identifier in center of node
-        state_label = f"S{state}"
-        ax.text(x, y + 0.1, state_label, ha='center', va='center',
+        ax.text(x, y + 0.1, f"S{state}", ha='center', va='center',
                 fontweight='bold', fontsize=11, color='black')
 
-        # Value below the node with background for readability
-        value_label = f"{value:.3f}"
-        ax.text(x, y - 0.4, value_label, ha='center', va='center',
+        # Value below the node
+        ax.text(x, y - 0.4, f"{value:.3f}", ha='center', va='center',
                 fontsize=10, fontweight='bold', color='black',
                 bbox=dict(boxstyle="round,pad=0.3", facecolor='white',
                           edgecolor='black', alpha=0.9))
@@ -91,14 +92,11 @@ def plot_mdp_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, shrink=0.8, aspect=20, pad=0.1)
-    cbar.set_label('State Value', rotation=270, labelpad=20, fontsize=12)
+    cbar.set_label('Value', rotation=270, labelpad=20, fontsize=12)
 
-    # Set title and clean up axes
     ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
     ax.axis('equal')
     ax.axis('off')
-
-    # Adjust layout
     plt.tight_layout()
 
     if save_path:
@@ -106,18 +104,16 @@ def plot_mdp_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str
     plt.show()
 
 
-def plot_mdp_policy(mdp_network: MDPNetwork, policy_table: PolicyTable, title: str, save_path: Optional[str] = None):
-    """Plot policy on the MDP network graph with action arrows and labels."""
+def plot_policy(mdp_network: MDPNetwork, policy_table: PolicyTable, title: str, save_path: Optional[str] = None):
+    """Plot policy on the MDP network graph, showing action probabilities."""
     G = mdp_network.get_graph_copy()
-
-    # Create figure
     fig, ax = plt.subplots(figsize=(12, 6))
 
     # Get layout
     states = sorted(mdp_network.states)
-    pos = get_node_layout(states, "linear")
+    pos = {state: (state * 2, 0) for state in states}
 
-    # Draw edges (transition possibilities)
+    # Draw edges
     nx.draw_networkx_edges(G, pos, edge_color='#CCCCCC', alpha=0.4, arrows=True,
                            arrowsize=12, arrowstyle='->', width=1, ax=ax)
 
@@ -135,45 +131,32 @@ def plot_mdp_policy(mdp_network: MDPNetwork, policy_table: PolicyTable, title: s
     nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=800,
                            alpha=0.8, edgecolors='black', linewidths=2, ax=ax)
 
-    # Action arrows and labels
-    action_vectors = {
-        0: (0, 0),  # Stay
-        1: (0.6, 0),  # Right
-        2: (-0.6, 0),  # Left
-        3: (0, 0.6),  # Up
-        4: (0, -0.6)  # Down
-    }
-
-    action_names = {
-        0: "Stay", 1: "Right", 2: "Left", 3: "Up", 4: "Down"
-    }
-
     for state in states:
         x, y = pos[state]
-        action = policy_table.get_action(state)
         is_terminal = mdp_network.is_terminal_state(state)
         is_start = state in mdp_network.start_states
 
         # State label
-        state_label = f"S{state}"
-        ax.text(x, y + 0.1, state_label, ha='center', va='center',
+        ax.text(x, y + 0.1, f"S{state}", ha='center', va='center',
                 fontweight='bold', fontsize=11, color='black')
 
-        # Action label and arrow
-        if not is_terminal and action in action_vectors:
-            action_name = action_names.get(action, f"A{action}")
+        # Policy distribution below node
+        if not is_terminal:
+            action_probs = policy_table.get_action_probabilities(state)
 
-            # Action label below node
-            ax.text(x, y - 0.4, action_name, ha='center', va='center',
-                    fontsize=9, fontweight='bold', color='black',
+            # Format probability distribution
+            prob_strs = []
+            for action in sorted(action_probs.keys()):
+                prob = action_probs[action]
+                if prob > 0.001:  # Only show non-negligible probabilities
+                    prob_strs.append(f"A{action}:{prob:.2f}")
+
+            policy_text = "\n".join(prob_strs) if prob_strs else "A0:1.00"
+
+            ax.text(x, y - 0.5, policy_text, ha='center', va='center',
+                    fontsize=8, fontweight='bold', color='black',
                     bbox=dict(boxstyle="round,pad=0.25", facecolor='yellow',
                               edgecolor='black', alpha=0.8))
-
-            # Draw action arrow if not "Stay"
-            if action != 0:
-                dx, dy = action_vectors[action]
-                ax.arrow(x, y, dx, dy, head_width=0.15, head_length=0.15,
-                         fc='red', ec='red', linewidth=3, alpha=0.8)
 
         # State type indicators
         if is_terminal:
@@ -187,16 +170,13 @@ def plot_mdp_policy(mdp_network: MDPNetwork, policy_table: PolicyTable, title: s
     legend_elements = [
         mpatches.Patch(color='#99FF99', alpha=0.8, label='Start State'),
         mpatches.Patch(color='#9999FF', alpha=0.8, label='Regular State'),
-        mpatches.Patch(color='#FF9999', alpha=0.8, label='Terminal State'),
-        mpatches.FancyArrowPatch((0, 0), (0.3, 0), color='red',
-                                 arrowstyle='->', linewidth=3, label='Policy Action')
+        mpatches.Patch(color='#FF9999', alpha=0.8, label='Terminal State')
     ]
     ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(0, 1))
 
     ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
     ax.axis('equal')
     ax.axis('off')
-
     plt.tight_layout()
 
     if save_path:
@@ -204,16 +184,14 @@ def plot_mdp_policy(mdp_network: MDPNetwork, policy_table: PolicyTable, title: s
     plt.show()
 
 
-def plot_mdp_q_values(mdp_network: MDPNetwork, q_table: QTable, title: str, save_path: Optional[str] = None):
-    """Plot Q-values on the MDP network graph with colors and numerical labels."""
+def plot_q_values(mdp_network: MDPNetwork, q_table: QTable, title: str, save_path: Optional[str] = None):
+    """Plot Q-values on the MDP network graph, grouping all actions for each state together."""
     G = mdp_network.get_graph_copy()
+    fig, ax = plt.subplots(figsize=(12, 8))
 
-    # Create larger figure for Q-values
-    fig, ax = plt.subplots(figsize=(14, 8))
-
-    # Get layout with more spacing for Q-value labels
+    # Get layout with more spacing
     states = sorted(mdp_network.states)
-    pos = {state: (state * 3, 0) for state in states}  # More spacing
+    pos = {state: (state * 2.5, 0) for state in states}
 
     # Get all Q-values for normalization
     all_q_values = []
@@ -229,18 +207,9 @@ def plot_mdp_q_values(mdp_network: MDPNetwork, q_table: QTable, title: str, save
     nx.draw_networkx_edges(G, pos, edge_color='#666666', alpha=0.3, arrows=True,
                            arrowsize=12, arrowstyle='->', width=1, ax=ax)
 
-    # Draw nodes (neutral color since we'll show Q-values separately)
+    # Draw nodes
     nx.draw_networkx_nodes(G, pos, node_color='#DDDDDD', node_size=600,
                            alpha=0.7, edgecolors='black', linewidths=2, ax=ax)
-
-    # Q-value positions around each node
-    q_positions = {
-        0: (0, 0.8),  # Stay (top)
-        1: (0.8, 0),  # Right
-        2: (-0.8, 0),  # Left
-        3: (0, 0.8),  # Up (same as stay if both exist)
-        4: (0, -0.8)  # Down
-    }
 
     for state in states:
         x, y = pos[state]
@@ -248,39 +217,36 @@ def plot_mdp_q_values(mdp_network: MDPNetwork, q_table: QTable, title: str, save
         is_start = state in mdp_network.start_states
 
         # State label in center
-        state_label = f"S{state}"
-        ax.text(x, y, state_label, ha='center', va='center',
+        ax.text(x, y, f"S{state}", ha='center', va='center',
                 fontweight='bold', fontsize=10, color='black')
 
         # State type indicators
         if is_terminal:
-            ax.text(x, y + 1.2, "(Term)", ha='center', va='center',
+            ax.text(x, y + 0.8, "(Term)", ha='center', va='center',
                     fontsize=8, style='italic', color='red')
         if is_start:
-            ax.text(x, y + 1.2, "(Start)", ha='center', va='center',
+            ax.text(x, y + 0.8, "(Start)", ha='center', va='center',
                     fontsize=8, style='italic', color='green')
 
-        # Q-value labels around the node
+        # Q-values grouped together below the node
         if not is_terminal:
+            q_value_strs = []
+
             for action in range(mdp_network.num_actions):
-                if action in q_positions:
-                    q_value = q_table.get_q_value(state, action)
-                    dx, dy = q_positions[action]
+                q_value = q_table.get_q_value(state, action)
+                q_value_strs.append(f"A{action}: {q_value:.3f}")
 
-                    # Adjust position if action 0 and 3 both exist (avoid overlap)
-                    if action == 3 and mdp_network.num_actions > 3:
-                        dy = 1.0
+            # Create a single text box with all Q-values
+            q_text = "\n".join(q_value_strs)
 
-                    q_x, q_y = x + dx, y + dy
+            # Use average color for the background
+            avg_q = np.mean([q_table.get_q_value(state, action) for action in range(mdp_network.num_actions)])
+            bg_color = cmap(norm(avg_q))
 
-                    # Color based on Q-value
-                    color = cmap(norm(q_value))
-
-                    # Q-value box with action label and value
-                    ax.text(q_x, q_y, f"A{action}\n{q_value:.3f}",
-                            ha='center', va='center', fontsize=8, fontweight='bold',
-                            bbox=dict(boxstyle="round,pad=0.3", facecolor=color,
-                                      edgecolor='black', alpha=0.9))
+            ax.text(x, y - 0.8, q_text, ha='center', va='center',
+                    fontsize=8, fontweight='bold', color='black',
+                    bbox=dict(boxstyle="round,pad=0.4", facecolor=bg_color,
+                              edgecolor='black', alpha=0.9))
 
     # Add colorbar
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -291,105 +257,6 @@ def plot_mdp_q_values(mdp_network: MDPNetwork, q_table: QTable, title: str, save
     ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
     ax.axis('equal')
     ax.axis('off')
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-    plt.show()
-
-
-def plot_mdp_occupancy(mdp_network: MDPNetwork, occupancy_table: QTable, title: str, save_path: Optional[str] = None):
-    """Plot occupancy measures with colors and numerical labels."""
-    G = mdp_network.get_graph_copy()
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=(14, 8))
-
-    # Get layout with spacing
-    states = sorted(mdp_network.states)
-    pos = {state: (state * 3, 0) for state in states}
-
-    # Get all non-zero occupancy values for normalization
-    all_occ_values = []
-    for state in states:
-        for action in range(mdp_network.num_actions):
-            occ_val = occupancy_table.get_q_value(state, action)
-            if occ_val > 1e-6:
-                all_occ_values.append(occ_val)
-
-    if all_occ_values:
-        min_occ, max_occ = min(all_occ_values), max(all_occ_values)
-        norm = plt.Normalize(vmin=min_occ, vmax=max_occ)
-    else:
-        min_occ, max_occ = 0, 1
-        norm = plt.Normalize(vmin=0, vmax=1)
-
-    cmap = plt.cm.plasma
-
-    # Draw edges
-    nx.draw_networkx_edges(G, pos, edge_color='#666666', alpha=0.3, arrows=True,
-                           arrowsize=12, arrowstyle='->', width=1, ax=ax)
-
-    # Draw nodes
-    nx.draw_networkx_nodes(G, pos, node_color='#DDDDDD', node_size=600,
-                           alpha=0.7, edgecolors='black', linewidths=2, ax=ax)
-
-    # Occupancy positions around nodes
-    occ_positions = {
-        0: (0, 0.8),  # Stay (top)
-        1: (0.8, 0),  # Right
-        2: (-0.8, 0),  # Left
-        3: (0, 1.0),  # Up
-        4: (0, -0.8)  # Down
-    }
-
-    for state in states:
-        x, y = pos[state]
-        is_terminal = mdp_network.is_terminal_state(state)
-        is_start = state in mdp_network.start_states
-
-        # State label
-        state_label = f"S{state}"
-        ax.text(x, y, state_label, ha='center', va='center',
-                fontweight='bold', fontsize=10, color='black')
-
-        # State type indicators
-        if is_terminal:
-            ax.text(x, y + 1.4, "(Term)", ha='center', va='center',
-                    fontsize=8, style='italic', color='red')
-        if is_start:
-            ax.text(x, y + 1.4, "(Start)", ha='center', va='center',
-                    fontsize=8, style='italic', color='green')
-
-        # Occupancy measure labels
-        for action in range(mdp_network.num_actions):
-            occ_value = occupancy_table.get_q_value(state, action)
-
-            # Only show non-zero occupancy measures
-            if occ_value > 1e-6 and action in occ_positions:
-                dx, dy = occ_positions[action]
-                occ_x, occ_y = x + dx, y + dy
-
-                # Color based on occupancy value
-                color = cmap(norm(occ_value))
-
-                # Occupancy box
-                ax.text(occ_x, occ_y, f"A{action}\n{occ_value:.3f}",
-                        ha='center', va='center', fontsize=8, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor=color,
-                                  edgecolor='black', alpha=0.9))
-
-    # Add colorbar
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, shrink=0.8, aspect=20, pad=0.05)
-    cbar.set_label('Occupancy Measure', rotation=270, labelpad=20, fontsize=12)
-
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-    ax.axis('equal')
-    ax.axis('off')
-
     plt.tight_layout()
 
     if save_path:
@@ -405,7 +272,7 @@ if __name__ == "__main__":
     output_dir = ensure_output_dir("output_plots")
     print(f"Output directory: {output_dir}\n")
 
-    # Load the chain MDP using the correct initialization method
+    # Load the chain MDP
     print("Loading MDP...")
     mdp = MDPNetwork(config_path="./mdps/chain.json")
     print(f"Loaded MDP with {len(mdp.states)} states and {mdp.num_actions} actions")
@@ -419,161 +286,81 @@ if __name__ == "__main__":
     theta = 1e-6
     max_iterations = 1000
 
-    # Test 1: Policy Evaluation
+    # Create a single random policy for all tests
+    random_policy = create_random_policy(mdp, seed=42)
+
+    # Test 1: Policy Evaluation with Random Policy
     print("=== Test 1: Policy Evaluation ===")
 
-    # Create a simple policy: always choose action 1 (move right)
-    test_policy = PolicyTable()
-    for state in mdp.states:
-        if mdp.is_terminal_state(state):
-            test_policy.set_action(state, 0)  # Terminal states can have any action
-        else:
-            test_policy.set_action(state, 1)  # Always move right for non-terminal states
-
-    print("Testing policy evaluation with right-moving policy...")
-    print("Policy actions:", {state: test_policy.get_action(state) for state in mdp.states})
-
-    pe_values = policy_evaluation(mdp, test_policy, gamma, theta, max_iterations)
-
+    pe_values = policy_evaluation(mdp, random_policy, gamma, theta, max_iterations)
     print("Policy Evaluation Results:")
     for state in sorted(mdp.states):
         value = pe_values.get_value(state)
         print(f"  State {state}: {value:.6f}")
 
-    # Plot policy evaluation results on network
-    plot_mdp_policy(mdp, test_policy, "Policy Evaluation: Right-Moving Policy",
-                    os.path.join(output_dir, "policy_evaluation_network.png"))
-    plot_mdp_values(mdp, pe_values, "Policy Evaluation: State Values",
-                    os.path.join(output_dir, "policy_evaluation_values_network.png"))
+    # Plot results
+    plot_policy(mdp, random_policy, "Input: Random Probabilistic Policy (Action Probabilities per State)",
+                os.path.join(output_dir, "random_policy.png"))
+    plot_values(mdp, pe_values, "Output: State Values from Policy Evaluation (Given Random Policy)",
+                os.path.join(output_dir, "policy_evaluation_values.png"))
 
     # Test 2: Optimal Value Iteration
     print("\n=== Test 2: Optimal Value Iteration ===")
 
-    print("Computing optimal value iteration...")
-    opt_values, opt_q_table, opt_policy = optimal_value_iteration(
-        mdp, gamma, theta, max_iterations)
+    opt_values, opt_q_table = optimal_value_iteration(mdp, gamma, theta, max_iterations)
 
     print("Optimal Value Iteration Results:")
-    print("State Values:")
     for state in sorted(mdp.states):
         value = opt_values.get_value(state)
-        action = opt_policy.get_action(state)
-        print(f"  State {state}: Value={value:.6f}, Optimal Action={action}")
+        print(f"  State {state}: Value={value:.6f}")
 
-    print("Q-Values:")
-    for state in sorted(mdp.states):
-        q_vals = []
-        for action in range(mdp.num_actions):
-            q_val = opt_q_table.get_q_value(state, action)
-            q_vals.append(f"A{action}={q_val:.6f}")
-        print(f"  State {state}: {', '.join(q_vals)}")
+    # Convert Q-table to greedy policy
+    greedy_policy = q_table_to_policy(opt_q_table, mdp.states, mdp.num_actions, temperature=0.0)
 
-    # Plot optimal value iteration results on network
-    plot_mdp_values(mdp, opt_values, "Optimal Value Iteration: State Values",
-                    os.path.join(output_dir, "optimal_values_network.png"))
-    plot_mdp_policy(mdp, opt_policy, "Optimal Value Iteration: Policy",
-                    os.path.join(output_dir, "optimal_policy_network.png"))
-    plot_mdp_q_values(mdp, opt_q_table, "Optimal Value Iteration: Q-Values",
-                      os.path.join(output_dir, "optimal_q_values_network.png"))
+    # Plot results
+    plot_values(mdp, opt_values, "Output: Optimal State Values from Value Iteration",
+                os.path.join(output_dir, "optimal_values.png"))
+    plot_q_values(mdp, opt_q_table, "Output: Optimal Q-Values from Value Iteration (All Actions per State)",
+                  os.path.join(output_dir, "optimal_q_values.png"))
+    plot_policy(mdp, greedy_policy, "Output: Optimal Greedy Policy from Q-Values (Temperature=0)",
+                os.path.join(output_dir, "optimal_policy.png"))
 
     # Test 3: Q-Learning
     print("\n=== Test 3: Q-Learning ===")
 
-    print("Running Q-Learning...")
-    ql_q_table, ql_policy, ql_values = q_learning(
+    ql_q_table, ql_values = q_learning(
         mdp, alpha=0.1, gamma=gamma, epsilon=0.1,
         num_episodes=5000, max_steps_per_episode=100, seed=42)
 
     print("Q-Learning Results:")
-    print("State Values:")
     for state in sorted(mdp.states):
         value = ql_values.get_value(state)
-        action = ql_policy.get_action(state)
-        print(f"  State {state}: Value={value:.6f}, Learned Action={action}")
+        print(f"  State {state}: Value={value:.6f}")
 
-    print("Q-Values:")
-    for state in sorted(mdp.states):
-        q_vals = []
-        for action in range(mdp.num_actions):
-            q_val = ql_q_table.get_q_value(state, action)
-            q_vals.append(f"A{action}={q_val:.6f}")
-        print(f"  State {state}: {', '.join(q_vals)}")
+    # Create policy from Q-learning results
+    ql_policy = q_table_to_policy(ql_q_table, mdp.states, mdp.num_actions, temperature=0.0)
 
-    # Plot Q-Learning results on network
-    plot_mdp_values(mdp, ql_values, "Q-Learning: State Values",
-                    os.path.join(output_dir, "qlearning_values_network.png"))
-    plot_mdp_policy(mdp, ql_policy, "Q-Learning: Learned Policy",
-                    os.path.join(output_dir, "qlearning_policy_network.png"))
-    plot_mdp_q_values(mdp, ql_q_table, "Q-Learning: Q-Values",
-                      os.path.join(output_dir, "qlearning_q_values_network.png"))
+    # Plot results
+    plot_values(mdp, ql_values, "Output: State Values from Q-Learning (5000 episodes, ε=0.1)",
+                os.path.join(output_dir, "qlearning_values.png"))
+    plot_q_values(mdp, ql_q_table, "Output: Learned Q-Values from Q-Learning (All Actions per State)",
+                  os.path.join(output_dir, "qlearning_q_values.png"))
+    plot_policy(mdp, ql_policy, "Output: Learned Greedy Policy from Q-Learning (Temperature=0)",
+                os.path.join(output_dir, "qlearning_policy.png"))
 
-    # Test 4: Occupancy Measure
+    # Test 4: Occupancy Measure (using random policy)
     print("\n=== Test 4: Occupancy Measure ===")
 
-    print("Computing occupancy measure for optimal policy...")
-    occupancy = compute_occupancy_measure(mdp, opt_policy, gamma, theta, max_iterations)
+    occupancy = compute_occupancy_measure(mdp, random_policy, gamma, theta, max_iterations)
 
     print("Occupancy Measure Results:")
     for state in sorted(mdp.states):
-        occ_vals = []
-        for action in range(mdp.num_actions):
-            occ_val = occupancy.get_q_value(state, action)
-            if occ_val > 1e-6:  # Only show non-zero occupancy measures
-                occ_vals.append(f"A{action}={occ_val:.6f}")
-        if occ_vals:
-            print(f"  State {state}: {', '.join(occ_vals)}")
-        else:
-            print(f"  State {state}: All zero")
+        occ_val = occupancy.get_value(state)
+        print(f"  State {state}: {occ_val:.6f}")
 
-    # Plot occupancy measure on network
-    plot_mdp_occupancy(mdp, occupancy, "Occupancy Measure: Optimal Policy",
-                       os.path.join(output_dir, "occupancy_measure_network.png"))
-
-    # Test 5: Simplified Algorithm Comparison
-    print("\n=== Test 5: Algorithm Comparison ===")
-
-    # Create a single comparison plot
-    fig, ax = plt.subplots(figsize=(16, 6))
-
-    states = sorted(mdp.states)
-    pos = {state: (state * 2, 0) for state in states}
-    G = mdp.get_graph_copy()
-
-    # Draw network structure
-    nx.draw_networkx_edges(G, pos, edge_color='#666666', alpha=0.3, arrows=True,
-                           arrowsize=12, arrowstyle='->', width=1, ax=ax)
-
-    # Draw nodes
-    nx.draw_networkx_nodes(G, pos, node_color='#DDDDDD', node_size=600,
-                           alpha=0.7, edgecolors='black', linewidths=2, ax=ax)
-
-    # Add comparison values for each state
-    for state in states:
-        x, y = pos[state]
-
-        # State label
-        ax.text(x, y, f"S{state}", ha='center', va='center',
-                fontweight='bold', fontsize=10, color='black')
-
-        # Values from different algorithms
-        pe_val = pe_values.get_value(state)
-        opt_val = opt_values.get_value(state)
-        ql_val = ql_values.get_value(state)
-
-        # Display values below node
-        ax.text(x, y - 0.8, f"PE: {pe_val:.3f}\nOpt: {opt_val:.3f}\nQL: {ql_val:.3f}",
-                ha='center', va='center', fontsize=8,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor='white',
-                          edgecolor='black', alpha=0.9))
-
-    ax.set_title('Algorithm Comparison: State Values', fontsize=14, fontweight='bold', pad=20)
-    ax.axis('equal')
-    ax.axis('off')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "algorithm_comparison_network.png"),
-                dpi=300, bbox_inches='tight', facecolor='white')
-    plt.show()
+    # Plot occupancy measure
+    plot_values(mdp, occupancy, "Output: State Occupancy Frequencies (Expected Visits under Random Policy)",
+                os.path.join(output_dir, "occupancy_measure.png"))
 
     # Print summary statistics
     print("\n=== Summary Statistics ===")
@@ -588,17 +375,16 @@ if __name__ == "__main__":
         ql_val = ql_values.get_value(state)
         pe_diff = abs(pe_val - opt_val)
         ql_diff = abs(ql_val - opt_val)
-        print(f"  State {state}: PE diff={pe_diff:.6f}, QL diff={ql_diff:.6f}")
+        print(f"  State {state}: Random Policy diff={pe_diff:.6f}, Q-Learning diff={ql_diff:.6f}")
 
     print(f"\n=== All tests completed! ===")
-    print(f"Generated network-based plots in '{output_dir}':")
-    print("- policy_evaluation_network.png")
-    print("- policy_evaluation_values_network.png")
-    print("- optimal_values_network.png")
-    print("- optimal_policy_network.png")
-    print("- optimal_q_values_network.png")
-    print("- qlearning_values_network.png")
-    print("- qlearning_policy_network.png")
-    print("- qlearning_q_values_network.png")
-    print("- occupancy_measure_network.png")
-    print("- algorithm_comparison_network.png")
+    print(f"Generated plots in '{output_dir}':")
+    print("- random_policy.png: Random policy input (action probabilities)")
+    print("- policy_evaluation_values.png: State values from evaluating random policy")
+    print("- optimal_values.png: Optimal state values from value iteration")
+    print("- optimal_q_values.png: Optimal Q-values (all actions) from value iteration")
+    print("- optimal_policy.png: Optimal greedy policy from Q-values")
+    print("- qlearning_values.png: State values learned through Q-learning")
+    print("- qlearning_q_values.png: Q-values learned through Q-learning")
+    print("- qlearning_policy.png: Greedy policy from learned Q-values")
+    print("- occupancy_measure.png: Expected state visit frequencies under random policy")
