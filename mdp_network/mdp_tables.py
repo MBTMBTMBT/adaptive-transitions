@@ -1,7 +1,7 @@
 from typing import Dict, List, Tuple, Optional, Any, Union
 import csv
 import os
-
+import scipy
 import numpy as np
 
 
@@ -656,6 +656,201 @@ class RewardDistributionTable:
 
         prob_values = {reward: count / total_count for reward, count in self.values.items()}
         return RewardDistributionTable(prob_values, delta=self.delta)
+
+    def _is_probability_distribution(self, tolerance: float = 1e-6) -> bool:
+        """
+        Check if the distribution values represent probabilities (sum ≈ 1).
+
+        Args:
+            tolerance: Tolerance for checking if sum equals 1
+
+        Returns:
+            True if this appears to be a probability distribution
+        """
+        total = self.get_total_count()
+        return abs(total - 1.0) <= tolerance
+
+    def generate_samples(self,
+                         num_samples: int = 10000,
+                         force_count: Optional[bool] = None,
+                         min_samples_per_reward: int = 1) -> np.ndarray:
+        """
+        Generate samples from the reward distribution for statistical analysis.
+
+        Args:
+            num_samples: Target number of samples to generate (used for probability distributions)
+            force_count: Force interpretation as count (True) or probability (False).
+                        If None, auto-detect based on whether sum ≈ 1
+            min_samples_per_reward: Minimum samples per reward value (for count distributions)
+
+        Returns:
+            numpy array of reward samples
+        """
+        if not self.values:
+            return np.array([])
+
+        # Determine distribution type
+        if force_count is None:
+            is_count = not self._is_probability_distribution()
+        else:
+            is_count = force_count
+
+        samples = []
+
+        if is_count:
+            # Count distribution: interpret counts as actual sample frequencies
+            print("Using exact count distribution (no sampling needed)")
+
+            for reward, count in self.values.items():
+                # For fractional counts, use probabilistic rounding
+                integer_count = int(count)
+                fractional_part = count - integer_count
+
+                # Add the integer part
+                samples.extend([reward] * integer_count)
+
+                # Add one more sample with probability equal to fractional part
+                if fractional_part > 0 and np.random.random() < fractional_part:
+                    samples.append(reward)
+
+                # Ensure minimum samples per reward
+                if len([s for s in samples if s == reward]) < min_samples_per_reward:
+                    needed = min_samples_per_reward - len([s for s in samples if s == reward])
+                    samples.extend([reward] * needed)
+
+        else:
+            # Probability distribution: generate samples proportional to probabilities
+            print(f"Generating {num_samples} samples from probability distribution")
+
+            rewards = list(self.values.keys())
+            probabilities = list(self.values.values())
+
+            # Generate samples using multinomial sampling
+            sample_counts = np.random.multinomial(num_samples, probabilities)
+
+            for reward, count in zip(rewards, sample_counts):
+                samples.extend([reward] * count)
+
+        print(f"Generated {len(samples)} samples from {len(self.values)} unique reward values")
+        return np.array(samples)
+
+    def fit_gaussian(self,
+                     num_samples: int = 10000,
+                     force_count: Optional[bool] = None,
+                     min_samples_per_reward: int = 1) -> Tuple[float, float, Dict[str, float]]:
+        """
+        Fit a Gaussian distribution to the reward distribution.
+
+        Args:
+            num_samples: Target number of samples for probability distributions
+            force_count: Force interpretation as count (True) or probability (False)
+            min_samples_per_reward: Minimum samples per reward value for count distributions
+
+        Returns:
+            Tuple of (mu, sigma, fit_statistics)
+            - mu: fitted mean
+            - sigma: fitted standard deviation
+            - fit_statistics: dictionary with fitting statistics and diagnostics
+        """
+        if not self.values:
+            return 0.0, 0.0, {'error': 'Empty distribution'}
+
+        # Determine distribution type
+        is_count = force_count if force_count is not None else not self._is_probability_distribution()
+
+        # Common fit statistics initialization
+        fit_stats = {
+            'unique_rewards': len(self.values),
+            'reward_range': (min(self.values.keys()), max(self.values.keys()))
+        }
+
+        if is_count:
+            # Direct calculation from counts
+            print("Fitting Gaussian directly from count distribution")
+
+            total_count = sum(self.values.values())
+            if total_count == 0:
+                return 0.0, 0.0, {'error': 'Zero total count'}
+
+            # Calculate weighted mean and variance
+            weighted_sum = sum(reward * count for reward, count in self.values.items())
+            mu = weighted_sum / total_count
+
+            weighted_var_sum = sum(count * (reward - mu) ** 2 for reward, count in self.values.items())
+            variance = weighted_var_sum / total_count
+            sigma = np.sqrt(variance)
+
+            # Update fit statistics
+            fit_stats.update({
+                'method': 'direct_from_counts',
+                'total_count': total_count,
+                'weighted_mean': mu,
+                'weighted_variance': variance,
+                'fitted_mu': mu,
+                'fitted_sigma': sigma
+            })
+
+            # Generate samples for KS test
+            samples = self.generate_samples(num_samples=None, force_count=True,
+                                            min_samples_per_reward=min_samples_per_reward)
+            if len(samples) > 1:
+                fit_stats.update({
+                    'num_samples': len(samples),
+                    'sample_mean': np.mean(samples),
+                    'sample_std': np.std(samples, ddof=1)
+                })
+
+                # KS test
+                ks_statistic, ks_p_value = scipy.stats.kstest(samples,
+                                                              lambda x: scipy.stats.norm.cdf(x, mu, sigma))
+                fit_stats.update({
+                    'ks_statistic': ks_statistic,
+                    'ks_p_value': ks_p_value,
+                    'ks_significant': ks_p_value < 0.05
+                })
+
+            print(f"Gaussian fit completed (direct): μ={mu:.6f}, σ={sigma:.6f}")
+            print(f"  Total count: {total_count:.1f}, KS p-value: {fit_stats.get('ks_p_value', 'N/A')}")
+
+        else:
+            # Sample-based fitting for probability distributions
+            print(f"Fitting Gaussian from {num_samples} samples")
+
+            samples = self.generate_samples(num_samples, force_count, min_samples_per_reward)
+            if len(samples) == 0:
+                return 0.0, 0.0, {'error': 'No samples generated'}
+
+            # Fit using scipy
+            mu, sigma = scipy.stats.norm.fit(samples)
+
+            # Update fit statistics
+            empirical_mean = np.mean(samples)
+            empirical_var = np.var(samples, ddof=1)
+
+            fit_stats.update({
+                'method': 'scipy_fit_from_samples',
+                'num_samples': len(samples),
+                'sample_mean': empirical_mean,
+                'sample_std': np.std(samples, ddof=1),
+                'fitted_mu': mu,
+                'fitted_sigma': sigma,
+                'mean_difference': abs(mu - empirical_mean),
+                'variance_ratio': (sigma ** 2) / empirical_var if empirical_var > 0 else float('inf')
+            })
+
+            # KS test
+            ks_statistic, ks_p_value = scipy.stats.kstest(samples,
+                                                          lambda x: scipy.stats.norm.cdf(x, mu, sigma))
+            fit_stats.update({
+                'ks_statistic': ks_statistic,
+                'ks_p_value': ks_p_value,
+                'ks_significant': ks_p_value < 0.05
+            })
+
+            print(f"Gaussian fit completed (sampled): μ={mu:.6f}, σ={sigma:.6f}")
+            print(f"  Samples: {len(samples)}, KS p-value: {ks_p_value:.6f}")
+
+        return mu, sigma, fit_stats
 
     def export_to_csv(self, file_path: str):
         """

@@ -222,11 +222,63 @@ if __name__ == "__main__":
             print("Reward Probability Distribution:")
             print(reward_prob_dist)
 
+        # Test 6: Gaussian Fitting for Reward Distribution
+        print("\n=== Test 6: Gaussian Fitting for Reward Distribution ===")
+
+        # Fit Gaussian to count distribution (more accurate)
+        mu_count, sigma_count, fit_stats_count = reward_count_dist.fit_gaussian(force_count=True)
+
+        print("Gaussian Fitting Results (Count Distribution):")
+        print(f"  Fitted parameters: μ={mu_count:.6f}, σ={sigma_count:.6f}")
+        print(f"  Method: {fit_stats_count.get('method', 'N/A')}")
+        print(f"  Total count: {fit_stats_count.get('total_count', 'N/A')}")
+        print(f"  Unique rewards: {fit_stats_count.get('unique_rewards', 'N/A')}")
+        print(f"  Reward range: {fit_stats_count.get('reward_range', 'N/A')}")
+
+        if 'ks_p_value' in fit_stats_count:
+            ks_result = "GOOD" if fit_stats_count['ks_p_value'] > 0.05 else "POOR"
+            print(f"  KS test p-value: {fit_stats_count['ks_p_value']:.6f} ({ks_result} fit)")
+
+        if 'sample_mean' in fit_stats_count and 'sample_std' in fit_stats_count:
+            print(
+                f"  Sample statistics: mean={fit_stats_count['sample_mean']:.6f}, std={fit_stats_count['sample_std']:.6f}")
+
+        # Save Gaussian fitting results to text file
+        gaussian_results_path = os.path.join(output_dir, f"{prefix}_{i}_gaussian_fit_results.txt")
+        with open(gaussian_results_path, 'w') as f:
+            f.write(f"Gaussian Fitting Results for {prefix}_{i}\n")
+            f.write("=" * 50 + "\n\n")
+            f.write("Count Distribution Gaussian Fit:\n")
+            f.write(f"  Fitted μ (mean): {mu_count:.6f}\n")
+            f.write(f"  Fitted σ (std):  {sigma_count:.6f}\n")
+            f.write(f"  Method: {fit_stats_count.get('method', 'N/A')}\n")
+            f.write(f"  Total count: {fit_stats_count.get('total_count', 'N/A')}\n")
+            f.write(f"  Unique rewards: {fit_stats_count.get('unique_rewards', 'N/A')}\n")
+            f.write(f"  Reward range: {fit_stats_count.get('reward_range', 'N/A')}\n")
+
+            if 'ks_p_value' in fit_stats_count:
+                f.write(f"  KS test statistic: {fit_stats_count.get('ks_statistic', 'N/A'):.6f}\n")
+                f.write(f"  KS test p-value: {fit_stats_count['ks_p_value']:.6f}\n")
+                f.write(f"  KS test significant: {fit_stats_count.get('ks_significant', 'N/A')}\n")
+
+            if 'sample_mean' in fit_stats_count:
+                f.write(f"  Sample mean: {fit_stats_count['sample_mean']:.6f}\n")
+                f.write(f"  Sample std: {fit_stats_count['sample_std']:.6f}\n")
+                f.write(f"  Weighted mean: {fit_stats_count.get('weighted_mean', 'N/A'):.6f}\n")
+                f.write(f"  Weighted variance: {fit_stats_count.get('weighted_variance', 'N/A'):.6f}\n")
+
+            f.write("\nAll Fit Statistics:\n")
+            for key, value in fit_stats_count.items():
+                f.write(f"  {key}: {value}\n")
+
+        print(f"Gaussian fitting results saved to: {gaussian_results_path}")
+
         # Print summary statistics
         print(f"\n=== Summary Statistics for {prefix} ===")
         print(f"Total states: {len(mdp.states)}")
         print(f"Terminal states: {len(mdp.terminal_states)}")
         print(f"Actions available: {mdp.num_actions}")
+        print(f"Gaussian fit: μ={mu_count:.4f}, σ={sigma_count:.4f}")
 
         print("Value differences (vs Optimal):")
         for state in sorted(mdp.states)[:5]:
@@ -238,7 +290,8 @@ if __name__ == "__main__":
             print(f"  State {state}: Random Policy diff={pe_diff:.6f}, Q-Learning diff={ql_diff:.6f}")
 
     print(f"\n=== All tests completed! ===")
-    print(f"Generated plots, CSV files, and JSON networks in '{output_dir}' with prefixes: {prefixes}")
+    print(
+        f"Generated plots, CSV files, JSON networks, and Gaussian fit results in '{output_dir}' with prefixes: {prefixes}")
 
     print("\nGenerated JSON files (MDP Networks):")
     json_files = []
@@ -267,3 +320,11 @@ if __name__ == "__main__":
 
     for csv_file in csv_files:
         print(f"  - {csv_file}")
+
+    print("\nGenerated Gaussian Fit Result files:")
+    gaussian_files = []
+    for i, prefix in enumerate(prefixes):
+        gaussian_files.append(f"{prefix}_{i}_gaussian_fit_results.txt")
+
+    for gaussian_file in gaussian_files:
+        print(f"  - {gaussian_file}")
