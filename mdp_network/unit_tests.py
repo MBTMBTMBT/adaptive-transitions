@@ -23,28 +23,49 @@ if __name__ == "__main__":
     output_dir = ensure_output_dir("./outputs")
     print(f"Output directory: {output_dir}\n")
 
-    # Test configurations
+    # Test configurations - ordered from small to large
     mdps = []
     prefixes = []
 
-    # Load the chain MDP
+    # Load the chain MDP (smallest)
     mdps.append(MDPNetwork(config_path="./mdps/chain.json"))
     prefixes.append("chain")
 
-    # Sample MDP from environment
-    env = CustomMiniGridEnv(
-        json_file_path='../customisable_minigrid/maps/door-key-no-random.json',
-        config=None,
-        display_size=None,
-        display_mode="middle",
-        random_rotate=False,
-        random_flip=False,
-        render_carried_objs=True,
-        render_mode="rgb_array",
-    )
-    sampled_mdp, int_to_string, string_to_int = deterministic_mdp_sampling(env, )
-    mdps.append(sampled_mdp)
-    prefixes.append("sampled")
+    # Sample MDPs from environments (small to large)
+    env_configs = [
+        {
+            'path': '../customisable_minigrid/maps/door-key-no-random-3x6.json',
+            'prefix': 'sampled_3x6'
+        },
+        {
+            'path': '../customisable_minigrid/maps/door-key-no-random-4x7.json',
+            'prefix': 'sampled_4x7'
+        },
+        {
+            'path': '../customisable_minigrid/maps/door-key-no-random-5x9.json',
+            'prefix': 'sampled_5x9'
+        }
+    ]
+
+    for env_config in env_configs:
+        try:
+            env = CustomMiniGridEnv(
+                json_file_path=env_config['path'],
+                config=None,
+                display_size=None,
+                display_mode="middle",
+                random_rotate=False,
+                random_flip=False,
+                render_carried_objs=True,
+                render_mode="rgb_array",
+            )
+            sampled_mdp, int_to_string, string_to_int = deterministic_mdp_sampling(env)
+            mdps.append(sampled_mdp)
+            prefixes.append(env_config['prefix'])
+            print(f"Successfully loaded environment: {env_config['path']}")
+        except Exception as e:
+            print(f"Warning: Could not load environment {env_config['path']}: {e}")
+            continue
 
     # Common parameters
     gamma = 0.99
@@ -266,9 +287,11 @@ if __name__ == "__main__":
 
         if 'error' not in surprise_results:
             print("Information Surprise Results:")
-            print(f"  Total Information Surprise: {surprise_results['total_information_surprise']:.6f}")
+            print(f"  Total Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}")
+            print(f"  Total Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}")
             print(f"  Most surprising terminal state: {surprise_results['max_surprise_state']}")
-            print(f"  Maximum surprise value: {surprise_results['max_surprise_value']:.6f}")
+            print(f"  Maximum surprise value (KL): {surprise_results['max_surprise_value_kl']:.6f}")
+            print(f"  Maximum surprise value (-logP): {surprise_results['max_surprise_value_nll']:.6f}")
 
             # Save surprise analysis results
             surprise_results_path = os.path.join(output_dir, f"{prefix}_{i}_information_surprise.txt")
@@ -278,11 +301,12 @@ if __name__ == "__main__":
                 f.write(
                     f"Prior Distribution: μ={surprise_results['prior_mu']:.6f}, σ={surprise_results['prior_sigma']:.6f}\n")
                 f.write(f"Observation σ: {surprise_results['observation_sigma']:.6f}\n")
-                f.write(f"Total Information Surprise: {surprise_results['total_information_surprise']:.6f}\n")
+                f.write(f"Total Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}\n")
+                f.write(f"Total Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}\n")
                 f.write(f"Number of Terminal States: {surprise_results['num_terminal_states']}\n\n")
 
-                f.write("Terminal State Analysis (sorted by surprise):\n")
-                f.write("-" * 50 + "\n")
+                f.write("Terminal State Analysis (sorted by -logP surprise):\n")
+                f.write("-" * 70 + "\n")
                 for info in surprise_results['terminal_state_analysis']:
                     f.write(f"State {info['state']}:\n")
                     f.write(f"  Reward: {info['reward']:.6f}\n")
@@ -290,7 +314,9 @@ if __name__ == "__main__":
                     f.write(f"  Posterior μ: {info['posterior_mu']:.6f}\n")
                     f.write(f"  Posterior σ: {info['posterior_sigma']:.6f}\n")
                     f.write(f"  KL Divergence: {info['kl_divergence']:.6f}\n")
-                    f.write(f"  Weighted Surprise: {info['weighted_surprise']:.6f}\n")
+                    f.write(f"  Weighted KL: {info['weighted_kl']:.6f}\n")
+                    f.write(f"  -log P(reward): {info['negative_log_likelihood']:.6f}\n")
+                    f.write(f"  Weighted -logP: {info['weighted_nll']:.6f}\n")
                     f.write("\n")
 
             print(f"Information surprise analysis saved to: {surprise_results_path}")
@@ -304,7 +330,8 @@ if __name__ == "__main__":
         print(f"Actions available: {mdp.num_actions}")
         print(f"Gaussian fit: μ={mu_count:.4f}, σ={sigma_count:.4f}")
         if 'error' not in surprise_results:
-            print(f"Information Surprise: {surprise_results['total_information_surprise']:.6f}")
+            print(f"Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}")
+            print(f"Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}")
 
         print("Value differences (vs Optimal):")
         for state in sorted(mdp.states)[:5]:

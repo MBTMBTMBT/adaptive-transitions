@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Union
+from scipy.stats import norm
 
 from mdp_network import MDPNetwork
 from mdp_tables import ValueTable
@@ -128,7 +129,7 @@ def compute_information_surprise(mdp: MDPNetwork,
                                prior_sigma: float,
                                observation_sigma: float = 0.1) -> dict:
     """
-    Compute information surprise for terminal states using Bayesian updates and KL divergence.
+    Compute information surprise for terminal states using both KL divergence and negative log-likelihood.
 
     Args:
         mdp: MDP network
@@ -138,7 +139,7 @@ def compute_information_surprise(mdp: MDPNetwork,
         observation_sigma: Standard deviation for reward observations
 
     Returns:
-        Dictionary containing surprise analysis results
+        Dictionary containing surprise analysis results (both KL and -log)
     """
     # Find terminal states and their rewards
     terminal_states = list(mdp.terminal_states)
@@ -149,13 +150,14 @@ def compute_information_surprise(mdp: MDPNetwork,
 
     # Collect terminal state information
     terminal_info = []
-    total_weighted_surprise = 0.0
+    total_weighted_kl = 0.0
+    total_weighted_nll = 0.0
 
     for state in terminal_states:
         # Get state occupancy
         state_occupancy = occupancy.get_value(state)
 
-        # Get reward for this terminal state using the correct method
+        # Get reward for this terminal state
         reward = mdp.get_state_reward(state)
 
         # Perform Bayesian update
@@ -168,9 +170,15 @@ def compute_information_surprise(mdp: MDPNetwork,
             posterior_mu, posterior_sigma, prior_mu, prior_sigma
         )
 
-        # Weighted surprise contribution
-        weighted_surprise = kl_divergence * state_occupancy
-        total_weighted_surprise += weighted_surprise
+        # Compute negative log-likelihood of reward under prior distribution
+        nll = -np.log(max(norm.pdf(reward, loc=prior_mu, scale=prior_sigma), 1e-8))
+
+        # Weighted surprise contributions
+        weighted_kl = kl_divergence * state_occupancy
+        weighted_nll = nll * state_occupancy
+
+        total_weighted_kl += weighted_kl
+        total_weighted_nll += weighted_nll
 
         terminal_info.append({
             'state': state,
@@ -179,28 +187,34 @@ def compute_information_surprise(mdp: MDPNetwork,
             'posterior_mu': posterior_mu,
             'posterior_sigma': posterior_sigma,
             'kl_divergence': kl_divergence,
-            'weighted_surprise': weighted_surprise
+            'weighted_kl': weighted_kl,
+            'negative_log_likelihood': nll,
+            'weighted_nll': weighted_nll
         })
 
         print(f"  State {state}: reward={reward:.4f}, occupancy={state_occupancy:.6f}, "
-              f"KL={kl_divergence:.6f}, weighted_surprise={weighted_surprise:.6f}")
+              f"KL={kl_divergence:.6f}, weighted_kl={weighted_kl:.6f}, "
+              f"-logP={nll:.6f}, weighted_nll={weighted_nll:.6f}")
 
-    # Sort by weighted surprise (descending)
-    terminal_info.sort(key=lambda x: x['weighted_surprise'], reverse=True)
+    # Sort by weighted NLL (descending)
+    terminal_info.sort(key=lambda x: x['weighted_nll'], reverse=True)
 
     results = {
         'prior_mu': prior_mu,
         'prior_sigma': prior_sigma,
         'observation_sigma': observation_sigma,
-        'total_information_surprise': total_weighted_surprise,
+        'total_information_surprise_kl': total_weighted_kl,
+        'total_information_surprise_nll': total_weighted_nll,
         'num_terminal_states': len(terminal_states),
         'terminal_state_analysis': terminal_info,
         'max_surprise_state': terminal_info[0]['state'] if terminal_info else None,
-        'max_surprise_value': terminal_info[0]['weighted_surprise'] if terminal_info else 0.0
+        'max_surprise_value_nll': terminal_info[0]['weighted_nll'] if terminal_info else 0.0,
+        'max_surprise_value_kl': terminal_info[0]['weighted_kl'] if terminal_info else 0.0
     }
 
-    print(f"Total Information Surprise: {total_weighted_surprise:.6f}")
-    print(f"Most surprising state: {results['max_surprise_state']} "
-          f"(surprise={results['max_surprise_value']:.6f})")
+    print(f"Total Information Surprise (KL): {total_weighted_kl:.6f}")
+    print(f"Total Information Surprise (-logP): {total_weighted_nll:.6f}")
+    print(f"Most surprising state (by -logP): {results['max_surprise_state']} "
+          f"(surprise={results['max_surprise_value_nll']:.6f})")
 
     return results
