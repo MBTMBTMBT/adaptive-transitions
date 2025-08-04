@@ -116,27 +116,32 @@ class MDPNetwork:
                 edge_data = self.graph[state][next_state]
                 if 'transitions' in edge_data:
                     for action, prob in edge_data['transitions'].items():
-                        if str(action) not in state_transitions:
-                            state_transitions[str(action)] = {}
-                        state_transitions[str(action)][str(next_state)] = prob
+                        action_str = str(int(action))  # Ensure string conversion
+                        next_state_str = str(int(next_state))  # Ensure string conversion
+                        prob_float = float(prob)  # Ensure float conversion
+
+                        if action_str not in state_transitions:
+                            state_transitions[action_str] = {}
+                        state_transitions[action_str][next_state_str] = prob_float
 
             if state_transitions:
-                transitions[str(state)] = state_transitions
+                transitions[str(int(state))] = state_transitions
 
         # Reconstruct state rewards (only non-default ones)
         state_rewards = {}
         for state in self.states:
             reward = self.graph.nodes[state]['reward']
-            if reward != self.default_reward:
-                state_rewards[str(state)] = reward
+            reward_float = float(reward)  # Ensure float conversion
+            if reward_float != self.default_reward:
+                state_rewards[str(int(state))] = reward_float
 
-        # Create export configuration
+        # Create export configuration with explicit type conversions
         export_config = {
-            "num_actions": self.num_actions,
-            "states": self.states,
-            "start_states": self.start_states,
-            "terminal_states": list(self.terminal_states),
-            "default_reward": self.default_reward,
+            "num_actions": int(self.num_actions),
+            "states": [int(s) for s in self.states],
+            "start_states": [int(s) for s in self.start_states],
+            "terminal_states": [int(s) for s in self.terminal_states],
+            "default_reward": float(self.default_reward),
             "state_rewards": state_rewards,
             "transitions": transitions
         }

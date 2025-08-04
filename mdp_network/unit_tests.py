@@ -65,7 +65,7 @@ if __name__ == "__main__":
     prefixes.append("sampled")
 
     # Common parameters
-    gamma = 0.9
+    gamma = 0.99
     theta = 1e-6
     max_iterations = 1000
 
@@ -77,6 +77,11 @@ if __name__ == "__main__":
         print(f"Loaded MDP with {len(mdp.states)} states and {mdp.num_actions} actions")
         print(f"Start states: {mdp.start_states}")
         print(f"Terminal states: {list(mdp.terminal_states)}")
+
+        # Export MDP network to JSON
+        mdp_json_path = os.path.join(output_dir, f"{prefix}_{i}_mdp_network.json")
+        mdp.export_to_json(mdp_json_path)
+        print(f"Exported MDP network to: {mdp_json_path}")
 
         # Check if MDP is large (>100 states) to decide whether to plot or print
         use_plots = len(mdp.states) <= 100
@@ -196,6 +201,27 @@ if __name__ == "__main__":
             print("Occupancy Measure:")
             print(occupancy)
 
+        # Test 5: Reward Distribution
+        print("\n=== Test 5: Reward Distribution ===")
+        reward_count_dist, reward_prob_dist = compute_reward_distribution(mdp, occupancy, delta=1e-6)
+
+        print("Reward Distribution Results:")
+        print("Reward Count Distribution:")
+        print(reward_count_dist)
+        print("Reward Probability Distribution:")
+        print(reward_prob_dist)
+
+        # Save CSV files for Reward Distribution
+        reward_count_dist.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_reward_count_distribution.csv"))
+        reward_prob_dist.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_reward_prob_distribution.csv"))
+
+        # Print reward distribution tables if not too large
+        if not use_plots or len(reward_count_dist.get_all_rewards()) <= 20:
+            print("Reward Count Distribution:")
+            print(reward_count_dist)
+            print("Reward Probability Distribution:")
+            print(reward_prob_dist)
+
         # Print summary statistics
         print(f"\n=== Summary Statistics for {prefix} ===")
         print(f"Total states: {len(mdp.states)}")
@@ -212,7 +238,16 @@ if __name__ == "__main__":
             print(f"  State {state}: Random Policy diff={pe_diff:.6f}, Q-Learning diff={ql_diff:.6f}")
 
     print(f"\n=== All tests completed! ===")
-    print(f"Generated plots and CSV files in '{output_dir}' with prefixes: {prefixes}")
+    print(f"Generated plots, CSV files, and JSON networks in '{output_dir}' with prefixes: {prefixes}")
+
+    print("\nGenerated JSON files (MDP Networks):")
+    json_files = []
+    for i, prefix in enumerate(prefixes):
+        json_files.append(f"{prefix}_{i}_mdp_network.json")
+
+    for json_file in json_files:
+        print(f"  - {json_file}")
+
     print("\nGenerated CSV files:")
     csv_files = []
     for i, prefix in enumerate(prefixes):
@@ -225,7 +260,9 @@ if __name__ == "__main__":
             f"{prefix}_{i}_qlearning_values.csv",
             f"{prefix}_{i}_qlearning_q_values.csv",
             f"{prefix}_{i}_qlearning_policy.csv",
-            f"{prefix}_{i}_occupancy_measure.csv"
+            f"{prefix}_{i}_occupancy_measure.csv",
+            f"{prefix}_{i}_reward_count_distribution.csv",
+            f"{prefix}_{i}_reward_prob_distribution.csv"
         ])
 
     for csv_file in csv_files:

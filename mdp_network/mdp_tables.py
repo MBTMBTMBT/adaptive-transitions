@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 import csv
 import os
 
@@ -544,3 +544,189 @@ def q_table_to_policy(q_table: QTable,
         policy.set_action_probabilities(state, action_probs)
 
     return policy
+
+
+class RewardDistributionTable:
+    """
+    Reward distribution table representation for MDP reward analysis.
+    Supports both count-based and probability-based distributions.
+    Handles float reward values with configurable precision delta.
+    """
+
+    def __init__(self, values: Optional[Dict[float, Union[int, float]]] = None, delta: float = 0.01):
+        """
+        Initialize Reward Distribution table.
+
+        Args:
+            values: Dictionary mapping reward -> count/probability
+            delta: Precision delta for grouping similar reward values
+        """
+        self.values = values if values is not None else {}
+        self.delta = delta
+
+    def _round_reward(self, reward: float) -> float:
+        """
+        Round reward value to the nearest multiple of delta for grouping.
+
+        Args:
+            reward: Raw reward value
+
+        Returns:
+            Rounded reward value for use as dictionary key
+        """
+        if self.delta <= 0:
+            return reward
+        return round(reward / self.delta) * self.delta
+
+    def add_count(self, reward: float, count: Union[int, float]):
+        """
+        Add count for a reward value.
+
+        Args:
+            reward: Reward value
+            count: Count or probability to add
+        """
+        rounded_reward = self._round_reward(reward)
+        if rounded_reward in self.values:
+            self.values[rounded_reward] += count
+        else:
+            self.values[rounded_reward] = count
+
+    def get_value(self, reward: float) -> Union[int, float]:
+        """
+        Get count/probability for a reward value.
+
+        Args:
+            reward: Reward value
+
+        Returns:
+            Count or probability for the reward
+        """
+        rounded_reward = self._round_reward(reward)
+        return self.values.get(rounded_reward, 0.0)
+
+    def set_value(self, reward: float, value: Union[int, float]):
+        """
+        Set count/probability for a reward value.
+
+        Args:
+            reward: Reward value
+            value: Count or probability to set
+        """
+        rounded_reward = self._round_reward(reward)
+        self.values[rounded_reward] = value
+
+    def get_total_count(self) -> Union[int, float]:
+        """
+        Get total count/probability across all rewards.
+
+        Returns:
+            Sum of all values in the distribution
+        """
+        return sum(self.values.values())
+
+    def get_most_frequent_reward(self) -> Tuple[float, Union[int, float]]:
+        """
+        Get the reward with highest count/probability and its value.
+
+        Returns:
+            Tuple of (most_frequent_reward, highest_count)
+        """
+        if not self.values:
+            return 0.0, 0.0
+
+        best_reward = max(self.values, key=self.values.get)
+        best_count = self.values[best_reward]
+        return best_reward, best_count
+
+    def get_all_rewards(self) -> List[float]:
+        """Get all reward values in the distribution table."""
+        return list(self.values.keys())
+
+    def normalize_to_probabilities(self) -> 'RewardDistributionTable':
+        """
+        Convert count-based distribution to probability distribution.
+
+        Returns:
+            New RewardDistributionTable with normalized probabilities
+        """
+        total_count = self.get_total_count()
+        if total_count == 0:
+            return RewardDistributionTable(delta=self.delta)
+
+        prob_values = {reward: count / total_count for reward, count in self.values.items()}
+        return RewardDistributionTable(prob_values, delta=self.delta)
+
+    def export_to_csv(self, file_path: str):
+        """
+        Export Reward Distribution table to CSV file.
+        CSV format: reward,count_or_probability
+        """
+        with open(file_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['reward', 'count_or_probability'])
+
+            for reward in sorted(self.values.keys()):
+                writer.writerow([reward, self.values[reward]])
+
+    def import_from_csv(self, file_path: str):
+        """
+        Import Reward Distribution table from CSV file.
+        CSV format: reward,count_or_probability
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"CSV file not found: {file_path}")
+
+        self.values = {}
+
+        with open(file_path, 'r') as csvfile:
+            reader = csv.DictReader(csvfile)
+
+            for row in reader:
+                reward = float(row['reward'])
+                value = float(row['count_or_probability'])
+                # Use add_count to ensure proper rounding
+                self.add_count(reward, value)
+
+    def __str__(self, max_rewards: int = 20, precision: int = 4) -> str:
+        """
+        String representation of Reward Distribution table.
+
+        Args:
+            max_rewards: Maximum number of rewards to display
+            precision: Number of decimal places for display
+        """
+        if not self.values:
+            return "Reward Distribution Table: Empty"
+
+        rewards = sorted(self.values.keys())
+        total_rewards = len(rewards)
+        total_count = self.get_total_count()
+
+        result = f"Reward Distribution Table ({total_rewards} unique rewards, total: {total_count:.{precision}f}):\n"
+        result += f"Delta precision: {self.delta:.2e}\n\n"
+
+        # Show statistics
+        if rewards:
+            min_reward = min(rewards)
+            max_reward = max(rewards)
+
+            # Calculate weighted average reward
+            weighted_sum = sum(reward * count for reward, count in self.values.items())
+            avg_reward = weighted_sum / total_count if total_count > 0 else 0.0
+
+            result += f"Stats: Min Reward={min_reward:.{precision}f}, Max Reward={max_reward:.{precision}f}, "
+            result += f"Weighted Avg={avg_reward:.{precision}f}\n\n"
+
+        # Display rewards and their counts/probabilities
+        display_rewards = rewards[:max_rewards]
+
+        for reward in display_rewards:
+            count = self.values[reward]
+            percentage = (count / total_count * 100) if total_count > 0 else 0.0
+            result += f"Reward {reward:>{precision + 3}.{precision}f}: {count:>{precision + 3}.{precision}f} ({percentage:5.1f}%)\n"
+
+        if total_rewards > max_rewards:
+            result += f"\n... and {total_rewards - max_rewards} more reward values"
+
+        return result

@@ -75,7 +75,7 @@ def plot_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str, sa
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-    plt.show()
+    # plt.show()
 
 
 def plot_policy(mdp_network: MDPNetwork, policy_table: PolicyTable, title: str, save_path: Optional[str] = None):
@@ -155,7 +155,7 @@ def plot_policy(mdp_network: MDPNetwork, policy_table: PolicyTable, title: str, 
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-    plt.show()
+    # plt.show()
 
 
 def plot_q_values(mdp_network: MDPNetwork, q_table: QTable, title: str, save_path: Optional[str] = None):
@@ -235,4 +235,4 @@ def plot_q_values(mdp_network: MDPNetwork, q_table: QTable, title: str, save_pat
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-    plt.show()
+    # plt.show()

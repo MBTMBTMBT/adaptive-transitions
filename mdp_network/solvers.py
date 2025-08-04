@@ -1,12 +1,13 @@
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
-from mdp_tables import QTable, ValueTable, PolicyTable
+
+from mdp_tables import QTable, ValueTable, PolicyTable, RewardDistributionTable
 from mdp_network import MDPNetwork
 
 
 def policy_evaluation(mdp_network: MDPNetwork,
                       policy: PolicyTable,
-                      gamma: float = 0.9,
+                      gamma: float = 0.99,
                       theta: float = 1e-6,
                       max_iterations: int = 1000) -> ValueTable:
     """
@@ -103,7 +104,7 @@ def policy_evaluation(mdp_network: MDPNetwork,
 
 
 def optimal_value_iteration(mdp_network: MDPNetwork,
-                            gamma: float = 0.9,
+                            gamma: float = 0.99,
                             theta: float = 1e-6,
                             max_iterations: int = 1000) -> Tuple[ValueTable, QTable]:
     """
@@ -203,7 +204,7 @@ def optimal_value_iteration(mdp_network: MDPNetwork,
 
 def q_learning(mdp_network: MDPNetwork,
                alpha: float = 0.1,
-               gamma: float = 0.9,
+               gamma: float = 0.99,
                epsilon: float = 0.1,
                num_episodes: int = 10000,
                max_steps_per_episode: int = 1000,
@@ -313,7 +314,7 @@ def q_learning(mdp_network: MDPNetwork,
 
 def compute_occupancy_measure(mdp_network: MDPNetwork,
                               policy: PolicyTable,
-                              gamma: float = 0.9,
+                              gamma: float = 0.99,
                               theta: float = 1e-6,
                               max_iterations: int = 1000) -> ValueTable:
     """
@@ -355,10 +356,10 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
 
         # For each state in current distribution
         for state, state_prob in current_distribution.items():
-            if state_prob <= 0 or mdp_network.is_terminal_state(state):
+            if state_prob <= 0:
                 continue
 
-            # Update occupancy measure for this state
+            # Update occupancy measure for this state (including terminal states)
             old_occupancy = occupancy_table.get_value(state)
             new_occupancy = old_occupancy + state_prob
             occupancy_table.set_value(state, new_occupancy)
@@ -366,6 +367,10 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
             # Track maximum change for convergence
             change = abs(new_occupancy - old_occupancy)
             max_change = max(max_change, change)
+
+            # Terminal states don't propagate probability to next states
+            if mdp_network.is_terminal_state(state):
+                continue
 
             # Get action probabilities from policy
             action_probs = policy.get_action_probabilities(state)
@@ -384,10 +389,9 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
 
                 # Propagate probability to next states with discount factor
                 for next_state, transition_prob in transition_probs.items():
-                    if not mdp_network.is_terminal_state(next_state):
-                        # Discounted probability of reaching next state
-                        propagated_prob = state_prob * action_prob * transition_prob * gamma
-                        next_distribution[next_state] += propagated_prob
+                    # Discounted probability of reaching next state
+                    propagated_prob = state_prob * action_prob * transition_prob * gamma
+                    next_distribution[next_state] += propagated_prob
 
         # Update current distribution for next iteration
         current_distribution = next_distribution
@@ -408,9 +412,71 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
         print(f"Occupancy measure computation reached maximum iterations ({max_iterations})")
         print(f"  Final: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
 
-    # Ensure terminal states have zero occupancy
-    for state in states:
-        if mdp_network.is_terminal_state(state):
-            occupancy_table.set_value(state, 0.0)
+    # Remove the line that forces terminal states to zero - they should keep their occupancy!
+    # The terminal states now correctly maintain their visit counts
 
     return occupancy_table
+
+
+def compute_reward_distribution(mdp_network: MDPNetwork,
+                                occupancy_table: 'ValueTable',
+                                delta: float = 0.01) -> Tuple['RewardDistributionTable', 'RewardDistributionTable']:
+    """
+    Compute reward distribution from MDP network and occupancy table.
+
+    Combines state rewards with their occupancy measures to create:
+    1. Count distribution: total expected visits for each reward value
+    2. Probability distribution: normalized probabilities for each reward value
+
+    Args:
+        mdp_network: MDP network containing state rewards
+        occupancy_table: Table containing expected visit counts for each state
+        delta: Precision delta for grouping similar reward values
+
+    Returns:
+        Tuple of (count_distribution, probability_distribution)
+        - count_distribution: RewardDistributionTable with expected visit counts per reward
+        - probability_distribution: RewardDistributionTable with normalized probabilities
+    """
+    print(f"Computing reward distribution with delta precision: {delta:.2e}")
+
+    # Initialize count-based distribution table
+    count_distribution = RewardDistributionTable(delta=delta)
+
+    # Get all states from the MDP
+    states = mdp_network.states
+    processed_states = 0
+
+    print(f"Processing {len(states)} states...")
+
+    # For each state, get its reward and occupancy measure
+    for state in states:
+        # Get state reward from MDP network
+        state_reward = mdp_network.get_state_reward(state)
+
+        # Get occupancy measure (expected visit count) for this state
+        occupancy = occupancy_table.get_value(state)
+
+        # Add to count distribution (accumulate occupancy for this reward value)
+        if occupancy > 0:  # Only consider states that are actually visited
+            count_distribution.add_count(state_reward, occupancy)
+            processed_states += 1
+
+    print(f"Processed {processed_states} states with positive occupancy")
+
+    # Create probability distribution by normalizing the count distribution
+    probability_distribution = count_distribution.normalize_to_probabilities()
+
+    # Print summary statistics
+    total_occupancy = count_distribution.get_total_count()
+    num_unique_rewards = len(count_distribution.get_all_rewards())
+
+    print(f"Reward distribution computed:")
+    print(f"  Total occupancy: {total_occupancy:.6f}")
+    print(f"  Unique reward values: {num_unique_rewards}")
+
+    if num_unique_rewards > 0:
+        most_frequent_reward, highest_count = count_distribution.get_most_frequent_reward()
+        print(f"  Most frequent reward: {most_frequent_reward:.6f} (count: {highest_count:.6f})")
+
+    return count_distribution, probability_distribution
