@@ -1,17 +1,12 @@
 import os
-import sys
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
 from plots import plot_values, plot_policy, plot_q_values
 from mdp_tables import q_table_to_policy
 from solvers import *
-from customisable_minigrid.minigrid.customisable_minigrid_env import CustomMiniGridEnv
-from samplers import sample_mdp_network_deterministic
+from customisable_minigrid.customisable_minigrid_env import CustomMiniGridEnv
+from samplers import deterministic_mdp_sampling
 
 
-def ensure_output_dir(output_dir: str = "output_plots"):
+def ensure_output_dir(output_dir: str = "./outputs"):
     """Create output directory if it doesn't exist."""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -43,7 +38,7 @@ if __name__ == "__main__":
     print("=== MDP Solver Unit Tests with Network Visualization ===\n")
 
     # Create output directory
-    output_dir = ensure_output_dir("output_plots")
+    output_dir = ensure_output_dir("./outputs")
     print(f"Output directory: {output_dir}\n")
 
     # Test configurations
@@ -56,7 +51,7 @@ if __name__ == "__main__":
 
     # Sample MDP from environment
     env = CustomMiniGridEnv(
-        json_file_path='customisable_minigrid/maps/door-key-no-random.json',
+        json_file_path='../customisable_minigrid/maps/door-key-no-random.json',
         config=None,
         display_size=None,
         display_mode="middle",
@@ -65,7 +60,7 @@ if __name__ == "__main__":
         render_carried_objs=True,
         render_mode="rgb_array",
     )
-    sampled_mdp, int_to_string, string_to_int = sample_mdp_network_deterministic(env, max_states=500)
+    sampled_mdp, int_to_string, string_to_int = deterministic_mdp_sampling(env, )
     mdps.append(sampled_mdp)
     prefixes.append("sampled")
 
@@ -83,6 +78,9 @@ if __name__ == "__main__":
         print(f"Start states: {mdp.start_states}")
         print(f"Terminal states: {list(mdp.terminal_states)}")
 
+        # Check if MDP is large (>100 states) to decide whether to plot or print
+        use_plots = len(mdp.states) <= 100
+
         # Create a random policy
         random_policy = create_random_policy(mdp)
 
@@ -94,11 +92,21 @@ if __name__ == "__main__":
             value = pe_values.get_value(state)
             print(f"  State {state}: {value:.6f}")
 
-        # Plot results
-        plot_policy(mdp, random_policy, "Input: Random Probabilistic Policy",
-                    os.path.join(output_dir, f"{prefix}_random_policy.png"))
-        plot_values(mdp, pe_values, "Output: State Values from Policy Evaluation",
-                    os.path.join(output_dir, f"{prefix}_policy_evaluation_values.png"))
+        # Save CSV files for Policy Evaluation
+        random_policy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_random_policy.csv"))
+        pe_values.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_policy_evaluation_values.csv"))
+
+        # Plot or print results
+        if use_plots:
+            plot_policy(mdp, random_policy, "Input: Random Probabilistic Policy",
+                        os.path.join(output_dir, f"{prefix}_{i}_random_policy.png"))
+            plot_values(mdp, pe_values, "Output: State Values from Policy Evaluation",
+                        os.path.join(output_dir, f"{prefix}_{i}_policy_evaluation_values.png"))
+        else:
+            print("Random Policy:")
+            print(random_policy)
+            print("Policy Evaluation Values:")
+            print(pe_values)
 
         # Test 2: Optimal Value Iteration
         print("\n=== Test 2: Optimal Value Iteration ===")
@@ -112,13 +120,26 @@ if __name__ == "__main__":
         # Convert Q-table to greedy policy
         greedy_policy = q_table_to_policy(opt_q_table, mdp.states, mdp.num_actions, temperature=0.0)
 
-        # Plot results
-        plot_values(mdp, opt_values, "Output: Optimal State Values from Value Iteration",
-                    os.path.join(output_dir, f"{prefix}_optimal_values.png"))
-        plot_q_values(mdp, opt_q_table, "Output: Optimal Q-Values from Value Iteration",
-                      os.path.join(output_dir, f"{prefix}_optimal_q_values.png"))
-        plot_policy(mdp, greedy_policy, "Output: Optimal Greedy Policy from Q-Values",
-                    os.path.join(output_dir, f"{prefix}_optimal_policy.png"))
+        # Save CSV files for Value Iteration
+        opt_values.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_optimal_values.csv"))
+        opt_q_table.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_optimal_q_values.csv"))
+        greedy_policy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_optimal_policy.csv"))
+
+        # Plot or print results
+        if use_plots:
+            plot_values(mdp, opt_values, "Output: Optimal State Values from Value Iteration",
+                        os.path.join(output_dir, f"{prefix}_{i}_optimal_values.png"))
+            plot_q_values(mdp, opt_q_table, "Output: Optimal Q-Values from Value Iteration",
+                          os.path.join(output_dir, f"{prefix}_{i}_optimal_q_values.png"))
+            plot_policy(mdp, greedy_policy, "Output: Optimal Greedy Policy from Q-Values",
+                        os.path.join(output_dir, f"{prefix}_{i}_optimal_policy.png"))
+        else:
+            print("Optimal Values:")
+            print(opt_values)
+            print("Optimal Q-Values:")
+            print(opt_q_table)
+            print("Optimal Greedy Policy:")
+            print(greedy_policy)
 
         # Test 3: Q-Learning
         print("\n=== Test 3: Q-Learning ===")
@@ -134,13 +155,26 @@ if __name__ == "__main__":
         # Create policy from Q-learning results
         ql_policy = q_table_to_policy(ql_q_table, mdp.states, mdp.num_actions, temperature=0.0)
 
-        # Plot results
-        plot_values(mdp, ql_values, "Output: State Values from Q-Learning",
-                    os.path.join(output_dir, f"{prefix}_qlearning_values.png"))
-        plot_q_values(mdp, ql_q_table, "Output: Learned Q-Values from Q-Learning",
-                      os.path.join(output_dir, f"{prefix}_qlearning_q_values.png"))
-        plot_policy(mdp, ql_policy, "Output: Learned Greedy Policy from Q-Learning",
-                    os.path.join(output_dir, f"{prefix}_qlearning_policy.png"))
+        # Save CSV files for Q-Learning
+        ql_values.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_qlearning_values.csv"))
+        ql_q_table.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_qlearning_q_values.csv"))
+        ql_policy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_qlearning_policy.csv"))
+
+        # Plot or print results
+        if use_plots:
+            plot_values(mdp, ql_values, "Output: State Values from Q-Learning",
+                        os.path.join(output_dir, f"{prefix}_{i}_qlearning_values.png"))
+            plot_q_values(mdp, ql_q_table, "Output: Learned Q-Values from Q-Learning",
+                          os.path.join(output_dir, f"{prefix}_{i}_qlearning_q_values.png"))
+            plot_policy(mdp, ql_policy, "Output: Learned Greedy Policy from Q-Learning",
+                        os.path.join(output_dir, f"{prefix}_{i}_qlearning_policy.png"))
+        else:
+            print("Q-Learning Values:")
+            print(ql_values)
+            print("Q-Learning Q-Values:")
+            print(ql_q_table)
+            print("Q-Learning Policy:")
+            print(ql_policy)
 
         # Test 4: Occupancy Measure
         print("\n=== Test 4: Occupancy Measure ===")
@@ -151,9 +185,16 @@ if __name__ == "__main__":
             occ_val = occupancy.get_value(state)
             print(f"  State {state}: {occ_val:.6f}")
 
-        # Plot occupancy measure
-        plot_values(mdp, occupancy, "Output: State Occupancy Frequencies",
-                    os.path.join(output_dir, f"{prefix}_occupancy_measure.png"))
+        # Save CSV files for Occupancy Measure
+        occupancy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_occupancy_measure.csv"))
+
+        # Plot or print occupancy measure
+        if use_plots:
+            plot_values(mdp, occupancy, "Output: State Occupancy Frequencies",
+                        os.path.join(output_dir, f"{prefix}_{i}_occupancy_measure.png"))
+        else:
+            print("Occupancy Measure:")
+            print(occupancy)
 
         # Print summary statistics
         print(f"\n=== Summary Statistics for {prefix} ===")
@@ -171,4 +212,21 @@ if __name__ == "__main__":
             print(f"  State {state}: Random Policy diff={pe_diff:.6f}, Q-Learning diff={ql_diff:.6f}")
 
     print(f"\n=== All tests completed! ===")
-    print(f"Generated plots in '{output_dir}' with prefixes: {prefixes}")
+    print(f"Generated plots and CSV files in '{output_dir}' with prefixes: {prefixes}")
+    print("\nGenerated CSV files:")
+    csv_files = []
+    for i, prefix in enumerate(prefixes):
+        csv_files.extend([
+            f"{prefix}_{i}_random_policy.csv",
+            f"{prefix}_{i}_policy_evaluation_values.csv",
+            f"{prefix}_{i}_optimal_values.csv",
+            f"{prefix}_{i}_optimal_q_values.csv",
+            f"{prefix}_{i}_optimal_policy.csv",
+            f"{prefix}_{i}_qlearning_values.csv",
+            f"{prefix}_{i}_qlearning_q_values.csv",
+            f"{prefix}_{i}_qlearning_policy.csv",
+            f"{prefix}_{i}_occupancy_measure.csv"
+        ])
+
+    for csv_file in csv_files:
+        print(f"  - {csv_file}")

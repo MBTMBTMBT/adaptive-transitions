@@ -88,14 +88,66 @@ class QTable:
 
                 self.q_values[state][action] = q_value
 
-    def __str__(self) -> str:
-        """String representation of Q-table."""
-        result = "Q-Table:\n"
-        for state in sorted(self.q_values.keys()):
-            result += f"State {state}: "
-            actions = self.q_values[state]
-            result += ", ".join([f"A{action}={value:.4f}" for action, value in sorted(actions.items())])
-            result += "\n"
+    def __str__(self, max_states: int = 20, max_actions_per_state: int = 10) -> str:
+        """
+        String representation of Q-table with flexible formatting for large dimensions.
+
+        Args:
+            max_states: Maximum number of states to display
+            max_actions_per_state: Maximum number of actions to display per state
+        """
+        if not self.q_values:
+            return "Q-Table: Empty"
+
+        states = sorted(self.q_values.keys())
+        total_states = len(states)
+        total_entries = sum(len(self.q_values[state]) for state in states)
+
+        # Get all unique actions for table header
+        all_actions = set()
+        for state_actions in self.q_values.values():
+            all_actions.update(state_actions.keys())
+        all_actions = sorted(all_actions)
+
+        result = f"Q-Table ({total_states} states, {total_entries} entries):\n"
+
+        # If we have few states and actions, show as formatted table
+        if total_states <= max_states and len(all_actions) <= max_actions_per_state:
+            # Table format
+            header = "State".ljust(8)
+            for action in all_actions:
+                header += f"Action {action}".rjust(12)
+            result += header + "\n"
+            result += "-" * len(header) + "\n"
+
+            for state in states:
+                row = f"{state}".ljust(8)
+                for action in all_actions:
+                    value = self.q_values[state].get(action, 0.0)
+                    row += f"{value:11.4f}".rjust(12)
+                result += row + "\n"
+        else:
+            # Compact format for large tables
+            display_states = states[:max_states]
+
+            for state in display_states:
+                result += f"State {state}: "
+                actions = sorted(self.q_values[state].items())
+
+                if len(actions) <= max_actions_per_state:
+                    # Show all actions
+                    action_strs = [f"A{action}={value:.4f}" for action, value in actions]
+                else:
+                    # Show top actions by value and truncate
+                    top_actions = sorted(actions, key=lambda x: x[1], reverse=True)
+                    action_strs = [f"A{action}={value:.4f}" for action, value in top_actions[:max_actions_per_state]]
+                    action_strs.append(f"... and {len(actions) - max_actions_per_state} more")
+
+                result += ", ".join(action_strs) + "\n"
+
+            if total_states > max_states:
+                result += f"... and {total_states - max_states} more states\n"
+
         return result
 
 
@@ -170,11 +222,61 @@ class ValueTable:
                 value = float(row['value'])
                 self.values[state] = value
 
-    def __str__(self) -> str:
-        """String representation of Value table."""
-        result = "Value Table:\n"
-        for state in sorted(self.values.keys()):
-            result += f"State {state}: V={self.values[state]:.4f}\n"
+    def __str__(self, max_states: int = 50, columns: int = 4) -> str:
+        """
+        String representation of Value table with flexible formatting for large dimensions.
+
+        Args:
+            max_states: Maximum number of states to display
+            columns: Number of columns for compact display
+        """
+        if not self.values:
+            return "Value Table: Empty"
+
+        states = sorted(self.values.keys())
+        total_states = len(states)
+
+        result = f"Value Table ({total_states} states):\n"
+
+        # If we have few states, show as formatted table
+        if total_states <= max_states:
+            if total_states <= 20:
+                # Single column format for small tables
+                for state in states:
+                    result += f"State {state:3d}: V = {self.values[state]:8.4f}\n"
+            else:
+                # Multi-column format for medium tables
+                result += "\n"
+                for i in range(0, len(states), columns):
+                    row_states = states[i:i + columns]
+                    line = ""
+                    for state in row_states:
+                        line += f"S{state:3d}:{self.values[state]:7.4f}  "
+                    result += line + "\n"
+        else:
+            # Compact format for very large tables
+            display_states = states[:max_states]
+
+            # Show statistics
+            values_array = [self.values[state] for state in states]
+            min_val = min(values_array)
+            max_val = max(values_array)
+            avg_val = sum(values_array) / len(values_array)
+
+            result += f"Stats: Min={min_val:.4f}, Max={max_val:.4f}, Avg={avg_val:.4f}\n\n"
+
+            # Show sample of states
+            result += "Sample states:\n"
+            for i in range(0, len(display_states), columns):
+                row_states = display_states[i:i + columns]
+                line = ""
+                for state in row_states:
+                    line += f"S{state:3d}:{self.values[state]:7.4f}  "
+                result += line + "\n"
+
+            if total_states > max_states:
+                result += f"\n... and {total_states - max_states} more states"
+
         return result
 
 
@@ -299,15 +401,92 @@ class PolicyTable:
                     self.policy[state] = {}
                 self.policy[state][action] = probability
 
-    def __str__(self) -> str:
-        """String representation of Policy table."""
-        result = "Policy Table:\n"
-        for state in sorted(self.policy.keys()):
-            result += f"State {state}: "
-            action_strs = []
-            for action, prob in sorted(self.policy[state].items()):
-                action_strs.append(f"A{action}={prob:.3f}")
-            result += "{" + ", ".join(action_strs) + "}\n"
+    def __str__(self, max_states: int = 30, show_deterministic_only: bool = False) -> str:
+        """
+        String representation of Policy table with flexible formatting for large dimensions.
+
+        Args:
+            max_states: Maximum number of states to display
+            show_deterministic_only: If True, only show the most likely action for each state
+        """
+        if not self.policy:
+            return "Policy Table: Empty"
+
+        states = sorted(self.policy.keys())
+        total_states = len(states)
+
+        # Count deterministic vs probabilistic policies
+        deterministic_count = 0
+        for state_policy in self.policy.values():
+            max_prob = max(state_policy.values()) if state_policy else 0.0
+            if max_prob >= 0.99:  # Consider as deterministic if probability >= 0.99
+                deterministic_count += 1
+
+        result = f"Policy Table ({total_states} states, {deterministic_count} deterministic):\n"
+
+        # If mostly deterministic or requested, show compact deterministic format
+        if show_deterministic_only or (deterministic_count / total_states > 0.8 and total_states > 20):
+            result += "\nDeterministic actions (probability >= 0.99):\n"
+            display_states = states[:max_states]
+
+            # Group by action for compact display
+            action_groups = {}
+            for state in display_states:
+                state_policy = self.policy[state]
+                best_action = max(state_policy, key=state_policy.get)
+                best_prob = state_policy[best_action]
+
+                if best_prob >= 0.99:
+                    if best_action not in action_groups:
+                        action_groups[best_action] = []
+                    action_groups[best_action].append(state)
+
+            for action in sorted(action_groups.keys()):
+                states_list = action_groups[action]
+                if len(states_list) <= 10:
+                    result += f"Action {action}: States {states_list}\n"
+                else:
+                    result += f"Action {action}: States {states_list[:10]} ... and {len(states_list) - 10} more\n"
+
+            # Show non-deterministic states
+            non_det_states = []
+            for state in display_states:
+                state_policy = self.policy[state]
+                max_prob = max(state_policy.values()) if state_policy else 0.0
+                if max_prob < 0.99:
+                    non_det_states.append(state)
+
+            if non_det_states:
+                result += f"\nNon-deterministic states ({len(non_det_states)}): "
+                if len(non_det_states) <= 10:
+                    result += str(non_det_states) + "\n"
+                else:
+                    result += f"{non_det_states[:10]} ... and {len(non_det_states) - 10} more\n"
+
+        else:
+            # Full probabilistic format
+            display_states = states[:max_states]
+
+            for state in display_states:
+                result += f"State {state}: "
+                state_policy = self.policy[state]
+
+                # Sort actions by probability (descending)
+                sorted_actions = sorted(state_policy.items(), key=lambda x: x[1], reverse=True)
+
+                if len(sorted_actions) <= 5:
+                    # Show all actions
+                    action_strs = [f"A{action}={prob:.3f}" for action, prob in sorted_actions]
+                else:
+                    # Show top 5 actions
+                    action_strs = [f"A{action}={prob:.3f}" for action, prob in sorted_actions[:5]]
+                    action_strs.append(f"... +{len(sorted_actions) - 5} more")
+
+                result += "{" + ", ".join(action_strs) + "}\n"
+
+        if total_states > max_states:
+            result += f"\n... and {total_states - max_states} more states"
+
         return result
 
 

@@ -34,6 +34,8 @@ def policy_evaluation(mdp_network: MDPNetwork,
     for state in states:
         value_table.set_value(state, 0.0)
 
+    print(f"Policy evaluation started: {len(states)} states, gamma={gamma}, theta={theta}")
+
     # Policy evaluation loop
     for iteration in range(max_iterations):
         max_delta = 0.0
@@ -86,12 +88,16 @@ def policy_evaluation(mdp_network: MDPNetwork,
             delta = abs(new_value - old_value)
             max_delta = max(max_delta, delta)
 
+        # Print debug info every 100 iterations
+        if (iteration + 1) % 100 == 0:
+            print(f"  Policy evaluation iteration {iteration + 1}: max_change = {max_delta:.6f}")
+
         # Check for convergence
         if max_delta < theta:
-            print(f"Policy evaluation converged after {iteration + 1} iterations")
+            print(f"Policy evaluation converged after {iteration + 1} iterations, final max_change = {max_delta:.6f}")
             break
     else:
-        print(f"Policy evaluation reached maximum iterations ({max_iterations})")
+        print(f"Policy evaluation reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
 
     return value_table
 
@@ -127,6 +133,8 @@ def optimal_value_iteration(mdp_network: MDPNetwork,
         value_table.set_value(state, 0.0)
         for action in range(num_actions):
             q_table.set_q_value(state, action, 0.0)
+
+    print(f"Optimal value iteration started: {len(states)} states, {num_actions} actions, gamma={gamma}, theta={theta}")
 
     # Optimal value iteration loop
     for iteration in range(max_iterations):
@@ -179,12 +187,16 @@ def optimal_value_iteration(mdp_network: MDPNetwork,
             delta = abs(new_value - old_value)
             max_delta = max(max_delta, delta)
 
+        # Print debug info every 100 iterations
+        if (iteration + 1) % 100 == 0:
+            print(f"  Optimal value iteration {iteration + 1}: max_change = {max_delta:.6f}")
+
         # Check for convergence
         if max_delta < theta:
-            print(f"Optimal value iteration converged after {iteration + 1} iterations")
+            print(f"Optimal value iteration converged after {iteration + 1} iterations, final max_change = {max_delta:.6f}")
             break
     else:
-        print(f"Optimal value iteration reached maximum iterations ({max_iterations})")
+        print(f"Optimal value iteration reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
 
     return value_table, q_table
 
@@ -229,15 +241,21 @@ def q_learning(mdp_network: MDPNetwork,
         for action in range(num_actions):
             q_table.set_q_value(state, action, 0.0)
 
+    print(f"Q-Learning started: {len(states)} states, {num_actions} actions, {num_episodes} episodes")
+    print(f"  Parameters: alpha={alpha}, gamma={gamma}, epsilon={epsilon}")
+
     # Q-Learning episodes
     for episode in range(num_episodes):
         # Start from a random start state
         current_state = mdp_network.sample_start_state(rng)
 
+        episode_steps = 0
         for step in range(max_steps_per_episode):
             # Terminal state check
             if mdp_network.is_terminal_state(current_state):
                 break
+
+            episode_steps += 1
 
             # Choose action using epsilon-greedy policy
             if rng.random() < epsilon:
@@ -270,9 +288,13 @@ def q_learning(mdp_network: MDPNetwork,
             # Move to next state
             current_state = next_state
 
-        # Print progress
-        if (episode + 1) % (num_episodes // 10) == 0:
-            print(f"Q-Learning progress: {episode + 1}/{num_episodes} episodes completed")
+        # Print progress every 1000 episodes
+        if (episode + 1) % 1000 == 0:
+            # Calculate average Q-value as a measure of learning progress
+            total_q = sum(q_table.get_q_value(state, action)
+                         for state in states for action in range(num_actions))
+            avg_q = total_q / (len(states) * num_actions)
+            print(f"  Q-Learning episode {episode + 1}/{num_episodes}: avg_q_value = {avg_q:.4f}, last_episode_steps = {episode_steps}")
 
     # Extract optimal value table from learned Q-values
     for state in states:
@@ -283,6 +305,8 @@ def q_learning(mdp_network: MDPNetwork,
             # State value is the maximum Q-value over all actions
             _, best_q_value = q_table.get_best_action(state)
             value_table.set_value(state, best_q_value)
+
+    print(f"Q-Learning completed: {num_episodes} episodes finished")
 
     return q_table, value_table
 
@@ -320,6 +344,9 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
     initial_prob = 1.0 / len(start_states)
     for state in start_states:
         current_distribution[state] = initial_prob
+
+    print(f"Occupancy measure computation started: {len(states)} states, {len(start_states)} start states")
+    print(f"  Parameters: gamma={gamma}, theta={theta}")
 
     # Iterative computation of occupancy measures
     for iteration in range(max_iterations):
@@ -365,12 +392,21 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
         # Update current distribution for next iteration
         current_distribution = next_distribution
 
+        # Print debug info every 100 iterations
+        if (iteration + 1) % 100 == 0:
+            total_occupancy = sum(occupancy_table.get_value(state) for state in states)
+            print(f"  Occupancy measure iteration {iteration + 1}: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
+
         # Check for convergence
         if max_change < theta:
+            total_occupancy = sum(occupancy_table.get_value(state) for state in states)
             print(f"Occupancy measure computation converged after {iteration + 1} iterations")
+            print(f"  Final: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
             break
     else:
+        total_occupancy = sum(occupancy_table.get_value(state) for state in states)
         print(f"Occupancy measure computation reached maximum iterations ({max_iterations})")
+        print(f"  Final: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
 
     # Ensure terminal states have zero occupancy
     for state in states:

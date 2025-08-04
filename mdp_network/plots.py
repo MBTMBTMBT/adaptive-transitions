@@ -1,6 +1,7 @@
 from typing import Optional
 
 import networkx as nx
+import numpy as np
 from matplotlib import pyplot as plt, patches as mpatches
 
 from mdp_network import MDPNetwork
