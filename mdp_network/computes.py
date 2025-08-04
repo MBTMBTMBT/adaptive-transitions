@@ -1,0 +1,206 @@
+import numpy as np
+from typing import Union
+
+from mdp_network import MDPNetwork
+from mdp_tables import ValueTable
+
+
+def gaussian_bayesian_update(prior_mu: Union[float, np.ndarray],
+                             prior_sigma: Union[float, np.ndarray],
+                             observation: Union[float, np.ndarray],
+                             observation_sigma: Union[float, np.ndarray],
+                             min_sigma: float = 1e-8) -> tuple[
+    Union[float, np.ndarray], Union[float, np.ndarray]]:
+    """
+    Bayesian update for Gaussian distributions with numerical stability.
+
+    Args:
+        prior_mu: Prior mean (float or numpy array)
+        prior_sigma: Prior standard deviation (float or numpy array)
+        observation: New observation value (float or numpy array)
+        observation_sigma: Observation noise standard deviation (float or numpy array)
+        min_sigma: Minimum allowed standard deviation to prevent numerical issues
+
+    Returns:
+        Tuple of (posterior_mu, posterior_sigma)
+        - posterior_mu: Updated mean (same type as input)
+        - posterior_sigma: Updated standard deviation (same type as input)
+
+    Note:
+        Uses conjugate prior formula for Gaussian-Gaussian update:
+        posterior_precision = prior_precision + observation_precision
+        posterior_mu = (prior_precision * prior_mu + observation_precision * observation) / posterior_precision
+        Handles numerical edge cases with minimum sigma threshold.
+    """
+    # Ensure minimum sigma to prevent division by zero
+    prior_sigma = np.maximum(prior_sigma, min_sigma)
+    observation_sigma = np.maximum(observation_sigma, min_sigma)
+
+    # Convert to precision (inverse variance)
+    prior_precision = 1.0 / (prior_sigma ** 2)
+    obs_precision = 1.0 / (observation_sigma ** 2)
+
+    # Compute posterior precision and variance
+    posterior_precision = prior_precision + obs_precision
+    posterior_variance = 1.0 / posterior_precision
+    posterior_sigma = np.sqrt(posterior_variance)
+
+    # Compute posterior mean
+    posterior_mu = (prior_precision * prior_mu + obs_precision * observation) / posterior_precision
+
+    # Ensure posterior sigma is not too small
+    posterior_sigma = np.maximum(posterior_sigma, min_sigma)
+
+    return posterior_mu, posterior_sigma
+
+
+def gaussian_kl_divergence(mu1: Union[float, np.ndarray],
+                           sigma1: Union[float, np.ndarray],
+                           mu2: Union[float, np.ndarray],
+                           sigma2: Union[float, np.ndarray],
+                           min_sigma: float = 1e-8,
+                           max_kl: float = 1e10) -> Union[float, np.ndarray]:
+    """
+    Compute KL divergence between two Gaussian distributions KL(P||Q) with numerical stability.
+
+    Args:
+        mu1: Mean of distribution P (float or numpy array)
+        sigma1: Standard deviation of distribution P (float or numpy array)
+        mu2: Mean of distribution Q (float or numpy array)
+        sigma2: Standard deviation of distribution Q (float or numpy array)
+        min_sigma: Minimum allowed standard deviation to prevent numerical issues
+        max_kl: Maximum allowed KL divergence to prevent infinite values
+
+    Returns:
+        KL divergence KL(P||Q) (same type as input)
+
+    Note:
+        Formula: KL(P||Q) = log(σ2/σ1) + (σ1² + (μ1-μ2)²)/(2σ2²) - 1/2
+        Returns element-wise KL divergence for array inputs.
+        Handles numerical edge cases with minimum sigma and maximum KL thresholds.
+    """
+    # Ensure minimum sigma to prevent division by zero and log(0)
+    sigma1 = np.maximum(sigma1, min_sigma)
+    sigma2 = np.maximum(sigma2, min_sigma)
+
+    # Compute variance terms
+    var1 = sigma1 ** 2
+    var2 = sigma2 ** 2
+
+    # Compute mean difference
+    mu_diff = mu1 - mu2
+
+    # KL divergence formula for Gaussians
+    # Handle potential numerical issues with log and division
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log_term = np.log(sigma2 / sigma1)
+        variance_term = (var1 + mu_diff ** 2) / (2 * var2)
+        kl_div = log_term + variance_term - 0.5
+
+    # Handle edge cases and clip extreme values
+    if np.isscalar(kl_div):
+        if np.isnan(kl_div) or np.isinf(kl_div):
+            # If distributions are identical, KL should be 0
+            if np.isclose(mu1, mu2) and np.isclose(sigma1, sigma2):
+                kl_div = 0.0
+            else:
+                kl_div = max_kl
+        else:
+            kl_div = np.clip(kl_div, 0.0, max_kl)
+    else:
+        # Array case
+        # Replace NaN and Inf with appropriate values
+        identical_mask = np.isclose(mu1, mu2) & np.isclose(sigma1, sigma2)
+        kl_div = np.where(identical_mask, 0.0, kl_div)
+
+        # Replace remaining NaN/Inf with max_kl
+        kl_div = np.where(np.isnan(kl_div) | np.isinf(kl_div), max_kl, kl_div)
+
+        # Clip to reasonable range
+        kl_div = np.clip(kl_div, 0.0, max_kl)
+
+    return kl_div
+
+
+def compute_information_surprise(mdp: MDPNetwork,
+                               occupancy: ValueTable,
+                               prior_mu: float,
+                               prior_sigma: float,
+                               observation_sigma: float = 0.1) -> dict:
+    """
+    Compute information surprise for terminal states using Bayesian updates and KL divergence.
+
+    Args:
+        mdp: MDP network
+        occupancy: State occupancy measure (ValueTable)
+        prior_mu: Prior mean of reward distribution
+        prior_sigma: Prior standard deviation of reward distribution
+        observation_sigma: Standard deviation for reward observations
+
+    Returns:
+        Dictionary containing surprise analysis results
+    """
+    # Find terminal states and their rewards
+    terminal_states = list(mdp.terminal_states)
+    if not terminal_states:
+        return {'error': 'No terminal states found'}
+
+    print(f"Computing information surprise for {len(terminal_states)} terminal states...")
+
+    # Collect terminal state information
+    terminal_info = []
+    total_weighted_surprise = 0.0
+
+    for state in terminal_states:
+        # Get state occupancy
+        state_occupancy = occupancy.get_value(state)
+
+        # Get reward for this terminal state using the correct method
+        reward = mdp.get_state_reward(state)
+
+        # Perform Bayesian update
+        posterior_mu, posterior_sigma = gaussian_bayesian_update(
+            prior_mu, prior_sigma, reward, observation_sigma
+        )
+
+        # Compute KL divergence between posterior and prior
+        kl_divergence = gaussian_kl_divergence(
+            posterior_mu, posterior_sigma, prior_mu, prior_sigma
+        )
+
+        # Weighted surprise contribution
+        weighted_surprise = kl_divergence * state_occupancy
+        total_weighted_surprise += weighted_surprise
+
+        terminal_info.append({
+            'state': state,
+            'reward': reward,
+            'occupancy': state_occupancy,
+            'posterior_mu': posterior_mu,
+            'posterior_sigma': posterior_sigma,
+            'kl_divergence': kl_divergence,
+            'weighted_surprise': weighted_surprise
+        })
+
+        print(f"  State {state}: reward={reward:.4f}, occupancy={state_occupancy:.6f}, "
+              f"KL={kl_divergence:.6f}, weighted_surprise={weighted_surprise:.6f}")
+
+    # Sort by weighted surprise (descending)
+    terminal_info.sort(key=lambda x: x['weighted_surprise'], reverse=True)
+
+    results = {
+        'prior_mu': prior_mu,
+        'prior_sigma': prior_sigma,
+        'observation_sigma': observation_sigma,
+        'total_information_surprise': total_weighted_surprise,
+        'num_terminal_states': len(terminal_states),
+        'terminal_state_analysis': terminal_info,
+        'max_surprise_state': terminal_info[0]['state'] if terminal_info else None,
+        'max_surprise_value': terminal_info[0]['weighted_surprise'] if terminal_info else 0.0
+    }
+
+    print(f"Total Information Surprise: {total_weighted_surprise:.6f}")
+    print(f"Most surprising state: {results['max_surprise_state']} "
+          f"(surprise={results['max_surprise_value']:.6f})")
+
+    return results

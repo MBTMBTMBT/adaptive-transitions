@@ -1,6 +1,8 @@
 import os
+
+from computes import compute_information_surprise
 from plots import plot_values, plot_policy, plot_q_values
-from mdp_tables import q_table_to_policy
+from mdp_tables import q_table_to_policy, create_random_policy
 from solvers import *
 from customisable_minigrid.customisable_minigrid_env import CustomMiniGridEnv
 from samplers import deterministic_mdp_sampling
@@ -11,26 +13,6 @@ def ensure_output_dir(output_dir: str = "./outputs"):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     return output_dir
-
-
-def create_random_policy(mdp_network: MDPNetwork) -> PolicyTable:
-    """Create a uniform probabilistic policy for the MDP."""
-    policy = PolicyTable()
-    for state in mdp_network.states:
-        if mdp_network.is_terminal_state(state):
-            # Terminal states have deterministic action 0
-            policy.set_action(state, 0)
-        else:
-            # Create uniform probability distribution over actions
-            uniform_prob = 1.0 / mdp_network.num_actions
-
-            action_probs = {}
-            for action in range(mdp_network.num_actions):
-                action_probs[action] = uniform_prob
-
-            policy.set_action_probabilities(state, action_probs)
-
-    return policy
 
 
 # Unit tests and visualization script
@@ -204,6 +186,7 @@ if __name__ == "__main__":
         # Test 5: Reward Distribution
         print("\n=== Test 5: Reward Distribution ===")
         reward_count_dist, reward_prob_dist = compute_reward_distribution(mdp, occupancy, delta=1e-6)
+        reward_count_dist, reward_prob_dist = reward_count_dist.normalize_rewards_to_0_1(), reward_prob_dist.normalize_rewards_to_0_1()
 
         print("Reward Distribution Results:")
         print("Reward Count Distribution:")
@@ -273,12 +256,55 @@ if __name__ == "__main__":
 
         print(f"Gaussian fitting results saved to: {gaussian_results_path}")
 
+        # Test 7: Information Surprise Analysis
+        print("\n=== Test 7: Information Surprise Analysis ===")
+
+        # Use fitted Gaussian as prior distribution
+        surprise_results = compute_information_surprise(
+            mdp, occupancy, mu_count, sigma_count, observation_sigma=0.1
+        )
+
+        if 'error' not in surprise_results:
+            print("Information Surprise Results:")
+            print(f"  Total Information Surprise: {surprise_results['total_information_surprise']:.6f}")
+            print(f"  Most surprising terminal state: {surprise_results['max_surprise_state']}")
+            print(f"  Maximum surprise value: {surprise_results['max_surprise_value']:.6f}")
+
+            # Save surprise analysis results
+            surprise_results_path = os.path.join(output_dir, f"{prefix}_{i}_information_surprise.txt")
+            with open(surprise_results_path, 'w') as f:
+                f.write(f"Information Surprise Analysis for {prefix}_{i}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(
+                    f"Prior Distribution: μ={surprise_results['prior_mu']:.6f}, σ={surprise_results['prior_sigma']:.6f}\n")
+                f.write(f"Observation σ: {surprise_results['observation_sigma']:.6f}\n")
+                f.write(f"Total Information Surprise: {surprise_results['total_information_surprise']:.6f}\n")
+                f.write(f"Number of Terminal States: {surprise_results['num_terminal_states']}\n\n")
+
+                f.write("Terminal State Analysis (sorted by surprise):\n")
+                f.write("-" * 50 + "\n")
+                for info in surprise_results['terminal_state_analysis']:
+                    f.write(f"State {info['state']}:\n")
+                    f.write(f"  Reward: {info['reward']:.6f}\n")
+                    f.write(f"  Occupancy: {info['occupancy']:.6f}\n")
+                    f.write(f"  Posterior μ: {info['posterior_mu']:.6f}\n")
+                    f.write(f"  Posterior σ: {info['posterior_sigma']:.6f}\n")
+                    f.write(f"  KL Divergence: {info['kl_divergence']:.6f}\n")
+                    f.write(f"  Weighted Surprise: {info['weighted_surprise']:.6f}\n")
+                    f.write("\n")
+
+            print(f"Information surprise analysis saved to: {surprise_results_path}")
+        else:
+            print(f"  Error: {surprise_results['error']}")
+
         # Print summary statistics
         print(f"\n=== Summary Statistics for {prefix} ===")
         print(f"Total states: {len(mdp.states)}")
         print(f"Terminal states: {len(mdp.terminal_states)}")
         print(f"Actions available: {mdp.num_actions}")
         print(f"Gaussian fit: μ={mu_count:.4f}, σ={sigma_count:.4f}")
+        if 'error' not in surprise_results:
+            print(f"Information Surprise: {surprise_results['total_information_surprise']:.6f}")
 
         print("Value differences (vs Optimal):")
         for state in sorted(mdp.states)[:5]:
@@ -291,7 +317,7 @@ if __name__ == "__main__":
 
     print(f"\n=== All tests completed! ===")
     print(
-        f"Generated plots, CSV files, JSON networks, and Gaussian fit results in '{output_dir}' with prefixes: {prefixes}")
+        f"Generated plots, CSV files, JSON networks, Gaussian fit results, and surprise analysis in '{output_dir}' with prefixes: {prefixes}")
 
     print("\nGenerated JSON files (MDP Networks):")
     json_files = []
@@ -321,10 +347,13 @@ if __name__ == "__main__":
     for csv_file in csv_files:
         print(f"  - {csv_file}")
 
-    print("\nGenerated Gaussian Fit Result files:")
-    gaussian_files = []
+    print("\nGenerated Analysis Result files:")
+    analysis_files = []
     for i, prefix in enumerate(prefixes):
-        gaussian_files.append(f"{prefix}_{i}_gaussian_fit_results.txt")
+        analysis_files.extend([
+            f"{prefix}_{i}_gaussian_fit_results.txt",
+            f"{prefix}_{i}_information_surprise.txt"
+        ])
 
-    for gaussian_file in gaussian_files:
-        print(f"  - {gaussian_file}")
+    for analysis_file in analysis_files:
+        print(f"  - {analysis_file}")

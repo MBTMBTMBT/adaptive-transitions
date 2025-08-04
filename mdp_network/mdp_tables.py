@@ -4,6 +4,8 @@ import os
 import scipy
 import numpy as np
 
+from mdp_network import MDPNetwork
+
 
 class QTable:
     """
@@ -643,6 +645,59 @@ class RewardDistributionTable:
         """Get all reward values in the distribution table."""
         return list(self.values.keys())
 
+    def normalize_rewards_to_0_1(self) -> 'RewardDistributionTable':
+        """
+        Normalize the REWARD KEYS to 0-1 range using min-max normalization.
+        The values (counts/probabilities) remain unchanged, only reward keys are normalized.
+
+        Returns:
+            New RewardDistributionTable with reward keys normalized to [0, 1] range.
+            Values and delta precision remain unchanged.
+
+        Example:
+            Original: {-5.0: 10, 0.0: 50, 10.0: 30}  # rewards -> counts
+            Result:   {0.0: 10, 0.33: 50, 1.0: 30}   # normalized rewards -> same counts
+
+        Note:
+            Uses formula: normalized_reward = (reward - min_reward) / (max_reward - min_reward)
+            If all rewards are identical, returns table with single reward key 0.5
+        """
+        if not self.values:
+            return RewardDistributionTable(delta=self.delta)
+
+        # Get min and max REWARDS (not values) for normalization
+        all_rewards = list(self.values.keys())  # These are the reward keys
+        min_reward = min(all_rewards)
+        max_reward = max(all_rewards)
+
+        # Handle edge case where all rewards are identical
+        if max_reward == min_reward:
+            # All rewards are the same, set to middle of [0,1] range
+            total_value = sum(self.values.values())
+            normalized_values = {0.5: total_value}
+            print(f"All REWARDS identical ({min_reward:.6f}), normalized to 0.5")
+        else:
+            # Apply min-max normalization to REWARDS: (reward - min) / (max - min)
+            reward_range = max_reward - min_reward
+            normalized_values = {}
+
+            for reward, value in self.values.items():
+                normalized_reward = (reward - min_reward) / reward_range
+                # Round to delta precision
+                normalized_reward = self._round_reward(normalized_reward)
+
+                # Handle potential collisions from rounding
+                if normalized_reward in normalized_values:
+                    normalized_values[normalized_reward] += value
+                else:
+                    normalized_values[normalized_reward] = value
+
+            print(f"REWARDS 0-1 Normalization: [{min_reward:.6f}, {max_reward:.6f}] -> [0.0, 1.0]")
+            print("Values (counts/probabilities) unchanged, only reward keys normalized")
+
+        # Create new table with same delta and normalized reward keys
+        return RewardDistributionTable(normalized_values, delta=self.delta)
+
     def normalize_to_probabilities(self) -> 'RewardDistributionTable':
         """
         Convert count-based distribution to probability distribution.
@@ -925,3 +980,23 @@ class RewardDistributionTable:
             result += f"\n... and {total_rewards - max_rewards} more reward values"
 
         return result
+
+
+def create_random_policy(mdp_network: MDPNetwork) -> PolicyTable:
+    """Create a uniform probabilistic policy for the MDP."""
+    policy = PolicyTable()
+    for state in mdp_network.states:
+        if mdp_network.is_terminal_state(state):
+            # Terminal states have deterministic action 0
+            policy.set_action(state, 0)
+        else:
+            # Create uniform probability distribution over actions
+            uniform_prob = 1.0 / mdp_network.num_actions
+
+            action_probs = {}
+            for action in range(mdp_network.num_actions):
+                action_probs[action] = uniform_prob
+
+            policy.set_action_probabilities(state, action_probs)
+
+    return policy
