@@ -124,12 +124,13 @@ def gaussian_kl_divergence(mu1: Union[float, np.ndarray],
 
 
 def compute_information_surprise(mdp: MDPNetwork,
-                               occupancy: ValueTable,
-                               prior_mu: float,
-                               prior_sigma: float,
-                               observation_sigma: float = 0.1) -> dict:
+                                 occupancy: ValueTable,
+                                 prior_mu: float,
+                                 prior_sigma: float,
+                                 observation_sigma: float = 1e-8,
+                                 delta: float = 1e-4) -> dict:
     """
-    Compute information surprise for terminal states using both KL divergence and negative log-likelihood.
+    Compute information surprise for terminal states using both KL divergence and interval-based -logP surprise.
 
     Args:
         mdp: MDP network
@@ -137,43 +138,41 @@ def compute_information_surprise(mdp: MDPNetwork,
         prior_mu: Prior mean of reward distribution
         prior_sigma: Prior standard deviation of reward distribution
         observation_sigma: Standard deviation for reward observations
+        delta: Precision width used to estimate probability interval for -logP
 
     Returns:
-        Dictionary containing surprise analysis results (both KL and -log)
+        Dictionary containing surprise analysis results (both KL and -logP)
     """
-    # Find terminal states and their rewards
     terminal_states = list(mdp.terminal_states)
     if not terminal_states:
         return {'error': 'No terminal states found'}
 
     print(f"Computing information surprise for {len(terminal_states)} terminal states...")
 
-    # Collect terminal state information
     terminal_info = []
     total_weighted_kl = 0.0
     total_weighted_nll = 0.0
 
     for state in terminal_states:
-        # Get state occupancy
         state_occupancy = occupancy.get_value(state)
-
-        # Get reward for this terminal state
         reward = mdp.get_state_reward(state)
 
-        # Perform Bayesian update
         posterior_mu, posterior_sigma = gaussian_bayesian_update(
             prior_mu, prior_sigma, reward, observation_sigma
         )
 
-        # Compute KL divergence between posterior and prior
         kl_divergence = gaussian_kl_divergence(
             posterior_mu, posterior_sigma, prior_mu, prior_sigma
         )
 
-        # Compute negative log-likelihood of reward under prior distribution
-        nll = -np.log(max(norm.pdf(reward, loc=prior_mu, scale=prior_sigma), 1e-8))
+        # Compute interval probability under prior using CDF
+        lower = reward - delta / 2
+        upper = reward + delta / 2
+        prob = norm.cdf(upper, loc=prior_mu, scale=prior_sigma) - norm.cdf(lower, loc=prior_mu, scale=prior_sigma)
 
-        # Weighted surprise contributions
+        # Avoid log(0)
+        nll = -np.log(max(prob, 1e-12))
+
         weighted_kl = kl_divergence * state_occupancy
         weighted_nll = nll * state_occupancy
 
@@ -196,13 +195,13 @@ def compute_information_surprise(mdp: MDPNetwork,
               f"KL={kl_divergence:.6f}, weighted_kl={weighted_kl:.6f}, "
               f"-logP={nll:.6f}, weighted_nll={weighted_nll:.6f}")
 
-    # Sort by weighted NLL (descending)
     terminal_info.sort(key=lambda x: x['weighted_nll'], reverse=True)
 
     results = {
         'prior_mu': prior_mu,
         'prior_sigma': prior_sigma,
         'observation_sigma': observation_sigma,
+        'delta': delta,
         'total_information_surprise_kl': total_weighted_kl,
         'total_information_surprise_nll': total_weighted_nll,
         'num_terminal_states': len(terminal_states),

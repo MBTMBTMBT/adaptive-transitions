@@ -4,7 +4,7 @@ from computes import compute_information_surprise
 from plots import plot_values, plot_policy, plot_q_values
 from mdp_tables import q_table_to_policy, create_random_policy
 from solvers import *
-from customisable_minigrid.customisable_minigrid_env import CustomMiniGridEnv
+from customised_minigrid_env.customised_minigrid_env import CustomMiniGridEnv
 from samplers import deterministic_mdp_sampling
 
 
@@ -28,21 +28,25 @@ if __name__ == "__main__":
     prefixes = []
 
     # Load the chain MDP (smallest)
-    mdps.append(MDPNetwork(config_path="./mdps/chain.json"))
-    prefixes.append("chain")
+    mdps.append(MDPNetwork(config_path="mdps/chain-3.json"))
+    prefixes.append("chain-3")
+    mdps.append(MDPNetwork(config_path="mdps/chain-5.json"))
+    prefixes.append("chain-5")
+    mdps.append(MDPNetwork(config_path="mdps/chain-7.json"))
+    prefixes.append("chain-7")
 
     # Sample MDPs from environments (small to large)
     env_configs = [
         {
-            'path': '../customisable_minigrid/maps/door-key-no-random-3x6.json',
+            'path': '../customised_minigrid_env/maps/door-key-no-random-3x6.json',
             'prefix': 'sampled_3x6'
         },
         {
-            'path': '../customisable_minigrid/maps/door-key-no-random-4x7.json',
+            'path': '../customised_minigrid_env/maps/door-key-no-random-4x7.json',
             'prefix': 'sampled_4x7'
         },
         {
-            'path': '../customisable_minigrid/maps/door-key-no-random-5x9.json',
+            'path': '../customised_minigrid_env/maps/door-key-no-random-5x9.json',
             'prefix': 'sampled_5x9'
         }
     ]
@@ -282,7 +286,7 @@ if __name__ == "__main__":
 
         # Use fitted Gaussian as prior distribution
         surprise_results = compute_information_surprise(
-            mdp, occupancy, mu_count, sigma_count, observation_sigma=0.1
+            mdp, occupancy, mu_count, sigma_count, observation_sigma=1e-8
         )
 
         if 'error' not in surprise_results:
