@@ -1,6 +1,7 @@
 import json
 import random
-from typing import Optional, Dict, Any, SupportsFloat
+from typing import Optional, Dict, Any, SupportsFloat, List
+import itertools
 
 from gymnasium import spaces
 from minigrid.core.grid import Grid
@@ -13,7 +14,7 @@ from minigrid.core.constants import OBJECT_TO_IDX, COLOR_TO_IDX, STATE_TO_IDX, T
 
 from .simple_actions import SimpleActions
 from .simple_manual_control import SimpleManualControl
-from customisable_env_abs import CustomisableStrEnvAbs
+from customisable_env_abs import CustomisableEnvAbs
 
 DEFAULT_REWARD_DICT = {
     "sparse": True,
@@ -28,7 +29,7 @@ DEFAULT_REWARD_DICT = {
 }
 
 
-class CustomMiniGridEnv(MiniGridEnv, CustomisableStrEnvAbs):
+class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
     """
     A custom MiniGrid environment that loads its layout from a structured JSON configuration.
     This environment does not support random generation. All objects, colors, positions, and agent settings
@@ -60,6 +61,7 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableStrEnvAbs):
             render_carried_objs: bool = True,
             any_key_opens_the_door: bool = False,
             reward_config: Optional[Dict[str, Any]] = None,
+            networkx_env=None,
             **kwargs,
     ) -> None:
         """
@@ -120,13 +122,16 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableStrEnvAbs):
         assert display_mode in ["middle", "random"], "Invalid display_mode"
         assert self.display_size >= layout_size, "display_size must be >= layout layout_size"
 
-        # Initialize parent class
+        # Initialize parent classes
         super().__init__(
             mission_space=MissionSpace(mission_func=lambda: custom_mission),
             grid_size=self.display_size,
             max_steps=max_steps,
             **kwargs,
         )
+
+        # Initialize CustomisableEnvAbs
+        CustomisableEnvAbs.__init__(self, networkx_env=networkx_env)
 
         self.actions = SimpleActions
         self.action_space = spaces.Discrete(len(self.actions))
@@ -453,135 +458,153 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableStrEnvAbs):
     def step(
             self, action: ActType
     ) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
-        self.step_count += 1
+        if self.networkx_env is not None:
+            # Get current encoded state
+            current_encoded_state = self.encode_state()
 
-        # Initialize reward with step penalty
-        reward = self.reward_config["step_penalty"]
+            # Set NetworkX environment to current state
+            self.networkx_env.current_state = current_encoded_state
 
-        terminated = False
-        truncated = False
+            # Execute step in NetworkX environment
+            next_networkx_state, reward, terminated, truncated, info = self.networkx_env.step(action)
 
-        # Get the position in front of the agent
-        fwd_pos = self.front_pos
+            # Decode the next state and set environment
+            obs, decode_info = self.decode_state(next_networkx_state)
 
-        # Get the contents of the cell in front of the agent
-        fwd_cell = self.grid.get(*fwd_pos)
+            # Merge info dictionaries
+            info.update(decode_info)
 
-        # Rotate left
-        if action == self.actions.left:
-            self.agent_dir -= 1
-            if self.agent_dir < 0:
-                self.agent_dir += 4
-
-        # Rotate right
-        elif action == self.actions.right:
-            self.agent_dir = (self.agent_dir + 1) % 4
-
-        # Move forward
-        elif action == self.actions.forward:
-            if fwd_cell is None or fwd_cell.can_overlap():
-                self.agent_pos = tuple(fwd_pos)
-            if fwd_cell is not None and fwd_cell.type == "goal":
-                terminated = True
-                reward = self.reward_config["goal_reward"]
-            if fwd_cell is not None and fwd_cell.type == "lava":
-                terminated = True
-                reward = self.reward_config["lava_penalty"]
-
-        # Unified toggle action (uni_toggle)
-        elif action == self.actions.uni_toggle:
-            # Case 1: Forward cell exists (not empty)
-            if fwd_cell:
-                # If carrying nothing and forward cell can be picked up, perform pickup
-                if self.carrying is None and fwd_cell.can_pickup():
-                    self.carrying = fwd_cell
-                    self.carrying.cur_pos = np.array([-1, -1])
-                    self.grid.set(fwd_pos[0], fwd_pos[1], None)
-                    reward += self.reward_config["pickup_reward"]
-
-                # If forward cell is a door, perform toggle
-                elif fwd_cell.type == "door":
-                    was_open = fwd_cell.is_open
-                    if self.any_key_opens_the_door:
-                        self._door_toggle_any_colour(fwd_cell, )
-                    else:
-                        fwd_cell.toggle(self, fwd_pos)
-                    # Update rewards based on door status
-                    if fwd_cell.is_open and not was_open:
-                        reward += self.reward_config["door_open_reward"]
-                    elif not fwd_cell.is_open and was_open:
-                        reward += self.reward_config["door_close_penalty"]
-
-            # Case 2: Forward cell is empty (None)
-            else:
-                # If carrying an object, drop it in the empty space
-                if self.carrying:
-                    self.grid.set(fwd_pos[0], fwd_pos[1], self.carrying)
-                    self.carrying.cur_pos = fwd_pos
-
-                    # Special case: if dropping a key, give different reward
-                    if self.carrying.type == "key":
-                        reward += self.reward_config["key_drop_penalty"]
-                    else:
-                        reward += self.reward_config["item_drop_penalty"]
-
-                    self.carrying = None
-
+            return obs, reward, terminated, truncated, info
         else:
-            raise ValueError(f"Unknown action: {action}")
+            self.step_count += 1
 
-        if self.step_count >= self.max_steps:
-            truncated = True
+            # Initialize reward with step penalty
+            reward = self.reward_config["step_penalty"]
 
-        # Handle sparse vs dense reward mode
-        if self.reward_config["sparse"]:
-            # Accumulate reward but only return it at termination
-            self.cumulative_reward += reward
-            if terminated or truncated:
-                # Return total accumulated reward
-                returned_reward = self.cumulative_reward
+            terminated = False
+            truncated = False
+
+            # Get the position in front of the agent
+            fwd_pos = self.front_pos
+
+            # Get the contents of the cell in front of the agent
+            fwd_cell = self.grid.get(*fwd_pos)
+
+            # Rotate left
+            if action == self.actions.left:
+                self.agent_dir -= 1
+                if self.agent_dir < 0:
+                    self.agent_dir += 4
+
+            # Rotate right
+            elif action == self.actions.right:
+                self.agent_dir = (self.agent_dir + 1) % 4
+
+            # Move forward
+            elif action == self.actions.forward:
+                if fwd_cell is None or fwd_cell.can_overlap():
+                    self.agent_pos = tuple(fwd_pos)
+                if fwd_cell is not None and fwd_cell.type == "goal":
+                    terminated = True
+                    reward = self.reward_config["goal_reward"]
+                if fwd_cell is not None and fwd_cell.type == "lava":
+                    terminated = True
+                    reward = self.reward_config["lava_penalty"]
+
+            # Unified toggle action (uni_toggle)
+            elif action == self.actions.uni_toggle:
+                # Case 1: Forward cell exists (not empty)
+                if fwd_cell:
+                    # If carrying nothing and forward cell can be picked up, perform pickup
+                    if self.carrying is None and fwd_cell.can_pickup():
+                        self.carrying = fwd_cell
+                        self.carrying.cur_pos = np.array([-1, -1])
+                        self.grid.set(fwd_pos[0], fwd_pos[1], None)
+                        reward += self.reward_config["pickup_reward"]
+
+                    # If forward cell is a door, perform toggle
+                    elif fwd_cell.type == "door":
+                        was_open = fwd_cell.is_open
+                        if self.any_key_opens_the_door:
+                            self._door_toggle_any_colour(fwd_cell, )
+                        else:
+                            fwd_cell.toggle(self, fwd_pos)
+                        # Update rewards based on door status
+                        if fwd_cell.is_open and not was_open:
+                            reward += self.reward_config["door_open_reward"]
+                        elif not fwd_cell.is_open and was_open:
+                            reward += self.reward_config["door_close_penalty"]
+
+                # Case 2: Forward cell is empty (None)
+                else:
+                    # If carrying an object, drop it in the empty space
+                    if self.carrying:
+                        self.grid.set(fwd_pos[0], fwd_pos[1], self.carrying)
+                        self.carrying.cur_pos = fwd_pos
+
+                        # Special case: if dropping a key, give different reward
+                        if self.carrying.type == "key":
+                            reward += self.reward_config["key_drop_penalty"]
+                        else:
+                            reward += self.reward_config["item_drop_penalty"]
+
+                        self.carrying = None
+
             else:
-                # Return zero reward for non-terminal steps
-                returned_reward = 0.0
-        else:
-            # Return immediate reward (dense mode)
-            returned_reward = reward
+                raise ValueError(f"Unknown action: {action}")
 
-        if self.render_mode == "human":
-            self.render()
+            if self.step_count >= self.max_steps:
+                truncated = True
 
-        obs = self.gen_obs()
+            # Handle sparse vs dense reward mode
+            if self.reward_config["sparse"]:
+                # Accumulate reward but only return it at termination
+                self.cumulative_reward += reward
+                if terminated or truncated:
+                    # Return total accumulated reward
+                    returned_reward = self.cumulative_reward
+                else:
+                    # Return zero reward for non-terminal steps
+                    returned_reward = 0.0
+            else:
+                # Return immediate reward (dense mode)
+                returned_reward = reward
 
-        # Set carrying observation
-        obs["carrying"] = {
-            "carrying": 1,
-            "carrying_colour": 0,
-        }
+            if self.render_mode == "human":
+                self.render()
 
-        if self.carrying is not None and self.carrying != 0:
-            carrying = OBJECT_TO_IDX[self.carrying.type]
-            carrying_colour = COLOR_TO_IDX[self.carrying.color]
+            obs = self.gen_obs()
 
+            # Set carrying observation
             obs["carrying"] = {
-                "carrying": carrying,
-                "carrying_colour": carrying_colour,
+                "carrying": 1,
+                "carrying_colour": 0,
             }
 
-        # Set overlap observation
-        obs["overlap"] = {
-            "obj": 0,
-            "colour": 0,
-        }
+            if self.carrying is not None and self.carrying != 0:
+                carrying = OBJECT_TO_IDX[self.carrying.type]
+                carrying_colour = COLOR_TO_IDX[self.carrying.color]
 
-        overlap = self.grid.get(*self.agent_pos)
-        if overlap is not None:
-            overlap_colour = COLOR_TO_IDX[overlap.color]
+                obs["carrying"] = {
+                    "carrying": carrying,
+                    "carrying_colour": carrying_colour,
+                }
+
+            # Set overlap observation
             obs["overlap"] = {
-                "obj": OBJECT_TO_IDX[overlap.type],
-                "colour": overlap_colour,
+                "obj": 0,
+                "colour": 0,
             }
 
-        return obs, returned_reward, terminated, truncated, {}
+            overlap = self.grid.get(*self.agent_pos)
+            if overlap is not None:
+                overlap_colour = COLOR_TO_IDX[overlap.color]
+                obs["overlap"] = {
+                    "obj": OBJECT_TO_IDX[overlap.type],
+                    "colour": overlap_colour,
+                }
+
+            return obs, returned_reward, terminated, truncated, {}
 
     def encode_state(self) -> str:
         """
@@ -922,6 +945,221 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableStrEnvAbs):
 
         except (ValueError, IndexError, AttributeError) as e:
             raise ValueError(f"Failed to decode state: {str(e)}")
+
+    def get_start_states(self) -> List[str]:
+        """
+        Get all possible starting states for the CustomMiniGrid environment.
+
+        This method analyzes the JSON configuration to determine all possible initial
+        configurations considering:
+        - Multiple possible agent positions and orientations
+        - Random object placements with different distribution types
+        - Random transformations (rotation/flip if enabled)
+        - Agent always starts empty-handed
+
+        Returns:
+            List[str]: List of all possible starting state encodings
+        """
+
+        start_states = []
+
+        # Get configuration
+        config = self.config
+        H, W = config['height_width']
+        layers = config['layers']
+
+        # Determine all possible transformations
+        rotations = [0, 1, 2, 3] if self.random_rotate else [0]
+        flips = [0, 1] if self.random_flip else [0]
+
+        # Determine all possible anchor positions
+        free_width = self.display_size - W
+        free_height = self.display_size - H
+
+        if self.display_mode == "middle":
+            anchor_positions = [(free_width // 2, free_height // 2)]
+        elif self.display_mode == "random":
+            anchor_x_options = list(range(max(free_width, 1))) if free_width > 0 else [0]
+            anchor_y_options = list(range(max(free_height, 1))) if free_height > 0 else [0]
+            anchor_positions = list(itertools.product(anchor_x_options, anchor_y_options))
+        else:
+            anchor_positions = [(0, 0)]
+
+        # Process each layer to determine possible placements
+        layer_possibilities = []
+        agent_orientations = []
+
+        for layer in layers:
+            obj_type = layer["obj"]
+            colour = layer.get("colour", None)
+            status = layer.get("status", None)
+            dist = layer.get("distribution", "all")
+            mat = layer["matrix"]
+
+            # Get raw positions from matrix
+            raw_positions = [
+                (x, y) for y in range(H) for x in range(W) if mat[y][x] == 1
+            ]
+
+            if not raw_positions:
+                layer_possibilities.append([])
+                continue
+
+            # Handle agent orientation
+            if obj_type == "agent":
+                orientation = layer.get("orientation", "random")
+                if orientation == "random":
+                    agent_orientations = [0, 1, 2, 3]  # All possible directions
+                else:
+                    dir_map = {"right": 0, "down": 1, "left": 2, "up": 3}
+                    agent_orientations = [dir_map.get(orientation, 0)]
+
+            # Generate all possible position sets for this layer
+            layer_position_sets = []
+
+            if dist == "all":
+                # All positions are used - only one possibility
+                layer_position_sets = [raw_positions]
+            elif dist == "one":
+                # Each position could be the chosen one
+                layer_position_sets = [[pos] for pos in raw_positions]
+            elif isinstance(dist, float):
+                # Generate all possible combinations for the given percentage
+                count = max(1, int(len(raw_positions) * dist))
+                count = min(count, len(raw_positions))  # Don't exceed available positions
+
+                # Generate all combinations of 'count' positions
+                from itertools import combinations
+                layer_position_sets = [list(combo) for combo in combinations(raw_positions, count)]
+
+            # Store layer info with its possibilities
+            layer_possibilities.append({
+                'obj_type': obj_type,
+                'colour': colour,
+                'status': status,
+                'position_sets': layer_position_sets
+            })
+
+        # Generate all combinations of transformations and anchor positions
+        for rotation in rotations:
+            for flip in flips:
+                for anchor_x, anchor_y in anchor_positions:
+
+                    # Generate all combinations of layer placements
+                    layer_combinations = [layer['position_sets'] for layer in layer_possibilities if layer]
+
+                    if not layer_combinations:
+                        continue
+
+                    # Generate cartesian product of all layer possibilities
+                    for combination in itertools.product(*layer_combinations):
+                        try:
+                            # Create a temporary grid to build this specific configuration
+                            temp_grid = Grid(self.display_size, self.display_size)
+                            filled = set()
+                            agent_positions = []
+                            temp_carrying = None  # Agent always starts empty-handed
+
+                            # Apply each layer in this combination
+                            for layer_idx, (layer_info, position_set) in enumerate(
+                                    zip(layer_possibilities, combination)):
+                                if not layer_info or not position_set:
+                                    continue
+
+                                obj_type = layer_info['obj_type']
+                                colour = layer_info['colour']
+                                status = layer_info['status']
+
+                                # Transform positions
+                                transformed_positions = []
+                                for x, y in position_set:
+                                    x_shift, y_shift = anchor_x + x, anchor_y + y
+                                    x_rot, y_rot = rotate_coordinate(x_shift, y_shift, rotation, self.display_size)
+                                    x_final, y_final = flip_coordinate(x_rot, y_rot, flip, self.display_size)
+                                    transformed_positions.append((x_final, y_final))
+
+                                # Check for conflicts (except doors can overwrite)
+                                if obj_type != "door":
+                                    available_positions = [pos for pos in transformed_positions if pos not in filled]
+                                    if len(available_positions) != len(transformed_positions):
+                                        # Skip this combination due to conflicts
+                                        break
+                                    used_positions = available_positions
+                                else:
+                                    used_positions = transformed_positions
+
+                                # Place objects
+                                for x, y in used_positions:
+                                    if x < 0 or x >= self.display_size or y < 0 or y >= self.display_size:
+                                        continue  # Skip out-of-bounds positions
+
+                                    obj = self.create_object(obj_type, colour, status)
+
+                                    if obj_type == "agent":
+                                        agent_positions.append((x, y))
+                                    else:
+                                        temp_grid.set(x, y, obj)
+                                        if obj_type != "door":
+                                            filled.add((x, y))
+
+                            else:  # Only executed if the for loop completed without break
+                                # All layers placed successfully
+                                if not agent_positions:
+                                    continue  # Skip if no agent position
+
+                                # Generate states for all agent position and orientation combinations
+                                for agent_pos in agent_positions:
+                                    for agent_orientation in agent_orientations:
+                                        # Apply transformation to agent direction
+                                        final_agent_dir = flip_direction(
+                                            rotate_direction(agent_orientation, rotation),
+                                            flip
+                                        )
+
+                                        # Create the state encoding
+                                        # Temporarily set the environment state
+                                        old_grid = self.grid
+                                        old_agent_pos = getattr(self, 'agent_pos', None)
+                                        old_agent_dir = getattr(self, 'agent_dir', None)
+                                        old_carrying = getattr(self, 'carrying', None)
+                                        old_width = getattr(self, 'width', None)
+                                        old_height = getattr(self, 'height', None)
+
+                                        try:
+                                            # Set temporary state
+                                            self.grid = temp_grid
+                                            self.agent_pos = agent_pos
+                                            self.agent_dir = final_agent_dir
+                                            self.carrying = None  # Always empty-handed at start
+                                            self.width = self.display_size
+                                            self.height = self.display_size
+
+                                            # Generate state encoding
+                                            state_encoding = self.encode_state()
+
+                                            # Add to results if not already present
+                                            if state_encoding not in start_states:
+                                                start_states.append(state_encoding)
+
+                                        finally:
+                                            # Restore original state
+                                            self.grid = old_grid
+                                            if old_agent_pos is not None:
+                                                self.agent_pos = old_agent_pos
+                                            if old_agent_dir is not None:
+                                                self.agent_dir = old_agent_dir
+                                            if old_carrying is not None:
+                                                self.carrying = old_carrying
+                                            if old_width is not None:
+                                                self.width = old_width
+                                            if old_height is not None:
+                                                self.height = old_height
+
+                        except Exception:
+                            # Skip this combination if any error occurs
+                            continue
+
+        return start_states
 
 
 def rotate_coordinate(x, y, rotation_mode, n):

@@ -1,12 +1,12 @@
 from typing import Union, List, Optional, Dict, Any, Tuple, Set
 from collections import deque
 
-from customisable_env_abs import CustomisableStrEnvAbs, CustomisableIntEnvAbs
+from customisable_env_abs import CustomisableEnvAbs
 from mdp_network import MDPNetwork
 
 
 def deterministic_mdp_sampling(
-        env: Union['CustomisableStrEnvAbs', 'CustomisableIntEnvAbs'],
+        env: 'CustomisableEnvAbs',
         start_states: Optional[Union[List[str], List[int], str, int]] = None,
         max_states: int = float('inf')
 ) -> Tuple['MDPNetwork', Dict[int, Union[str, int]], Dict[Union[str, int], int]]:
