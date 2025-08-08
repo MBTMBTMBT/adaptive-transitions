@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 import numpy as np
 import networkx as nx
 
@@ -8,15 +8,20 @@ class MDPNetwork:
     """
     A class to represent MDP using NetworkX directed graph.
     Can load from JSON configuration and export back to JSON.
+    Supports optional string state mapping for environments that use string states.
     """
 
-    def __init__(self, config_data: Optional[Dict] = None, config_path: Optional[str] = None):
+    def __init__(self, config_data: Optional[Dict] = None, config_path: Optional[str] = None,
+                 int_to_state: Optional[Dict[int, Union[str, int]]] = None,
+                 state_to_int: Optional[Dict[Union[str, int], int]] = None):
         """
         Initialize MDP Network from config data or file path.
 
         Args:
             config_data: Dictionary containing MDP configuration
             config_path: Path to JSON configuration file
+            int_to_state: Optional mapping from internal int IDs to original states
+            state_to_int: Optional mapping from original states to internal int IDs
         """
         if config_path is not None:
             with open(config_path, 'r') as f:
@@ -25,6 +30,11 @@ class MDPNetwork:
             self.config = config_data.copy()
         else:
             raise ValueError("Either config_data or config_path must be provided")
+
+        # Store state mappings (None if not using string states)
+        self.int_to_state = int_to_state
+        self.state_to_int = state_to_int
+        self.has_string_mapping = (int_to_state is not None) and (state_to_int is not None)
 
         # Extract configuration parameters
         self.num_actions = self.config["num_actions"]
@@ -36,6 +46,24 @@ class MDPNetwork:
 
         # Build NetworkX directed graph
         self._build_graph()
+
+    def _normalize_state_input(self, state: Union[int, str]) -> int:
+        """Convert state input to internal int representation."""
+        if self.has_string_mapping:
+            if isinstance(state, str):
+                if state in self.state_to_int:
+                    return self.state_to_int[state]
+                else:
+                    raise ValueError(f"Unknown string state: {state}")
+            elif isinstance(state, int):
+                return state
+        return int(state)
+
+    def _format_state_output(self, int_state: int, as_string: bool = False) -> Union[int, str]:
+        """Format state output based on requirements."""
+        if as_string and self.has_string_mapping:
+            return self.int_to_state.get(int_state, int_state)
+        return int_state
 
     def _build_graph(self):
         """Build the NetworkX directed graph from configuration."""
@@ -68,41 +96,56 @@ class MDPNetwork:
                         else:
                             self.graph.add_edge(state, next_state, transitions={action: normalized_prob})
 
-    def get_transition_probabilities(self, state: int, action: int) -> Dict[int, float]:
+    def get_transition_probabilities(self, state: Union[int, str], action: int) -> Dict[Union[int, str], float]:
         """Get transition probabilities for a given state-action pair."""
+        int_state = self._normalize_state_input(state)
         probs = {}
 
-        for next_state in self.graph.successors(state):
-            edge_data = self.graph[state][next_state]
+        for next_state in self.graph.successors(int_state):
+            edge_data = self.graph[int_state][next_state]
             if 'transitions' in edge_data and action in edge_data['transitions']:
-                probs[next_state] = edge_data['transitions'][action]
+                # Return in same format as input
+                output_state = self._format_state_output(next_state, isinstance(state, str))
+                probs[output_state] = edge_data['transitions'][action]
 
         return probs
 
-    def get_state_reward(self, state: int) -> float:
+    def get_state_reward(self, state: Union[int, str]) -> float:
         """Get reward for entering a specific state."""
-        return self.graph.nodes[state]['reward']
+        int_state = self._normalize_state_input(state)
+        return self.graph.nodes[int_state]['reward']
 
-    def is_terminal_state(self, state: int) -> bool:
+    def is_terminal_state(self, state: Union[int, str]) -> bool:
         """Check if a state is terminal."""
-        return state in self.terminal_states
+        int_state = self._normalize_state_input(state)
+        return int_state in self.terminal_states
 
-    def sample_next_state(self, state: int, action: int, rng: np.random.Generator) -> int:
+    def sample_next_state(self, state: Union[int, str], action: int, rng: np.random.Generator,
+                          as_string: bool = False) -> Union[int, str]:
         """Sample next state based on transition probabilities."""
-        probs = self.get_transition_probabilities(state, action)
+        int_state = self._normalize_state_input(state)
+        probs = {}
+
+        for next_state in self.graph.successors(int_state):
+            edge_data = self.graph[int_state][next_state]
+            if 'transitions' in edge_data and action in edge_data['transitions']:
+                probs[next_state] = edge_data['transitions'][action]
 
         if not probs:
             # No valid transitions for this action, stay in current state
-            return state
+            return self._format_state_output(int_state, as_string)
 
         # Sample next state based on probabilities
         states = list(probs.keys())
         probabilities = list(probs.values())
-        return rng.choice(states, p=probabilities)
+        next_int_state = rng.choice(states, p=probabilities)
 
-    def sample_start_state(self, rng: np.random.Generator) -> int:
+        return self._format_state_output(next_int_state, as_string)
+
+    def sample_start_state(self, rng: np.random.Generator, as_string: bool = False) -> Union[int, str]:
         """Sample a random start state."""
-        return rng.choice(self.start_states)
+        int_start_state = rng.choice(self.start_states)
+        return self._format_state_output(int_start_state, as_string)
 
     def export_to_json(self, output_path: str):
         """Export the MDP configuration to a JSON file."""
@@ -146,37 +189,51 @@ class MDPNetwork:
             "transitions": transitions
         }
 
+        # Add mapping information if available
+        if self.has_string_mapping:
+            export_config["state_mapping"] = {
+                "int_to_state": {str(k): v for k, v in self.int_to_state.items()},
+                "state_to_int": {str(k): v for k, v in self.state_to_int.items()}
+            }
+
         # Save to file
         with open(output_path, 'w') as f:
             json.dump(export_config, f, indent=2)
 
-    def add_state(self, state: int, reward: Optional[float] = None, is_terminal: bool = False, is_start: bool = False):
+    def add_state(self, state: Union[int, str], reward: Optional[float] = None,
+                  is_terminal: bool = False, is_start: bool = False):
         """Add a new state to the MDP."""
-        if state not in self.states:
-            self.states.append(state)
+        int_state = self._normalize_state_input(state)
+
+        if int_state not in self.states:
+            self.states.append(int_state)
 
         reward_value = reward if reward is not None else self.default_reward
-        self.graph.add_node(state, reward=reward_value, is_terminal=is_terminal)
+        self.graph.add_node(int_state, reward=reward_value, is_terminal=is_terminal)
 
         if is_terminal:
-            self.terminal_states.add(state)
+            self.terminal_states.add(int_state)
 
-        if is_start and state not in self.start_states:
-            self.start_states.append(state)
+        if is_start and int_state not in self.start_states:
+            self.start_states.append(int_state)
 
         # Update state rewards if different from default
         if reward is not None and reward != self.default_reward:
-            self.state_rewards[str(state)] = reward
+            self.state_rewards[str(int_state)] = reward
 
-    def add_transition(self, from_state: int, to_state: int, action: int, probability: float):
+    def add_transition(self, from_state: Union[int, str], to_state: Union[int, str],
+                       action: int, probability: float):
         """Add a transition between states."""
-        if not self.graph.has_edge(from_state, to_state):
-            self.graph.add_edge(from_state, to_state, transitions={})
+        int_from_state = self._normalize_state_input(from_state)
+        int_to_state = self._normalize_state_input(to_state)
 
-        if 'transitions' not in self.graph[from_state][to_state]:
-            self.graph[from_state][to_state]['transitions'] = {}
+        if not self.graph.has_edge(int_from_state, int_to_state):
+            self.graph.add_edge(int_from_state, int_to_state, transitions={})
 
-        self.graph[from_state][to_state]['transitions'][action] = probability
+        if 'transitions' not in self.graph[int_from_state][int_to_state]:
+            self.graph[int_from_state][int_to_state]['transitions'] = {}
+
+        self.graph[int_from_state][int_to_state]['transitions'][action] = probability
 
     def get_graph_copy(self) -> nx.DiGraph:
         """Get a copy of the underlying NetworkX graph."""

@@ -1,6 +1,4 @@
-import json
-import random
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 import numpy as np
 import pygame
 import networkx as nx
@@ -13,12 +11,13 @@ class NetworkXMDPEnvironment(gym.Env):
     """
     A custom Gymnasium environment that uses MDPNetwork to represent MDP.
     The environment is configured through JSON files or MDPNetwork objects.
+    Supports both integer and string state representations.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
     def __init__(self, mdp_network: Optional[MDPNetwork] = None, config_path: Optional[str] = None,
-                 render_mode: Optional[str] = None):
+                 render_mode: Optional[str] = None, output_string_states: bool = False):
         """
         Initialize the NetworkX MDP environment.
 
@@ -26,6 +25,7 @@ class NetworkXMDPEnvironment(gym.Env):
             mdp_network: MDPNetwork object
             config_path: Path to the JSON configuration file (if mdp_network is None)
             render_mode: Rendering mode ("human", "rgb_array", or None)
+            output_string_states: If True, output string states when possible
         """
         super().__init__()
 
@@ -36,6 +36,9 @@ class NetworkXMDPEnvironment(gym.Env):
             self.mdp = MDPNetwork(config_path=config_path)
         else:
             raise ValueError("Either mdp_network or config_path must be provided")
+
+        # State output preference
+        self.output_string_states = output_string_states and self.mdp.has_string_mapping
 
         # Define action and observation spaces
         self.action_space = spaces.Discrete(self.mdp.num_actions)
@@ -50,25 +53,26 @@ class NetworkXMDPEnvironment(gym.Env):
         # Current state
         self.current_state = None
 
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[int, Dict]:
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Union[int, str], Dict]:
         """Reset the environment to a random start state."""
         super().reset(seed=seed)
 
         # Choose random start state
-        self.current_state = self.mdp.sample_start_state(self.np_random)
+        self.current_state = self.mdp.sample_start_state(self.np_random, as_string=self.output_string_states)
 
         if self.render_mode == "human":
             self.render()
 
         return self.current_state, {}
 
-    def step(self, action: int) -> Tuple[int, float, bool, bool, Dict]:
+    def step(self, action: int) -> Tuple[Union[int, str], float, bool, bool, Dict]:
         """Execute one step in the environment."""
         if self.current_state is None:
             raise RuntimeError("Environment not reset. Call reset() before step().")
 
         # Sample next state
-        next_state = self.mdp.sample_next_state(self.current_state, action, self.np_random)
+        next_state = self.mdp.sample_next_state(self.current_state, action, self.np_random,
+                                                as_string=self.output_string_states)
 
         # Update current state
         self.current_state = next_state
@@ -103,6 +107,12 @@ class NetworkXMDPEnvironment(gym.Env):
 
         # Get graph for rendering
         graph = self.mdp.get_graph_copy()
+
+        # Convert current state to internal int for rendering
+        if isinstance(self.current_state, str) and self.mdp.has_string_mapping:
+            render_current_state = self.mdp.state_to_int[self.current_state]
+        else:
+            render_current_state = self.current_state
 
         # Calculate layout using spring layout (leave space for legend)
         graph_area_size = self.window_size - 120  # Reserve space for legend
@@ -140,7 +150,7 @@ class NetworkXMDPEnvironment(gym.Env):
             x, y = pos[node]
 
             # Choose color and pattern based on state type
-            if node == self.current_state:
+            if node == render_current_state:
                 color = (255, 0, 0)  # Red
                 # Draw filled circle with cross pattern
                 pygame.draw.circle(canvas, color, (int(x), int(y)), 25)
@@ -164,11 +174,23 @@ class NetworkXMDPEnvironment(gym.Env):
             # Draw black border for all nodes
             pygame.draw.circle(canvas, (0, 0, 0), (int(x), int(y)), 25, 2)
 
-            # Draw state number
-            font = pygame.font.Font(None, 24)
-            text = font.render(str(node), True, (0, 0, 0))
+            # Draw state label (show original state if has mapping)
+            font = pygame.font.Font(None, 20)
+            if self.mdp.has_string_mapping and node in self.mdp.int_to_state:
+                label = str(self.mdp.int_to_state[node])
+            else:
+                label = str(node)
+
+            # Truncate long labels
+            if len(label) > 8:
+                label = label[:6] + ".."
+
+            text = font.render(label, True, (0, 0, 0))
             text_rect = text.get_rect(center=(int(x), int(y)))
             canvas.blit(text, text_rect)
+
+        # Rest of the rendering code remains the same...
+        # (legend drawing, window update, etc.)
 
         # Draw legend
         legend_x = graph_area_size + 10

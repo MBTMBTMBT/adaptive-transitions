@@ -455,9 +455,8 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
 
         return obs, {}
 
-    def step(
-            self, action: ActType
-    ) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
+    def step(self, action: ActType) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
+        """Override step method to optionally use NetworkX environment."""
         if self.networkx_env is not None:
             # Get current encoded state
             current_encoded_state = self.encode_state()
@@ -471,10 +470,35 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             # Decode the next state and set environment
             obs, decode_info = self.decode_state(next_networkx_state)
 
+            # Update step count manually since we're bypassing normal step logic
+            self.step_count += 1
+
+            # Check for truncation due to max steps
+            if self.step_count >= self.max_steps:
+                truncated = True
+
+            # Handle sparse vs dense reward mode using NetworkX reward
+            if hasattr(self, 'reward_config') and self.reward_config.get("sparse", False):
+                # Accumulate reward but only return it at termination
+                self.cumulative_reward += reward
+                if terminated or truncated:
+                    # Return total accumulated reward
+                    returned_reward = self.cumulative_reward
+                else:
+                    # Return zero reward for non-terminal steps
+                    returned_reward = 0.0
+            else:
+                # Return immediate reward (dense mode)
+                returned_reward = reward
+
+            # Trigger rendering if in human mode
+            if self.render_mode == "human":
+                self.render()
+
             # Merge info dictionaries
             info.update(decode_info)
 
-            return obs, reward, terminated, truncated, info
+            return obs, returned_reward, terminated, truncated, info
         else:
             self.step_count += 1
 

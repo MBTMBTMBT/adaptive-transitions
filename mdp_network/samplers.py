@@ -1,15 +1,13 @@
-from typing import Union, List, Optional, Dict, Any, Tuple, Set
-from collections import deque
-
+from typing import Union, List, Optional
 from customisable_env_abs import CustomisableEnvAbs
 from mdp_network import MDPNetwork
 
 
 def deterministic_mdp_sampling(
-        env: 'CustomisableEnvAbs',
+        env: CustomisableEnvAbs,
         start_states: Optional[Union[List[str], List[int], str, int]] = None,
         max_states: int = float('inf')
-) -> Tuple['MDPNetwork', Dict[int, Union[str, int]], Dict[Union[str, int], int]]:
+) -> 'MDPNetwork':
     """
     Unified deterministic MDP transition sampling function for both string and int state environments.
 
@@ -22,10 +20,7 @@ def deterministic_mdp_sampling(
         max_states: Maximum number of states to explore. Default is infinite.
 
     Returns:
-        Tuple containing:
-        - MDPNetwork: The sampled MDP as a network structure
-        - Dict[int, Union[str, int]]: Mapping from internal int IDs to original states
-        - Dict[Union[str, int], int]: Mapping from original states to internal int IDs
+        MDPNetwork: The sampled MDP as a network structure with optional string mapping
     """
     # Verify environment has required methods
     required_methods = ['encode_state', 'decode_state', 'step', 'reset']
@@ -36,6 +31,7 @@ def deterministic_mdp_sampling(
     # Reset environment and setup
     env.reset()
     current_state = env.encode_state()
+    uses_string_states = isinstance(current_state, str)
 
     # Store and disable sparse rewards if exists
     original_sparse = None
@@ -55,7 +51,7 @@ def deterministic_mdp_sampling(
             raise ValueError("start_states must be None, a single state, or a list of states")
 
         print(f"Starting deterministic MDP sampling from {len(start_points)} start state(s)...")
-        print(f"Environment uses {'string' if isinstance(current_state, str) else 'integer'} states")
+        print(f"Environment uses {'string' if uses_string_states else 'integer'} states")
 
         # Initialize data structures
         state_to_int = {}  # Original state -> internal int ID
@@ -153,8 +149,13 @@ def deterministic_mdp_sampling(
                     str(target_state_id): prob for target_state_id, prob in action_transitions.items()
                 }
 
-        # Create MDPNetwork
-        mdp_network = MDPNetwork(config_data=mdp_config)
+        # Create MDPNetwork with optional string mapping
+        if uses_string_states:
+            mdp_network = MDPNetwork(config_data=mdp_config,
+                                   int_to_state=int_to_state,
+                                   state_to_int=state_to_int)
+        else:
+            mdp_network = MDPNetwork(config_data=mdp_config)
 
         # Print statistics
         total_transitions = sum(sum(len(action_dict) for action_dict in state_dict.values())
@@ -164,8 +165,9 @@ def deterministic_mdp_sampling(
         print(f"Terminal states: {len(terminal_states)}")
         print(f"Start states: {len(start_state_ids)}")
         print(f"Total transitions: {total_transitions}")
+        print(f"String mapping: {'Yes' if uses_string_states else 'No'}")
 
-        return mdp_network, int_to_state, state_to_int
+        return mdp_network
 
     finally:
         # Restore original sparse reward setting

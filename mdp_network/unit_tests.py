@@ -63,7 +63,7 @@ if __name__ == "__main__":
                 render_carried_objs=True,
                 render_mode="rgb_array",
             )
-            sampled_mdp, int_to_string, string_to_int = deterministic_mdp_sampling(env)
+            sampled_mdp = deterministic_mdp_sampling(env)
             mdps.append(sampled_mdp)
             prefixes.append(env_config['prefix'])
             print(f"Successfully loaded environment: {env_config['path']}")
