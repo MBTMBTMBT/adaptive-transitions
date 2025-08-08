@@ -1,11 +1,11 @@
 import os
 
-from computes import compute_information_surprise
-from plots import plot_values, plot_policy, plot_q_values
-from mdp_tables import q_table_to_policy, create_random_policy
-from solvers import *
+from mdp_network.computes import compute_information_surprise
+from mdp_network.plots import plot_values, plot_policy, plot_q_values
+from mdp_network.mdp_tables import q_table_to_policy, create_random_policy
+from mdp_network.solvers import *
+from mdp_network.samplers import deterministic_mdp_sampling
 from customised_minigrid_env.customised_minigrid_env import CustomMiniGridEnv
-from samplers import deterministic_mdp_sampling
 
 
 def ensure_output_dir(output_dir: str = "./outputs"):
@@ -20,7 +20,7 @@ if __name__ == "__main__":
     print("=== MDP Solver Unit Tests with Network Visualization ===\n")
 
     # Create output directory
-    output_dir = ensure_output_dir("./outputs")
+    output_dir = ensure_output_dir("outputs")
     print(f"Output directory: {output_dir}\n")
 
     # Test configurations - ordered from small to large
@@ -28,11 +28,11 @@ if __name__ == "__main__":
     prefixes = []
 
     # Load the chain MDP (smallest)
-    mdps.append(MDPNetwork(config_path="mdps/chain-3.json"))
+    mdps.append(MDPNetwork(config_path="../mdp_network/mdps/chain-3.json"))
     prefixes.append("chain-3")
-    mdps.append(MDPNetwork(config_path="mdps/chain-5.json"))
+    mdps.append(MDPNetwork(config_path="../mdp_network/mdps/chain-5.json"))
     prefixes.append("chain-5")
-    mdps.append(MDPNetwork(config_path="mdps/chain-7.json"))
+    mdps.append(MDPNetwork(config_path="../mdp_network/mdps/chain-7.json"))
     prefixes.append("chain-7")
 
     # Sample MDPs from environments (small to large)

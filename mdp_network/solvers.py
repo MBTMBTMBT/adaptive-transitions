@@ -1,8 +1,8 @@
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 
-from mdp_tables import QTable, ValueTable, PolicyTable, RewardDistributionTable
-from mdp_network import MDPNetwork
+from .mdp_tables import QTable, ValueTable, PolicyTable, RewardDistributionTable
+from .mdp_network import MDPNetwork
 
 
 def policy_evaluation(mdp_network: MDPNetwork,

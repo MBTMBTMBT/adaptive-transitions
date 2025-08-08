@@ -2,8 +2,8 @@ import numpy as np
 from typing import Union
 from scipy.stats import norm
 
-from mdp_network import MDPNetwork
-from mdp_tables import ValueTable
+from .mdp_network import MDPNetwork
+from .mdp_tables import ValueTable
 
 
 def gaussian_bayesian_update(prior_mu: Union[float, np.ndarray],

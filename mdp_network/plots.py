@@ -4,8 +4,8 @@ import networkx as nx
 import numpy as np
 from matplotlib import pyplot as plt, patches as mpatches
 
-from mdp_network import MDPNetwork
-from mdp_tables import ValueTable, PolicyTable, QTable
+from .mdp_network import MDPNetwork
+from .mdp_tables import ValueTable, PolicyTable, QTable
 
 
 def plot_values(mdp_network: MDPNetwork, value_table: ValueTable, title: str, save_path: Optional[str] = None):
