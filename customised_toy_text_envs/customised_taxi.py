@@ -108,11 +108,11 @@ class CustomisedTaxiEnv(TaxiEnv, CustomisableEnvAbs):
 
         # Additional validation: passenger and destination should not be the same
         # unless the passenger is in the taxi (pass_loc == 4)
-        if pass_loc < 4 and pass_loc == dest_idx:
-            raise ValueError(
-                f"Invalid state: passenger at location {pass_loc} cannot have "
-                f"the same location as destination {dest_idx}"
-            )
+        # if pass_loc < 4 and pass_loc == dest_idx:
+        #     raise ValueError(
+        #         f"Invalid state: passenger at location {pass_loc} cannot have "
+        #         f"the same location as destination {dest_idx}"
+        #     )
 
         # Set the environment state
         self.s = state
