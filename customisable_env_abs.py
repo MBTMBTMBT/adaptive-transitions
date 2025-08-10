@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Dict, Any, Union, List
 from gymnasium.core import ObsType
 
+from mdp_network import MDPNetwork
 from networkx_env.networkx_env import NetworkXMDPEnvironment
 
 
@@ -19,4 +20,8 @@ class CustomisableEnvAbs(ABC):
 
     @abstractmethod
     def get_start_states(self,) -> List[Union[int, str]]:
+        pass
+
+    @abstractmethod
+    def get_mdp_network(self,) -> MDPNetwork:
         pass

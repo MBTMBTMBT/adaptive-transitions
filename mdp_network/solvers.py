@@ -11,91 +11,49 @@ def policy_evaluation(mdp_network: MDPNetwork,
                       theta: float = 1e-6,
                       max_iterations: int = 1000) -> ValueTable:
     """
-    Evaluate a given policy using value iteration to compute state values.
-    Now supports probabilistic policies.
-
-    Args:
-        mdp_network: The MDP network to solve
-        policy: Policy table mapping state -> action probability distribution
-        gamma: Discount factor (0 <= gamma <= 1)
-        theta: Convergence threshold
-        max_iterations: Maximum number of iterations
-
-    Returns:
-        ValueTable object containing computed state values under the given policy
+    Evaluate V^π using R(s,a,s').
     """
-
-    # Initialize value table
     value_table = ValueTable()
-
-    # Get all states
     states = mdp_network.states
-
-    # Initialize values to zero
-    for state in states:
-        value_table.set_value(state, 0.0)
+    for s in states:
+        value_table.set_value(s, 0.0)
 
     print(f"Policy evaluation started: {len(states)} states, gamma={gamma}, theta={theta}")
 
-    # Policy evaluation loop
-    for iteration in range(max_iterations):
+    for it in range(max_iterations):
         max_delta = 0.0
-
-        # Update value for each state
-        for state in states:
-            if mdp_network.is_terminal_state(state):
-                # Terminal states have zero value
-                value_table.set_value(state, 0.0)
+        for s in states:
+            if mdp_network.is_terminal_state(s):
+                value_table.set_value(s, 0.0)
                 continue
 
-            old_value = value_table.get_value(state)
+            old_v = value_table.get_value(s)
+            new_v = 0.0
+            action_probs = policy.get_action_probabilities(s)
 
-            # Compute expected value over all actions according to policy
-            new_value = 0.0
-            action_probs = policy.get_action_probabilities(state)
-
-            for action, action_prob in action_probs.items():
-                if action_prob <= 0:
+            for a, pi_sa in action_probs.items():
+                if pi_sa <= 0:
                     continue
+                # Sum over s': P * (R + gamma * V)
+                sa_val = 0.0
+                trans = mdp_network.get_transition_probabilities(s, a)
+                if not trans:
+                    # fallback: self-loop with default reward
+                    r = mdp_network.default_reward
+                    sa_val = r + gamma * value_table.get_value(s)
+                else:
+                    for sp, p in trans.items():
+                        r = mdp_network.get_transition_reward(s, a, sp)
+                        sa_val += p * (r + gamma * value_table.get_value(sp))
+                new_v += pi_sa * sa_val
 
-                # Compute value for this action
-                action_value = 0.0
+            value_table.set_value(s, new_v)
+            max_delta = max(max_delta, abs(new_v - old_v))
 
-                # Get transition probabilities for this state-action pair
-                transition_probs = mdp_network.get_transition_probabilities(state, action)
-
-                if not transition_probs:
-                    # No transitions defined, assume staying in same state
-                    transition_probs = {state: 1.0}
-
-                # Sum over all possible next states
-                for next_state, prob in transition_probs.items():
-                    # Immediate reward for transitioning to next_state
-                    reward = mdp_network.get_state_reward(next_state)
-
-                    # Value of next state
-                    next_value = value_table.get_value(next_state)
-
-                    # Add contribution from this transition
-                    action_value += prob * (reward + gamma * next_value)
-
-                # Weight by action probability
-                new_value += action_prob * action_value
-
-            # Update value
-            value_table.set_value(state, new_value)
-
-            # Track maximum change for convergence check
-            delta = abs(new_value - old_value)
-            max_delta = max(max_delta, delta)
-
-        # Print debug info every 100 iterations
-        if (iteration + 1) % 100 == 0:
-            print(f"  Policy evaluation iteration {iteration + 1}: max_change = {max_delta:.6f}")
-
-        # Check for convergence
+        if (it + 1) % 100 == 0:
+            print(f"  Policy evaluation iteration {it + 1}: max_change = {max_delta:.6f}")
         if max_delta < theta:
-            print(f"Policy evaluation converged after {iteration + 1} iterations, final max_change = {max_delta:.6f}")
+            print(f"Policy evaluation converged after {it + 1} iterations, final max_change = {max_delta:.6f}")
             break
     else:
         print(f"Policy evaluation reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
@@ -108,93 +66,54 @@ def optimal_value_iteration(mdp_network: MDPNetwork,
                             theta: float = 1e-6,
                             max_iterations: int = 1000) -> Tuple[ValueTable, QTable]:
     """
-    Solve MDP using optimal value iteration to compute optimal values and Q-values.
-    No longer returns a deterministic policy - use q_table_to_policy instead.
-
-    Args:
-        mdp_network: The MDP network to solve
-        gamma: Discount factor (0 <= gamma <= 1)
-        theta: Convergence threshold
-        max_iterations: Maximum number of iterations
-
-    Returns:
-        Tuple of (optimal_value_table, optimal_q_table)
+    Compute V* and Q* using R(s,a,s').
     """
-
-    # Initialize value and Q tables
     value_table = ValueTable()
     q_table = QTable()
 
-    # Get all states and actions
     states = mdp_network.states
-    num_actions = mdp_network.num_actions
+    A = mdp_network.num_actions
 
-    # Initialize values to zero
-    for state in states:
-        value_table.set_value(state, 0.0)
-        for action in range(num_actions):
-            q_table.set_q_value(state, action, 0.0)
+    for s in states:
+        value_table.set_value(s, 0.0)
+        for a in range(A):
+            q_table.set_q_value(s, a, 0.0)
 
-    print(f"Optimal value iteration started: {len(states)} states, {num_actions} actions, gamma={gamma}, theta={theta}")
+    print(f"Optimal value iteration started: {len(states)} states, {A} actions, gamma={gamma}, theta={theta}")
 
-    # Optimal value iteration loop
-    for iteration in range(max_iterations):
+    for it in range(max_iterations):
         max_delta = 0.0
-
-        # Update values for each state
-        for state in states:
-            if mdp_network.is_terminal_state(state):
-                # Terminal states have zero value
-                value_table.set_value(state, 0.0)
-                for action in range(num_actions):
-                    q_table.set_q_value(state, action, 0.0)
+        for s in states:
+            if mdp_network.is_terminal_state(s):
+                value_table.set_value(s, 0.0)
+                for a in range(A):
+                    q_table.set_q_value(s, a, 0.0)
                 continue
 
-            old_value = value_table.get_value(state)
+            old_v = value_table.get_value(s)
+            action_vals = []
 
-            # Compute Q-values for all actions in this state
-            action_values = []
-            for action in range(num_actions):
-                # Compute Q-value using Bellman optimality equation
-                q_value = 0.0
+            for a in range(A):
+                q = 0.0
+                trans = mdp_network.get_transition_probabilities(s, a)
+                if not trans:
+                    r = mdp_network.default_reward
+                    q = r + gamma * value_table.get_value(s)
+                else:
+                    for sp, p in trans.items():
+                        r = mdp_network.get_transition_reward(s, a, sp)
+                        q += p * (r + gamma * value_table.get_value(sp))
+                q_table.set_q_value(s, a, q)
+                action_vals.append(q)
 
-                # Get transition probabilities for this state-action pair
-                transition_probs = mdp_network.get_transition_probabilities(state, action)
+            new_v = max(action_vals) if action_vals else 0.0
+            value_table.set_value(s, new_v)
+            max_delta = max(max_delta, abs(new_v - old_v))
 
-                if not transition_probs:
-                    # No transitions defined, assume staying in same state
-                    transition_probs = {state: 1.0}
-
-                # Sum over all possible next states
-                for next_state, prob in transition_probs.items():
-                    # Immediate reward for transitioning to next_state
-                    reward = mdp_network.get_state_reward(next_state)
-
-                    # Optimal value of next state
-                    next_value = value_table.get_value(next_state)
-
-                    # Add contribution from this transition
-                    q_value += prob * (reward + gamma * next_value)
-
-                # Store Q-value
-                q_table.set_q_value(state, action, q_value)
-                action_values.append(q_value)
-
-            # Optimal value is the maximum over all actions
-            new_value = max(action_values) if action_values else 0.0
-            value_table.set_value(state, new_value)
-
-            # Track maximum change for convergence check
-            delta = abs(new_value - old_value)
-            max_delta = max(max_delta, delta)
-
-        # Print debug info every 100 iterations
-        if (iteration + 1) % 100 == 0:
-            print(f"  Optimal value iteration {iteration + 1}: max_change = {max_delta:.6f}")
-
-        # Check for convergence
+        if (it + 1) % 100 == 0:
+            print(f"  Optimal value iteration {it + 1}: max_change = {max_delta:.6f}")
         if max_delta < theta:
-            print(f"Optimal value iteration converged after {iteration + 1} iterations, final max_change = {max_delta:.6f}")
+            print(f"Optimal value iteration converged after {it + 1} iterations, final max_change = {max_delta:.6f}")
             break
     else:
         print(f"Optimal value iteration reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
@@ -210,105 +129,66 @@ def q_learning(mdp_network: MDPNetwork,
                max_steps_per_episode: int = 1000,
                seed: Optional[int] = None) -> Tuple[QTable, ValueTable]:
     """
-    Solve MDP using Q-Learning algorithm.
-    No longer returns a deterministic policy - use q_table_to_policy instead.
-
-    Args:
-        mdp_network: The MDP network to solve
-        alpha: Learning rate (0 < alpha <= 1)
-        gamma: Discount factor (0 <= gamma <= 1)
-        epsilon: Exploration rate for epsilon-greedy policy (0 <= epsilon <= 1)
-        num_episodes: Number of episodes to run
-        max_steps_per_episode: Maximum steps per episode
-        seed: Random seed for reproducibility
-
-    Returns:
-        Tuple of (q_table, optimal_value_table)
+    Tabular Q-learning with R(s,a,s') via mdp.sample_step.
     """
-
-    # Initialize random number generator
     rng = np.random.default_rng(seed)
-
-    # Initialize Q-table and value table
     q_table = QTable()
     value_table = ValueTable()
 
-    # Initialize Q-values for all state-action pairs
     states = mdp_network.states
-    num_actions = mdp_network.num_actions
+    A = mdp_network.num_actions
 
-    for state in states:
-        value_table.set_value(state, 0.0)  # Initialize with value 0
-        for action in range(num_actions):
-            q_table.set_q_value(state, action, 0.0)
+    for s in states:
+        value_table.set_value(s, 0.0)
+        for a in range(A):
+            q_table.set_q_value(s, a, 0.0)
 
-    print(f"Q-Learning started: {len(states)} states, {num_actions} actions, {num_episodes} episodes")
+    print(f"Q-Learning started: {len(states)} states, {A} actions, {num_episodes} episodes")
     print(f"  Parameters: alpha={alpha}, gamma={gamma}, epsilon={epsilon}")
 
-    # Q-Learning episodes
-    for episode in range(num_episodes):
-        # Start from a random start state
-        current_state = mdp_network.sample_start_state(rng)
-
+    for ep in range(num_episodes):
+        s = mdp_network.sample_start_state(rng)
         episode_steps = 0
-        for step in range(max_steps_per_episode):
-            # Terminal state check
-            if mdp_network.is_terminal_state(current_state):
-                break
 
+        for _ in range(max_steps_per_episode):
+            if mdp_network.is_terminal_state(s):
+                break
             episode_steps += 1
 
-            # Choose action using epsilon-greedy policy
+            # epsilon-greedy
             if rng.random() < epsilon:
-                # Explore: random action
-                action = rng.integers(0, num_actions)
+                a = int(rng.integers(0, A))
             else:
-                # Exploit: best action according to current Q-values
-                action, _ = q_table.get_best_action(current_state)
+                a, _ = q_table.get_best_action(s)
 
-            # Take action and observe next state
-            next_state = mdp_network.sample_next_state(current_state, action, rng)
+            # one-step transition and reward
+            sp, r = mdp_network.sample_step(s, a, rng)
 
-            # Get immediate reward
-            reward = mdp_network.get_state_reward(next_state)
-
-            # Get current Q-value
-            current_q = q_table.get_q_value(current_state, action)
-
-            # Calculate target Q-value
-            if mdp_network.is_terminal_state(next_state):
-                target_q = reward
+            # TD update
+            q_sa = q_table.get_q_value(s, a)
+            if mdp_network.is_terminal_state(sp):
+                target = r
             else:
-                _, max_next_q = q_table.get_best_action(next_state)
-                target_q = reward + gamma * max_next_q
+                _, max_next_q = q_table.get_best_action(sp)
+                target = r + gamma * max_next_q
+            q_table.set_q_value(s, a, q_sa + alpha * (target - q_sa))
 
-            # Update Q-value using Q-learning update rule
-            new_q = current_q + alpha * (target_q - current_q)
-            q_table.set_q_value(current_state, action, new_q)
+            s = sp
 
-            # Move to next state
-            current_state = next_state
+        if (ep + 1) % 1000 == 0:
+            total_q = sum(q_table.get_q_value(s, a) for s in states for a in range(A))
+            avg_q = total_q / (len(states) * A)
+            print(f"  Q-Learning episode {ep + 1}/{num_episodes}: avg_q_value = {avg_q:.4f}, last_episode_steps = {episode_steps}")
 
-        # Print progress every 1000 episodes
-        if (episode + 1) % 1000 == 0:
-            # Calculate average Q-value as a measure of learning progress
-            total_q = sum(q_table.get_q_value(state, action)
-                         for state in states for action in range(num_actions))
-            avg_q = total_q / (len(states) * num_actions)
-            print(f"  Q-Learning episode {episode + 1}/{num_episodes}: avg_q_value = {avg_q:.4f}, last_episode_steps = {episode_steps}")
-
-    # Extract optimal value table from learned Q-values
-    for state in states:
-        if mdp_network.is_terminal_state(state):
-            # Terminal states have zero value
-            value_table.set_value(state, 0.0)
+    # derive V(s) = max_a Q(s,a)
+    for s in states:
+        if mdp_network.is_terminal_state(s):
+            value_table.set_value(s, 0.0)
         else:
-            # State value is the maximum Q-value over all actions
-            _, best_q_value = q_table.get_best_action(state)
-            value_table.set_value(state, best_q_value)
+            _, best_q = q_table.get_best_action(s)
+            value_table.set_value(s, best_q)
 
-    print(f"Q-Learning completed: {num_episodes} episodes finished")
-
+    print("Q-Learning completed")
     return q_table, value_table
 
 
@@ -420,63 +300,50 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
 
 def compute_reward_distribution(mdp_network: MDPNetwork,
                                 occupancy_table: 'ValueTable',
+                                policy: 'PolicyTable',
                                 delta: float = 0.01) -> Tuple['RewardDistributionTable', 'RewardDistributionTable']:
     """
-    Compute reward distribution from MDP network and occupancy table.
-
-    Combines state rewards with their occupancy measures to create:
-    1. Count distribution: total expected visits for each reward value
-    2. Probability distribution: normalized probabilities for each reward value
-
-    Args:
-        mdp_network: MDP network containing state rewards
-        occupancy_table: Table containing expected visit counts for each state
-        delta: Precision delta for grouping similar reward values
-
-    Returns:
-        Tuple of (count_distribution, probability_distribution)
-        - count_distribution: RewardDistributionTable with expected visit counts per reward
-        - probability_distribution: RewardDistributionTable with normalized probabilities
+    Compute distribution over transition rewards under (occupancy, policy).
+    Count for reward r is: sum_s Occ(s) * sum_a pi(a|s) * sum_{s'} P(s'|s,a) * 1[r_{s,a,s'}=r].
     """
     print(f"Computing reward distribution with delta precision: {delta:.2e}")
 
-    # Initialize count-based distribution table
-    count_distribution = RewardDistributionTable(delta=delta)
-
-    # Get all states from the MDP
+    count_dist = RewardDistributionTable(delta=delta)
     states = mdp_network.states
     processed_states = 0
 
-    print(f"Processing {len(states)} states...")
+    for s in states:
+        occ = occupancy_table.get_value(s)
+        if occ <= 0:
+            continue
+        processed_states += 1
 
-    # For each state, get its reward and occupancy measure
-    for state in states:
-        # Get state reward from MDP network
-        state_reward = mdp_network.get_state_reward(state)
+        # terminal states contribute occupancy but have no outgoing transitions
+        if mdp_network.is_terminal_state(s):
+            continue
 
-        # Get occupancy measure (expected visit count) for this state
-        occupancy = occupancy_table.get_value(state)
-
-        # Add to count distribution (accumulate occupancy for this reward value)
-        if occupancy > 0:  # Only consider states that are actually visited
-            count_distribution.add_count(state_reward, occupancy)
-            processed_states += 1
+        action_probs = policy.get_action_probabilities(s)
+        for a, pi_sa in action_probs.items():
+            if pi_sa <= 0:
+                continue
+            trans = mdp_network.get_transition_probabilities(s, a)
+            if not trans:
+                # no outgoing: self-loop with default reward
+                r = mdp_network.default_reward
+                count_dist.add_count(r, occ * pi_sa)  # weight fully to that reward
+            else:
+                for sp, p in trans.items():
+                    r = mdp_network.get_transition_reward(s, a, sp)
+                    count_dist.add_count(r, occ * pi_sa * p)
 
     print(f"Processed {processed_states} states with positive occupancy")
+    prob_dist = count_dist.normalize_to_probabilities()
 
-    # Create probability distribution by normalizing the count distribution
-    probability_distribution = count_distribution.normalize_to_probabilities()
+    total = count_dist.get_total_count()
+    uniq = len(count_dist.get_all_rewards())
+    print(f"Reward distribution computed:\n  Total occupancy-weighted transitions: {total:.6f}\n  Unique rewards: {uniq}")
+    if uniq > 0:
+        mr, mc = count_dist.get_most_frequent_reward()
+        print(f"  Most frequent reward: {mr:.6f} (weight: {mc:.6f})")
 
-    # Print summary statistics
-    total_occupancy = count_distribution.get_total_count()
-    num_unique_rewards = len(count_distribution.get_all_rewards())
-
-    print(f"Reward distribution computed:")
-    print(f"  Total occupancy: {total_occupancy:.6f}")
-    print(f"  Unique reward values: {num_unique_rewards}")
-
-    if num_unique_rewards > 0:
-        most_frequent_reward, highest_count = count_distribution.get_most_frequent_reward()
-        print(f"  Most frequent reward: {most_frequent_reward:.6f} (count: {highest_count:.6f})")
-
-    return count_distribution, probability_distribution
+    return count_dist, prob_dist

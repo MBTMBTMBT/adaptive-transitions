@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, Tuple, Optional, Union, Any
 import numpy as np
 import pygame
 import networkx as nx
@@ -9,27 +9,27 @@ from mdp_network import MDPNetwork
 
 class NetworkXMDPEnvironment(gym.Env):
     """
-    A custom Gymnasium environment that uses MDPNetwork to represent MDP.
-    The environment is configured through JSON files or MDPNetwork objects.
-    Supports both integer and string state representations.
+    Gymnasium env backed by an MDPNetwork.
+    Uses R(s, a, s') via mdp.sample_step.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, mdp_network: Optional[MDPNetwork] = None, config_path: Optional[str] = None,
-                 render_mode: Optional[str] = None, output_string_states: bool = False):
+    def __init__(self,
+                 mdp_network: Optional[MDPNetwork] = None,
+                 config_path: Optional[str] = None,
+                 render_mode: Optional[str] = None,
+                 output_string_states: bool = False):
         """
-        Initialize the NetworkX MDP environment.
-
         Args:
-            mdp_network: MDPNetwork object
-            config_path: Path to the JSON configuration file (if mdp_network is None)
-            render_mode: Rendering mode ("human", "rgb_array", or None)
-            output_string_states: If True, output string states when possible
+            mdp_network: pre-built MDPNetwork
+            config_path: JSON config (used when mdp_network is None)
+            render_mode: "human" | "rgb_array" | None
+            output_string_states: output string states if mapping exists
         """
         super().__init__()
 
-        # Initialize MDP network
+        # Init MDP
         if mdp_network is not None:
             self.mdp = mdp_network
         elif config_path is not None:
@@ -37,27 +37,25 @@ class NetworkXMDPEnvironment(gym.Env):
         else:
             raise ValueError("Either mdp_network or config_path must be provided")
 
-        # State output preference
+        # Output preference
         self.output_string_states = output_string_states and self.mdp.has_string_mapping
 
-        # Define action and observation spaces
+        # Spaces
         self.action_space = spaces.Discrete(self.mdp.num_actions)
         self.observation_space = spaces.Discrete(len(self.mdp.states))
 
-        # Initialize rendering
+        # Rendering
         self.render_mode = render_mode
         self.window_size = 800
         self.window = None
         self.clock = None
 
-        # Current state
-        self.current_state = None
+        # State
+        self.current_state: Optional[Union[int, str]] = None
 
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Union[int, str], Dict]:
-        """Reset the environment to a random start state."""
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[Union[int, str], Dict]:
+        """Reset to a random start state."""
         super().reset(seed=seed)
-
-        # Choose random start state
         self.current_state = self.mdp.sample_start_state(self.np_random, as_string=self.output_string_states)
 
         if self.render_mode == "human":
@@ -66,31 +64,30 @@ class NetworkXMDPEnvironment(gym.Env):
         return self.current_state, {}
 
     def step(self, action: int) -> Tuple[Union[int, str], float, bool, bool, Dict]:
-        """Execute one step in the environment."""
+        """One environment step using R(s, a, s')."""
         if self.current_state is None:
             raise RuntimeError("Environment not reset. Call reset() before step().")
 
-        # Sample next state
-        next_state = self.mdp.sample_next_state(self.current_state, action, self.np_random,
-                                                as_string=self.output_string_states)
+        # Sample (s', r) from the MDP
+        next_state, reward = self.mdp.sample_step(
+            self.current_state,
+            int(action),
+            self.np_random,
+            as_string=self.output_string_states
+        )
 
-        # Update current state
         self.current_state = next_state
 
-        # Get reward for entering the new state
-        reward = self.mdp.get_state_reward(next_state)
-
-        # Check if terminal state
         terminated = self.mdp.is_terminal_state(next_state)
-        truncated = False  # No time limit in this environment
+        truncated = False  # No time limit here
 
         if self.render_mode == "human":
             self.render()
 
-        return next_state, reward, terminated, truncated, {}
+        return next_state, float(reward), bool(terminated), bool(truncated), {}
 
     def render(self):
-        """Render the environment using Pygame."""
+        """Pygame render of the underlying graph."""
         if self.render_mode is None:
             return
 
@@ -105,20 +102,19 @@ class NetworkXMDPEnvironment(gym.Env):
         canvas = pygame.Surface((self.window_size, self.window_size))
         canvas.fill((255, 255, 255))  # White background
 
-        # Get graph for rendering
         graph = self.mdp.get_graph_copy()
 
-        # Convert current state to internal int for rendering
+        # Convert current state to internal id for highlight
         if isinstance(self.current_state, str) and self.mdp.has_string_mapping:
             render_current_state = self.mdp.state_to_int[self.current_state]
         else:
             render_current_state = self.current_state
 
-        # Calculate layout using spring layout (leave space for legend)
-        graph_area_size = self.window_size - 120  # Reserve space for legend
+        # Layout
+        graph_area_size = self.window_size - 120
         pos = nx.spring_layout(graph, k=3, iterations=50, seed=42)
 
-        # Scale positions to graph area
+        # Scale positions into canvas
         margin = 50
         for node in pos:
             x, y = pos[node]
@@ -127,83 +123,68 @@ class NetworkXMDPEnvironment(gym.Env):
                 margin + (y + 1) * (graph_area_size - 2 * margin) / 2
             )
 
-        # Draw edges (transitions)
-        for edge in graph.edges():
-            start_pos = pos[edge[0]]
-            end_pos = pos[edge[1]]
+        # Draw edges
+        for u, v in graph.edges():
+            start_pos = pos[u]
+            end_pos = pos[v]
             pygame.draw.line(canvas, (128, 128, 128), start_pos, end_pos, 2)
 
-            # Draw arrow head
+            # Arrow head
             dx = end_pos[0] - start_pos[0]
             dy = end_pos[1] - start_pos[1]
-            length = np.sqrt(dx ** 2 + dy ** 2)
+            length = np.hypot(dx, dy)
             if length > 0:
-                dx_norm = dx / length * 15
-                dy_norm = dy / length * 15
-                arrow_end = (end_pos[0] - dx_norm, end_pos[1] - dy_norm)
-                arrow_left = (arrow_end[0] + dy_norm * 0.3, arrow_end[1] - dx_norm * 0.3)
-                arrow_right = (arrow_end[0] - dy_norm * 0.3, arrow_end[1] + dx_norm * 0.3)
-                pygame.draw.polygon(canvas, (128, 128, 128), [end_pos, arrow_left, arrow_right])
+                dxn, dyn = dx / length * 15, dy / length * 15
+                arrow_end = (end_pos[0] - dxn, end_pos[1] - dyn)
+                left = (arrow_end[0] + dyn * 0.3, arrow_end[1] - dxn * 0.3)
+                right = (arrow_end[0] - dyn * 0.3, arrow_end[1] + dxn * 0.3)
+                pygame.draw.polygon(canvas, (128, 128, 128), [end_pos, left, right])
 
-        # Draw nodes (states) with different patterns for B&W compatibility
+        # Draw nodes
         for node in graph.nodes():
             x, y = pos[node]
 
-            # Choose color and pattern based on state type
             if node == render_current_state:
-                color = (255, 0, 0)  # Red
-                # Draw filled circle with cross pattern
+                color = (255, 0, 0)  # Current
                 pygame.draw.circle(canvas, color, (int(x), int(y)), 25)
                 pygame.draw.line(canvas, (255, 255, 255), (int(x - 15), int(y - 15)), (int(x + 15), int(y + 15)), 3)
                 pygame.draw.line(canvas, (255, 255, 255), (int(x - 15), int(y + 15)), (int(x + 15), int(y - 15)), 3)
             elif node in self.mdp.terminal_states:
-                color = (0, 255, 0)  # Green
-                # Draw filled circle with checkmark pattern
+                color = (0, 255, 0)  # Terminal
                 pygame.draw.circle(canvas, color, (int(x), int(y)), 25)
                 pygame.draw.circle(canvas, (255, 255, 255), (int(x), int(y)), 15, 3)
             elif node in self.mdp.start_states:
-                color = (0, 0, 255)  # Blue
-                # Draw filled circle with dot pattern
+                color = (0, 0, 255)  # Start
                 pygame.draw.circle(canvas, color, (int(x), int(y)), 25)
                 pygame.draw.circle(canvas, (255, 255, 255), (int(x), int(y)), 8)
             else:
-                color = (200, 200, 200)  # Gray
-                # Draw simple filled circle
+                color = (200, 200, 200)  # Regular
                 pygame.draw.circle(canvas, color, (int(x), int(y)), 25)
 
-            # Draw black border for all nodes
+            # Border
             pygame.draw.circle(canvas, (0, 0, 0), (int(x), int(y)), 25, 2)
 
-            # Draw state label (show original state if has mapping)
+            # Label (respect mapping)
             font = pygame.font.Font(None, 20)
             if self.mdp.has_string_mapping and node in self.mdp.int_to_state:
                 label = str(self.mdp.int_to_state[node])
             else:
                 label = str(node)
-
-            # Truncate long labels
             if len(label) > 8:
                 label = label[:6] + ".."
-
             text = font.render(label, True, (0, 0, 0))
-            text_rect = text.get_rect(center=(int(x), int(y)))
-            canvas.blit(text, text_rect)
+            canvas.blit(text, text.get_rect(center=(int(x), int(y))))
 
-        # Rest of the rendering code remains the same...
-        # (legend drawing, window update, etc.)
-
-        # Draw legend
+        # Legend
         legend_x = graph_area_size + 10
         legend_y = 50
         legend_font = pygame.font.Font(None, 20)
         title_font = pygame.font.Font(None, 24)
 
-        # Legend title
         title_text = title_font.render("Legend", True, (0, 0, 0))
         canvas.blit(title_text, (legend_x, legend_y))
         legend_y += 35
 
-        # Legend items: (color, pattern_func, label)
         legend_items = [
             ((255, 0, 0), lambda x, y: [
                 pygame.draw.line(canvas, (255, 255, 255), (x - 8, y - 8), (x + 8, y + 8), 2),
@@ -211,19 +192,14 @@ class NetworkXMDPEnvironment(gym.Env):
             ], "Current"),
             ((0, 255, 0), lambda x, y: pygame.draw.circle(canvas, (255, 255, 255), (x, y), 8, 2), "Terminal"),
             ((0, 0, 255), lambda x, y: pygame.draw.circle(canvas, (255, 255, 255), (x, y), 4), "Start"),
-            ((200, 200, 200), lambda x, y: None, "Regular")
+            ((200, 200, 200), lambda x, y: None, "Regular"),
         ]
 
         for color, pattern_func, label in legend_items:
-            # Draw colored circle
             pygame.draw.circle(canvas, color, (legend_x + 15, legend_y + 10), 12)
             pygame.draw.circle(canvas, (0, 0, 0), (legend_x + 15, legend_y + 10), 12, 1)
-
-            # Draw pattern
             if pattern_func:
                 pattern_func(legend_x + 15, legend_y + 10)
-
-            # Draw label
             label_text = legend_font.render(label, True, (0, 0, 0))
             canvas.blit(label_text, (legend_x + 35, legend_y + 5))
             legend_y += 30
@@ -233,21 +209,19 @@ class NetworkXMDPEnvironment(gym.Env):
             pygame.event.pump()
             pygame.display.update()
             self.clock.tick(self.metadata["render_fps"])
-        else:  # rgb_array
+        else:  # "rgb_array"
             return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
 
     def close(self):
-        """Close the rendering window."""
+        """Close rendering."""
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
 
 
 def test_environment(config_path: str, num_episodes: int = 3):
-    """Test the environment with random actions."""
+    """Quick manual test with random actions."""
     print(f"\nTesting environment with config: {config_path}")
-
-    # Method 1: Create environment directly from config file
     env = NetworkXMDPEnvironment(config_path=config_path, render_mode="human")
 
     for episode in range(num_episodes):
@@ -255,26 +229,22 @@ def test_environment(config_path: str, num_episodes: int = 3):
         state, info = env.reset()
         print(f"Initial state: {state}")
 
-        total_reward = 0
+        total_reward = 0.0
         step_count = 0
 
         while True:
-            # Choose random action
             action = env.action_space.sample()
             next_state, reward, terminated, truncated, info = env.step(action)
 
-            total_reward += reward
+            total_reward += float(reward)
             step_count += 1
-
             print(f"Step {step_count}: Action={action}, State={state}->{next_state}, Reward={reward:.3f}")
 
             state = next_state
-
             if terminated or truncated:
                 print(f"Episode finished. Total reward: {total_reward:.3f}, Steps: {step_count}")
                 break
-
-            if step_count > 50:  # Prevent infinite loops
+            if step_count > 50:
                 print("Episode truncated due to step limit")
                 break
 
@@ -282,7 +252,11 @@ def test_environment(config_path: str, num_episodes: int = 3):
 
 
 if __name__ == "__main__":
-    config_files = ["../mdp_network/mdps/chain-3.json", "../mdp_network/mdps/grid.json", "../mdp_network/mdps/branching.json",]
+    config_files = [
+        "../mdp_network/mdps/chain-3.json",
+        "../mdp_network/mdps/grid.json",
+        "../mdp_network/mdps/branching.json",
+    ]
     for config_file in config_files:
         test_environment(config_file, num_episodes=1)
     print("\nAll tests completed!")

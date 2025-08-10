@@ -4,6 +4,8 @@ from typing import Tuple, Dict, Any, Union, List
 from gymnasium.core import ObsType
 import numpy as np
 
+from mdp_network import MDPNetwork
+
 
 class CustomisedTaxiEnv(TaxiEnv, CustomisableEnvAbs):
     """
@@ -117,16 +119,14 @@ class CustomisedTaxiEnv(TaxiEnv, CustomisableEnvAbs):
         # Set the environment state
         self.s = state
 
-        # Reset related attributes to ensure consistency
-        self.lastaction = None
-
-        # Reset fickle passenger state if applicable
-        if hasattr(self, 'fickle_step'):
-            self.fickle_step = self.fickle_passenger and self.np_random.random() < 0.3
-
-        # Reset taxi orientation for rendering
-        if hasattr(self, 'taxi_orientation'):
-            self.taxi_orientation = 0
+        for attr, default in (
+                ("lastaction", None),
+                ("fickle_step", False),
+                ("taxi_orientation", 0),
+                ("step_count", 0),
+        ):
+            if hasattr(self, attr):
+                setattr(self, attr, default)
 
         # Generate observation
         observation = int(self.s)
@@ -244,3 +244,85 @@ class CustomisedTaxiEnv(TaxiEnv, CustomisableEnvAbs):
 
         except Exception:
             return False
+
+    def get_mdp_network(self) -> MDPNetwork:
+        """
+        Build an MDPNetwork from current TaxiEnv dynamics (self.P).
+        Tags: 4 combos (in/out zone) x (with/without passenger).
+        """
+        num_states: int = self.observation_space.n
+        num_actions: int = self.action_space.n
+
+        # Core sets
+        states = list(range(num_states))
+        start_states = [s for s, w in enumerate(self.initial_state_distrib) if w > 0.0]
+
+        terminal_states_set = set()
+        for s in range(num_states):
+            for a in range(num_actions):
+                for p, sp, r, done in self.P[s][a]:
+                    if done:
+                        terminal_states_set.add(int(sp))
+        terminal_states = sorted(terminal_states_set)
+
+        # Transitions: transitions["s"]["a"]["sp"] = {"p": prob, "r": reward}
+        from typing import Dict, List
+        transitions: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
+        for s in range(num_states):
+            s_key = str(s)
+            for a in range(num_actions):
+                entries = self.P[s][a]
+                if not entries:
+                    continue
+                a_key = str(a)
+                # Aggregate duplicate (s,a,s')
+                accum: Dict[int, Dict[str, float]] = {}
+                for p, sp, r, done in entries:
+                    sp = int(sp)
+                    acc = accum.setdefault(sp, {"p": 0.0, "r": 0.0})
+                    new_p = acc["p"] + float(p)
+                    acc["r"] = (acc["r"] * acc["p"] + float(r) * float(p)) / new_p if new_p > 0.0 else float(r)
+                    acc["p"] = new_p
+                if accum:
+                    transitions.setdefault(s_key, {})
+                    a_bucket = transitions[s_key].setdefault(a_key, {})
+                    for sp, v in accum.items():
+                        a_bucket[str(sp)] = {"p": float(v["p"]), "r": float(v["r"])}
+
+        # ----- 4 tags only -----
+        colour_cells = set(self.locs)  # taxi is "in zone" iff (row,col) in these 4 colored cells
+        out_zone_no_passenger: List[int] = []
+        in_zone_no_passenger: List[int] = []
+        out_zone_with_passenger: List[int] = []
+        in_zone_with_passenger: List[int] = []
+
+        for s in range(num_states):
+            taxi_row, taxi_col, pass_loc, dest_idx = self.decode(s)
+            in_zone = (taxi_row, taxi_col) in colour_cells
+            carrying = (pass_loc == 4)
+            if in_zone and not carrying:
+                in_zone_no_passenger.append(s)
+            elif in_zone and carrying:
+                in_zone_with_passenger.append(s)
+            elif (not in_zone) and not carrying:
+                out_zone_no_passenger.append(s)
+            else:  # not in_zone and carrying
+                out_zone_with_passenger.append(s)
+
+        tags = {
+            "out_zone_no_passenger": sorted(out_zone_no_passenger),
+            "in_zone_no_passenger": sorted(in_zone_no_passenger),
+            "out_zone_with_passenger": sorted(out_zone_with_passenger),
+            "in_zone_with_passenger": sorted(in_zone_with_passenger),
+        }
+
+        config = {
+            "num_actions": int(num_actions),
+            "states": states,
+            "start_states": start_states,
+            "terminal_states": terminal_states,
+            "default_reward": -1.0,  # Taxi default step reward
+            "transitions": transitions,
+            "tags": tags,
+        }
+        return MDPNetwork(config_data=config)

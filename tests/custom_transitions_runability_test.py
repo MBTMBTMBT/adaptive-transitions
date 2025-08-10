@@ -1,310 +1,225 @@
 """
-Unit test script for Taxi environment with NetworkX integration.
-Tests the full pipeline: Taxi -> MDP sampling -> stochastic modification -> NetworkX environment -> DP solving.
+Unit tests for Taxi x NetworkX pipeline with R(s,a,s').
+Flow:
+  A) Taxi (dry) -> MDPNetwork (deterministic) -> DP -> GIF
+  B) Taxi (rainy) -> MDPNetwork (stochastic) -> NetworkX env -> DP -> GIF
 """
 
 import os
+from typing import Dict, List
+from PIL import Image, ImageDraw
 import numpy as np
-from PIL import Image
+
 from customised_toy_text_envs.customised_taxi import CustomisedTaxiEnv
-from mdp_network.samplers import deterministic_mdp_sampling
 from networkx_env.networkx_env import NetworkXMDPEnvironment
 from mdp_network.solvers import optimal_value_iteration, policy_evaluation
 from mdp_network.mdp_tables import create_random_policy, q_table_to_policy
+from mdp_network.mdp_network import MDPNetwork
 
 
-def add_stochastic_transitions(mdp_network, noise_probability=0.1, neighbor_radius=10):
+# -----------------------------
+# Helpers
+# -----------------------------
+def ensure_dir(d: str):
+    if not os.path.exists(d):
+        os.makedirs(d)
+
+
+def overlay_label(frame_ndarray, text: str) -> Image.Image:
+    """Overlay a small black bar with text on top of an RGB frame."""
+    if frame_ndarray is None:
+        return None
+    img = Image.fromarray(frame_ndarray)
+    draw = ImageDraw.Draw(img)
+    bar_h = 22
+    draw.rectangle([(0, 0), (img.width, bar_h)], fill=(0, 0, 0))
+    draw.text((8, 4), text, fill=(255, 255, 255))
+    return img
+
+
+def record_policy_gif(env, policy, action_names: List[str], seed: int, episodes: int, max_steps: int) -> List[Image.Image]:
+    """Run episodes following a (probabilistic) policy and collect frames."""
+    frames: List[Image.Image] = []
+    for ep in range(episodes):
+        obs, info = env.reset(seed=seed + ep)
+        state = obs
+
+        # initial frame
+        frame = env.render()
+        img = overlay_label(frame, f"state={state}, action=-")
+        if img:
+            frames.append(img)
+
+        ep_reward = 0.0
+        for t in range(max_steps):
+            # greedy action from policy distribution
+            action_probs = policy.get_action_probabilities(state)
+            action = max(action_probs.items(), key=lambda x: x[1])[0] if action_probs else env.action_space.sample()
+
+            obs_next, reward, terminated, truncated, info = env.step(action)
+            ep_reward += reward
+
+            frame = env.render()
+            img = overlay_label(frame, f"state={state}, action={action_names[action]}")
+            if img:
+                frames.append(img)
+
+            state = obs_next
+            if terminated or truncated:
+                # pad a few frames
+                for _ in range(5):
+                    if frames:
+                        frames.append(frames[-1])
+                break
+    return frames
+
+
+def summarize_stochasticity(mdp: MDPNetwork, sample_states: int = 400):
     """
-    Add small probability random transitions to neighboring states in the MDP.
-
-    Args:
-        mdp_network: Original MDPNetwork
-        noise_probability: Total probability mass to redistribute to neighbors
-        neighbor_radius: Maximum state ID difference to consider as neighbor
-
-    Returns:
-        Modified MDPNetwork with stochastic transitions
+    Quick sanity-check: report how many (s,a) have >1 successors (stochastic).
     """
-    print(f"Adding stochastic transitions with noise_probability={noise_probability}")
-
-    # Get all states and sort them
-    all_states = sorted(mdp_network.states)
-
-    # Modify transitions for each state-action pair
-    for from_state in all_states:
-        for action in range(mdp_network.num_actions):
-            # Get current transition probabilities
-            current_probs = mdp_network.get_transition_probabilities(from_state, action)
-
-            if not current_probs:
-                continue  # Skip if no transitions for this state-action
-
-            # Find neighboring states (within radius of state ID)
-            neighbors = [s for s in all_states
-                         if s != from_state and abs(s - from_state) <= neighbor_radius]
-
-            if not neighbors:
-                continue  # Skip if no neighbors found
-
-            # Redistribute probability mass
-            # Reduce original transitions by noise_probability
-            modified_probs = {state: prob * (1 - noise_probability)
-                              for state, prob in current_probs.items()}
-
-            # Add small probabilities to neighbors
-            neighbor_prob = noise_probability / len(neighbors)
-            for neighbor in neighbors:
-                if neighbor in modified_probs:
-                    modified_probs[neighbor] += neighbor_prob
-                else:
-                    modified_probs[neighbor] = neighbor_prob
-
-            # Update transitions in the MDP network
-            for to_state, prob in modified_probs.items():
-                if prob > 1e-10:  # Only add non-negligible probabilities
-                    mdp_network.add_transition(from_state, to_state, action, prob)
-
-    print(f"Stochastic modification completed for {len(all_states)} states")
-    return mdp_network
+    import random
+    rng = random.Random(0)
+    states = mdp.states if len(mdp.states) <= sample_states else rng.sample(mdp.states, sample_states)
+    total_pairs, multi_succ, examples = 0, 0, []
+    for s in states:
+        for a in range(mdp.num_actions):
+            trans = mdp.get_transition_probabilities(s, a)
+            if not trans:
+                continue
+            total_pairs += 1
+            if len(trans) > 1:
+                multi_succ += 1
+                if len(examples) < 5:
+                    examples.append((s, a, trans))
+    ratio = (multi_succ / total_pairs) if total_pairs else 0.0
+    print(f"[Stochasticity] (s,a) pairs with >1 successors: {multi_succ}/{total_pairs} ({ratio:.1%})")
+    for s, a, trans in examples:
+        print(f"  e.g. s={s}, a={a} -> {trans}")
 
 
-# Create output directory
-output_dir = "./outputs"
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+# -----------------------------
+# Main test
+# -----------------------------
+if __name__ == "__main__":
+    output_dir = "./outputs"
+    ensure_dir(output_dir)
 
-print("=== Taxi NetworkX Integration Unit Test ===\n")
+    print("=== Taxi x NetworkX Unit Test (R(s,a,s')) ===")
+    action_names = ["South", "North", "East", "West", "Pickup", "Dropoff"]
+    gamma, theta, max_iter = 0.99, 1e-6, 1000
 
-# Step 1: Create original Taxi environment and get all start states
-print("Step 1: Creating Taxi environment and getting all possible start states...")
-taxi_env = CustomisedTaxiEnv(render_mode=None)
-taxi_env.reset(seed=42)
+    # ===== Group A: Deterministic (original Taxi dynamics => MDPNetwork) =====
+    print("\n=== Group A: Deterministic (dry) ===")
+    taxi_env = CustomisedTaxiEnv(render_mode=None, is_rainy=False)  # dry
+    taxi_env.reset(seed=42)
+    print(f"Taxi (dry): {taxi_env.observation_space.n} states, {taxi_env.action_space.n} actions")
 
-print(f"Taxi environment created with {taxi_env.observation_space.n} states and {taxi_env.action_space.n} actions")
+    # Build MDP from Taxi (no sampling)
+    det_mdp: MDPNetwork = taxi_env.get_mdp_network()
+    print(f"MDP (dry): |S|={len(det_mdp.states)}, |T|={len(det_mdp.terminal_states)}")
+    print(f"Start states: {len(det_mdp.start_states)}")
 
-# Get all possible start states
-all_start_states = taxi_env.get_start_states()
-print(f"Found {len(all_start_states)} possible start states")
-print(f"First 10 start states: {all_start_states[:10]}")
-print(f"Last 10 start states: {all_start_states[-10:]}")
+    # Export JSON
+    det_mdp_path = os.path.join(output_dir, "det_taxi_mdp.json")
+    det_mdp.export_to_json(det_mdp_path)
+    print(f"Exported deterministic MDP: {det_mdp_path}")
 
-# Sample deterministic MDP from Taxi environment with all start states
-print("\nSampling MDP from all possible start states...")
-original_mdp = deterministic_mdp_sampling(taxi_env, start_states=all_start_states, max_states=500)
-print(f"Original MDP sampled: {len(original_mdp.states)} states, {len(original_mdp.terminal_states)} terminal states")
-print(f"MDP start states: {original_mdp.start_states}")
+    # DP on deterministic MDP
+    rand_pol_A = create_random_policy(det_mdp)
+    print("\n--- Policy Evaluation (A) ---")
+    pe_A = policy_evaluation(det_mdp, rand_pol_A, gamma, theta, max_iter)
+    print("--- Optimal Value Iteration (A) ---")
+    vA, qA = optimal_value_iteration(det_mdp, gamma, theta, max_iter)
 
-# Export original MDP
-original_mdp_path = os.path.join(output_dir, "taxi_original_mdp.json")
-original_mdp.export_to_json(original_mdp_path)
-print(f"Original MDP exported to: {original_mdp_path}")
+    # Export CSVs
+    rand_pol_A.export_to_csv(os.path.join(output_dir, "det_taxi_random_policy.csv"))
+    pe_A.export_to_csv(os.path.join(output_dir, "det_taxi_pe_values.csv"))
+    vA.export_to_csv(os.path.join(output_dir, "det_taxi_optimal_values.csv"))
+    qA.export_to_csv(os.path.join(output_dir, "det_taxi_optimal_q_values.csv"))
+    print("Saved deterministic CSVs (policy/value/Q).")
 
-# Step 2: Create stochastic version of MDP
-print("\nStep 2: Adding stochastic transitions to MDP...")
-stochastic_mdp = add_stochastic_transitions(original_mdp, noise_probability=0.05, neighbor_radius=15)
+    # Greedy policy from Q*
+    opt_pol_A = q_table_to_policy(qA, det_mdp.states, det_mdp.num_actions, temperature=0.0)
 
-# Export stochastic MDP
-stochastic_mdp_path = os.path.join(output_dir, "taxi_stochastic_mdp.json")
-stochastic_mdp.export_to_json(stochastic_mdp_path)
-print(f"Stochastic MDP exported to: {stochastic_mdp_path}")
+    # Record GIF on original Taxi env (no NetworkX)
+    print("\nCreating deterministic GIF...")
+    taxi_rgb = CustomisedTaxiEnv(render_mode="rgb_array", is_rainy=False)
+    frames_A = record_policy_gif(taxi_rgb, opt_pol_A, action_names, seed=100, episodes=3, max_steps=100)
+    if frames_A:
+        gif_A = os.path.join(output_dir, "det_taxi_optimal_policy_demo.gif")
+        frames_A[0].save(gif_A, save_all=True, append_images=frames_A[1:], duration=500, loop=0)
+        print(f"Saved GIF: {gif_A}")
+    else:
+        print("Warning: no frames for deterministic GIF")
 
-# Step 3: Create NetworkX environment from stochastic MDP
-print("\nStep 3: Creating NetworkX environment from stochastic MDP...")
-networkx_env = NetworkXMDPEnvironment(mdp_network=stochastic_mdp, render_mode=None)
-print(f"NetworkX environment created with {networkx_env.observation_space.n} states")
+    # ===== Group B: Stochastic (rainy Taxi => MDPNetwork => NetworkX) =====
+    print("\n=== Group B: Stochastic (rainy) via NetworkX ===")
+    rainy_env = CustomisedTaxiEnv(render_mode=None, is_rainy=True)  # rainy => stochastic transitions
+    rainy_env.reset(seed=123)
+    print(f"Taxi (rainy): {rainy_env.observation_space.n} states, {rainy_env.action_space.n} actions")
 
-# Step 4: Test NetworkX environment
-print("\nStep 4: Testing NetworkX environment...")
-obs, info = networkx_env.reset(seed=42)
-print(f"Initial state: {obs}")
+    # Build MDP from rainy Taxi
+    stoch_mdp: MDPNetwork = rainy_env.get_mdp_network()
+    print(f"MDP (rainy): |S|={len(stoch_mdp.states)}, |T|={len(stoch_mdp.terminal_states)}")
+    summarize_stochasticity(stoch_mdp)  # prove stochastic transitions exist
 
-# Run a few random steps
-total_reward = 0
-for step in range(10):
-    action = networkx_env.action_space.sample()
-    next_obs, reward, terminated, truncated, info = networkx_env.step(action)
-    total_reward += reward
-    print(f"Step {step + 1}: action={action}, state={obs}->{next_obs}, reward={reward:.3f}")
-    obs = next_obs
-    if terminated or truncated:
-        print(f"Episode ended at step {step + 1}")
-        break
+    # Export JSON
+    stoch_mdp_path = os.path.join(output_dir, "stoch_taxi_mdp.json")
+    stoch_mdp.export_to_json(stoch_mdp_path)
+    print(f"Exported stochastic MDP: {stoch_mdp_path}")
 
-print(f"Total reward from random walk: {total_reward:.3f}")
+    # NetworkX-backed env using the stochastic MDP
+    nx_env = NetworkXMDPEnvironment(mdp_network=stoch_mdp, render_mode=None)
+    print(f"NetworkX env (rainy MDP): {nx_env.observation_space.n} states")
 
-# Step 5: Solve stochastic MDP using Dynamic Programming
-print("\nStep 5: Solving stochastic MDP with Dynamic Programming...")
-
-# Parameters for DP algorithms
-gamma = 0.99
-theta = 1e-6
-max_iterations = 1000
-
-# Create random policy for testing
-random_policy = create_random_policy(stochastic_mdp)
-print(f"Random policy created with {len(stochastic_mdp.states)} states")
-
-# Policy Evaluation with random policy
-print("\n--- Policy Evaluation ---")
-pe_values = policy_evaluation(stochastic_mdp, random_policy, gamma, theta, max_iterations)
-print("Policy Evaluation completed")
-
-# Show some example values
-example_states = sorted(stochastic_mdp.states)[:10]
-print("Example state values from Policy Evaluation:")
-for state in example_states:
-    value = pe_values.get_value(state)
-    print(f"  State {state}: {value:.6f}")
-
-# Optimal Value Iteration
-print("\n--- Optimal Value Iteration ---")
-opt_values, opt_q_table = optimal_value_iteration(stochastic_mdp, gamma, theta, max_iterations)
-print("Optimal Value Iteration completed")
-
-# Show some example optimal values
-print("Example optimal state values:")
-for state in example_states:
-    value = opt_values.get_value(state)
-    print(f"  State {state}: {value:.6f}")
-
-# Compare random policy vs optimal values
-print("\nValue comparison (Random Policy vs Optimal):")
-total_diff = 0
-for state in example_states:
-    pe_val = pe_values.get_value(state)
-    opt_val = opt_values.get_value(state)
-    diff = abs(opt_val - pe_val)
-    total_diff += diff
-    print(f"  State {state}: Random={pe_val:.6f}, Optimal={opt_val:.6f}, Diff={diff:.6f}")
-
-avg_diff = total_diff / len(example_states)
-print(f"Average value difference: {avg_diff:.6f}")
-
-# Step 6: Export results
-print("\nStep 6: Exporting results...")
-
-# Export policies and values
-random_policy_path = os.path.join(output_dir, "taxi_random_policy.csv")
-random_policy.export_to_csv(random_policy_path)
-
-pe_values_path = os.path.join(output_dir, "taxi_pe_values.csv")
-pe_values.export_to_csv(pe_values_path)
-
-opt_values_path = os.path.join(output_dir, "taxi_optimal_values.csv")
-opt_values.export_to_csv(opt_values_path)
-
-opt_q_table_path = os.path.join(output_dir, "taxi_optimal_q_values.csv")
-opt_q_table.export_to_csv(opt_q_table_path)
-
-print(f"Results exported to {output_dir}/:")
-print(f"  - {os.path.basename(random_policy_path)}")
-print(f"  - {os.path.basename(pe_values_path)}")
-print(f"  - {os.path.basename(opt_values_path)}")
-print(f"  - {os.path.basename(opt_q_table_path)}")
-
-# Step 7: Summary statistics
-print("\n=== Summary Statistics ===")
-print(f"Total possible start states in Taxi environment: {len(all_start_states)}")
-print(f"Original MDP: {len(original_mdp.states)} states, {len(original_mdp.terminal_states)} terminal")
-print(f"MDP start states: {len(original_mdp.start_states)} (should match environment)")
-print(f"Stochastic MDP: {len(stochastic_mdp.states)} states, {len(stochastic_mdp.terminal_states)} terminal")
-print(f"NetworkX Environment: {networkx_env.observation_space.n} states, {networkx_env.action_space.n} actions")
-print(f"DP Algorithms: gamma={gamma}, theta={theta}")
-print(f"Policy Evaluation converged: {len(pe_values.values)} state values computed")
-print(f"Value Iteration converged: {len(opt_values.values)} state values computed")
-print(f"Average improvement from random to optimal policy: {avg_diff:.6f}")
-
-# Verify start state consistency
-start_states_match = set(all_start_states) == set(original_mdp.start_states)
-print(f"Start states consistency check: {'✓ PASS' if start_states_match else '✗ FAIL'}")
-
-# Test if NetworkX environment maintains state mappings
-if hasattr(stochastic_mdp, 'has_string_mapping') and stochastic_mdp.has_string_mapping:
-    print(f"String state mapping: Yes ({len(stochastic_mdp.int_to_state)} mappings)")
-else:
-    print("String state mapping: No (integer states)")
-
-# Step 8: Generate optimal policy demonstration GIF
-print("\nStep 8: Generating optimal policy demonstration GIF...")
-
-# Convert Q-table to optimal policy (greedy policy with temperature=0)
-optimal_policy = q_table_to_policy(opt_q_table, stochastic_mdp.states, stochastic_mdp.num_actions, temperature=0.0)
-
-# Create a Taxi environment with NetworkX backend for visualization
-taxi_with_networkx = CustomisedTaxiEnv(render_mode="rgb_array", networkx_env=networkx_env)
-
-# Collect frames for multiple episodes
-frames = []
-action_names = ["South", "North", "East", "West", "Pickup", "Dropoff"]
-
-print("Recording optimal policy episodes...")
-for episode in range(3):  # Record 3 episodes
-    print(f"Recording episode {episode + 1}...")
-
-    # Reset environment
-    obs, info = taxi_with_networkx.reset(seed=42 + episode)
-    current_state = obs
-
-    # Add frame with episode info
-    frame = taxi_with_networkx.render()
-    if frame is not None:
-        # Convert frame to PIL Image and add text
-        pil_frame = Image.fromarray(frame)
-        frames.append(pil_frame)
-
-    episode_reward = 0
-    step = 0
-    max_episode_steps = 100
-
-    while step < max_episode_steps:
-        # Get optimal action from policy
-        action_probs = optimal_policy.get_action_probabilities(current_state)
-        if action_probs:
-            # Choose action with highest probability (greedy)
-            action = max(action_probs.items(), key=lambda x: x[1])[0]
-        else:
-            # Fallback to random action
-            action = taxi_with_networkx.action_space.sample()
-
-        # Execute action
-        next_obs, reward, terminated, truncated, info = taxi_with_networkx.step(action)
-        episode_reward += reward
-
-        # Render frame
-        frame = taxi_with_networkx.render()
-        if frame is not None:
-            pil_frame = Image.fromarray(frame)
-            frames.append(pil_frame)
-
-        print(f"  Step {step + 1}: {action_names[action]} -> reward={reward:.2f}")
-
-        current_state = next_obs
-        step += 1
-
-        if terminated or truncated:
-            print(f"  Episode {episode + 1} finished in {step} steps, total reward: {episode_reward:.2f}")
-            # Add a few frames at the end to show completion
-            for _ in range(5):
-                if frames:
-                    frames.append(frames[-1])
+    # Short random walk sanity-check on NetworkX env
+    print("Random walk (10 steps) on NetworkX env:")
+    obs, info = nx_env.reset(seed=42)
+    total_r = 0.0
+    for t in range(10):
+        a = nx_env.action_space.sample()
+        nxt, r, term, trunc, _info = nx_env.step(a)
+        total_r += r
+        print(f"  t={t+1}: a={a}, {obs}->{nxt}, r={r:.3f}")
+        obs = nxt
+        if term or trunc:
+            print("  Episode ended early.")
             break
+    print(f"Total reward: {total_r:.3f}")
 
-    if step >= max_episode_steps:
-        print(f"  Episode {episode + 1} truncated at {max_episode_steps} steps")
+    # DP on stochastic MDP
+    rand_pol_B = create_random_policy(stoch_mdp)
+    print("\n--- Policy Evaluation (B) ---")
+    pe_B = policy_evaluation(stoch_mdp, rand_pol_B, gamma, theta, max_iter)
+    print("--- Optimal Value Iteration (B) ---")
+    vB, qB = optimal_value_iteration(stoch_mdp, gamma, theta, max_iter)
 
-# Save GIF
-if frames:
-    gif_path = os.path.join(output_dir, "taxi_optimal_policy_demo.gif")
-    frames[0].save(
-        gif_path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=500,  # 500ms per frame
-        loop=0
-    )
-    print(f"Optimal policy demonstration GIF saved to: {gif_path}")
-    print(f"Total frames recorded: {len(frames)}")
-else:
-    print("Warning: No frames were captured for GIF generation")
+    # Export CSVs
+    rand_pol_B.export_to_csv(os.path.join(output_dir, "stoch_taxi_random_policy.csv"))
+    pe_B.export_to_csv(os.path.join(output_dir, "stoch_taxi_pe_values.csv"))
+    vB.export_to_csv(os.path.join(output_dir, "stoch_taxi_optimal_values.csv"))
+    qB.export_to_csv(os.path.join(output_dir, "stoch_taxi_optimal_q_values.csv"))
+    print("Saved stochastic CSVs (policy/value/Q).")
 
-print("\n=== Unit test completed successfully! ===")
+    # Greedy policy from Q*
+    opt_pol_B = q_table_to_policy(qB, stoch_mdp.states, stoch_mdp.num_actions, temperature=0.0)
+
+    # Record GIF on NetworkX-backed env (stochastic dynamics come from stoch_mdp)
+    print("\nCreating stochastic GIF (NetworkX-backed with rainy MDP)...")
+    taxi_nx_rgb = CustomisedTaxiEnv(render_mode="rgb_array", networkx_env=nx_env)  # backend: NetworkXMDPEnvironment
+    frames_B = record_policy_gif(taxi_nx_rgb, opt_pol_B, action_names, seed=200, episodes=3, max_steps=100)
+    if frames_B:
+        gif_B = os.path.join(output_dir, "stoch_taxi_optimal_policy_demo.gif")
+        frames_B[0].save(gif_B, save_all=True, append_images=frames_B[1:], duration=500, loop=0)
+        print(f"Saved GIF: {gif_B}")
+    else:
+        print("Warning: no frames for stochastic GIF")
+
+    # Summary
+    print("\n=== Summary ===")
+    print(f"Deterministic MDP JSON: {det_mdp_path}")
+    print(f"Stochastic   MDP JSON: {stoch_mdp_path}")
+    print("Deterministic CSVs: det_taxi_random_policy.csv, det_taxi_pe_values.csv, det_taxi_optimal_values.csv, det_taxi_optimal_q_values.csv")
+    print("Stochastic   CSVs: stoch_taxi_random_policy.csv, stoch_taxi_pe_values.csv, stoch_taxi_optimal_values.csv, stoch_taxi_optimal_q_values.csv")
+    print("GIFs: det_taxi_optimal_policy_demo.gif, stoch_taxi_optimal_policy_demo.gif")

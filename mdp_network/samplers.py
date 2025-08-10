@@ -99,6 +99,10 @@ def deterministic_mdp_sampling(
 
             # Try each action
             for action in range(env.action_space.n):
+                # If we have already stored a successor for (s,a) we skip:
+                if action in transitions[current_state_id]:
+                    continue
+
                 # Save state, execute action, restore state
                 state_before_action = env.encode_state()
                 obs, reward, terminated, truncated, info = env.step(action)
