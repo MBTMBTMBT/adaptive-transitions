@@ -9,6 +9,8 @@ from networkx_env.networkx_env import NetworkXMDPEnvironment
 class CustomisableEnvAbs(ABC):
     def __init__(self, networkx_env: NetworkXMDPEnvironment = None):
         self.networkx_env = networkx_env
+        if self.networkx_env is not None:
+            self.networkx_env.reset()
 
     @abstractmethod
     def encode_state(self,) -> int:

@@ -63,6 +63,43 @@ class CustomisedTaxiEnv(TaxiEnv, CustomisableEnvAbs):
             # Use original Taxi environment step
             return super().step(action)
 
+    def reset(
+            self,
+            *,
+            seed: int | None = None,
+            options: dict | None = None,
+    ):
+        """
+        If a NetworkX-backed env is provided, delegate start-state sampling to it,
+        then decode that state into this env's internal representation.
+        Otherwise, fall back to the native Taxi reset.
+        """
+        if self.networkx_env is not None:
+            sp, backend_info = self.networkx_env.reset(seed=seed)
+            sp = int(sp)
+
+            # Keep current_state in sync explicitly
+            self.networkx_env.current_state = sp
+
+            # Decode into Taxi internal state (sets self.s, etc.)
+            obs, decode_info = self.decode_state(sp)
+
+            # Match base env bookkeeping
+            self.lastaction = None
+
+            if self.render_mode == "human":
+                self.render()
+
+            info = {}
+            if isinstance(backend_info, dict):
+                info.update(backend_info)
+            if isinstance(decode_info, dict):
+                info.update(decode_info)
+            return obs, info
+
+        # Fallback: native dynamics
+        return super().reset(seed=seed, options=options)
+
     def encode_state(self) -> int:
         """
         Encode the current environment state into a compact integer representation.

@@ -302,10 +302,45 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
     # -----------------------------
     # Reset/Step
     # -----------------------------
-    def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[ObsType, Dict[str, Any]]:
+    def reset(
+            self,
+            *,
+            seed: Optional[int] = None,
+            options: Optional[Dict[str, Any]] = None
+    ) -> Tuple[ObsType, Dict[str, Any]]:
         """
-        Always rebuild grid from JSON.
+        If a NetworkX-backed env is provided, delegate start-state sampling to it,
+        then decode that integer state into this env's internal representation.
+        Otherwise, fall back to the existing (JSON-layout) native reset behavior.
         """
+        # ---- NetworkX-backed branch ----
+        if self.networkx_env is not None:
+            # rebuild fixed layout grid to ensure decode_state applies on the right layout
+            self.cumulative_reward = 0.0
+            self._gen_grid(self.width, self.height)
+            self.step_count = 0
+
+            # reset backend and get starting integer state
+            sp, backend_info = self.networkx_env.reset(seed=seed)
+            sp = int(sp)
+            self.networkx_env.current_state = sp  # keep explicit sync
+
+            # decode that state into this env (sets internal fields) and get observation
+            obs, decode_info = self.decode_state(sp)
+
+            # optional render
+            if self.render_mode == "human":
+                self.render()
+
+            # merge info
+            info: Dict[str, Any] = {}
+            if isinstance(backend_info, dict):
+                info.update(backend_info)
+            if isinstance(decode_info, dict):
+                info.update(decode_info)
+            return obs, info
+
+        # ---- Original native reset branch (unchanged) ----
         self.cumulative_reward = 0.0
         self._gen_grid(self.width, self.height)
 
@@ -315,12 +350,18 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         self.step_count = 0
         obs = self.gen_obs()
 
-        # carrying/overlap fields
+        # carrying/overlap fields (preserve your original behavior)
         obs["carrying"] = {"carrying": 1, "carrying_colour": 0}
         if self.carrying is not None:
-            obs["carrying"] = {"carrying": OBJECT_TO_IDX[self.carrying.type], "carrying_colour": COLOR_TO_IDX[self.carrying.color]}
+            obs["carrying"] = {
+                "carrying": OBJECT_TO_IDX[self.carrying.type],
+                "carrying_colour": COLOR_TO_IDX[self.carrying.color],
+            }
         overlap = self.grid.get(*self.agent_pos)
-        obs["overlap"] = {"obj": OBJECT_TO_IDX[overlap.type] if overlap else 0, "colour": COLOR_TO_IDX[overlap.color] if overlap else 0}
+        obs["overlap"] = {
+            "obj": OBJECT_TO_IDX[overlap.type] if overlap else 0,
+            "colour": COLOR_TO_IDX[overlap.color] if overlap else 0,
+        }
         return obs, {}
 
     def step(self, action: ActType) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:

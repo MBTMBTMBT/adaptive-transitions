@@ -60,6 +60,46 @@ class CustomisedFrozenLakeEnv(FrozenLakeEnv, CustomisableEnvAbs):
         # Fallback to native FrozenLake dynamics
         return super().step(action)
 
+    def reset(
+            self,
+            *,
+            seed: int | None = None,
+            options: dict | None = None,
+    ):
+        """
+        If a NetworkX-backed env is provided, delegate start-state sampling to it,
+        then decode that state into this env's internal representation.
+        Otherwise, fall back to the native FrozenLake reset.
+        """
+        if self.networkx_env is not None:
+            # Reset external backend RNG and episode
+            sp, backend_info = self.networkx_env.reset(seed=seed)
+            sp = int(sp)
+
+            # Sync current state for clarity (reset already set it, but keep explicit)
+            self.networkx_env.current_state = sp
+
+            # Decode into this env's internal state (and set internal fields)
+            obs, decode_info = self.decode_state(sp)
+
+            # Bookkeeping consistent with base env
+            self.lastaction = None
+
+            # Optional rendering
+            if self.render_mode == "human":
+                self.render()
+
+            # Merge info dicts (backend info first, then decode info)
+            info = {}
+            if isinstance(backend_info, dict):
+                info.update(backend_info)
+            if isinstance(decode_info, dict):
+                info.update(decode_info)
+            return obs, info
+
+        # Fallback: native dynamics
+        return super().reset(seed=seed, options=options)
+
     # -------------------------
     # Encode / Decode
     # -------------------------
