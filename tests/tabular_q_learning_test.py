@@ -1,6 +1,5 @@
 # test_q_learning_stoch_envs.py
 # English comments only. Flat script with a small callback class.
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,6 +13,9 @@ from customised_toy_text_envs.customised_taxi import CustomisedTaxiEnv
 from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
 from networkx_env.networkx_env import NetworkXMDPEnvironment
 from customised_minigrid_env.simple_agents.apis import BaseCallback
+
+from mdp_network.mdp_tables import q_table_to_policy
+from tests.helpers import record_policy_gif
 
 
 # ========= Testing callback: evaluate at start, periodic, end =========
@@ -79,17 +81,6 @@ def mean_std(curves_list):
 
 
 if __name__ == '__main__':
-    import os
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from stable_baselines3.common.evaluation import evaluate_policy
-    from stable_baselines3.common.vec_env import DummyVecEnv
-    from gymnasium.wrappers import TimeLimit
-
-    # runtime imports (avoid touching the header)
-    from mdp_network.mdp_tables import q_table_to_policy
-    from tests.helpers import record_policy_gif
-
     output_dir = "./outputs/tabular_q_learning"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -101,6 +92,9 @@ if __name__ == '__main__':
     gamma = 0.99
     policy_mix = (0.5, 0.4, 0.1)
     temperature = 1.0
+
+    FROZENLAKE_MAX_STEPS = 500
+    TAXI_MAX_STEPS = 100
 
     # action names for GIF overlays
     taxi_action_names = ["South", "North", "East", "West", "Pickup", "Dropoff"]
@@ -116,7 +110,7 @@ if __name__ == '__main__':
     taxi_mdp = taxi_src_env.get_mdp_network()
     taxi_nx_env_base = TimeLimit(
         NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=None),
-        max_episode_steps=200  # Taxi-v3 default
+        max_episode_steps=TAXI_MAX_STEPS  # Taxi-v3 default
     )
     print(f"Taxi rainy MDP: |S|={len(taxi_mdp.states)}, |A|={taxi_mdp.num_actions}")
 
@@ -127,7 +121,7 @@ if __name__ == '__main__':
     fl_mdp = fl_src_env.get_mdp_network()
     fl_nx_env_base = TimeLimit(
         NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=None),
-        max_episode_steps=100  # FrozenLake-v1 default
+        max_episode_steps=FROZENLAKE_MAX_STEPS  # FrozenLake-v1 default
     )
     print(f"FrozenLake slippery MDP: |S|={len(fl_mdp.states)}, |A|={fl_mdp.num_actions}")
 
@@ -142,7 +136,7 @@ if __name__ == '__main__':
         print(f"\n[Taxi] Seed = {seed}")
         taxi_train_env = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=seed),
-            max_episode_steps=200
+            max_episode_steps=TAXI_MAX_STEPS
         )
         taxi_vec_env = DummyVecEnv([lambda: taxi_train_env])
 
@@ -158,7 +152,7 @@ if __name__ == '__main__':
 
         taxi_eval_env = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=10_000 + seed),
-            max_episode_steps=200
+            max_episode_steps=TAXI_MAX_STEPS
         )
 
         taxi_curve_greedy, taxi_curve_train = [], []
@@ -198,7 +192,7 @@ if __name__ == '__main__':
         # Renderer env; backend transitions are from NetworkX (TimeLimit applied)
         taxi_gif_backend = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=50_000 + seed),
-            max_episode_steps=200
+            max_episode_steps=TAXI_MAX_STEPS
         )
         taxi_rgb_env = CustomisedTaxiEnv(
             render_mode="rgb_array",
@@ -225,7 +219,7 @@ if __name__ == '__main__':
         print(f"\n[FrozenLake] Seed = {seed}")
         fl_train_env = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=seed),
-            max_episode_steps=100
+            max_episode_steps=FROZENLAKE_MAX_STEPS
         )
         fl_vec_env = DummyVecEnv([lambda: fl_train_env])
 
@@ -241,7 +235,7 @@ if __name__ == '__main__':
 
         fl_eval_env = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=20_000 + seed),
-            max_episode_steps=100
+            max_episode_steps=FROZENLAKE_MAX_STEPS
         )
 
         fl_curve_greedy, fl_curve_train = [], []
@@ -279,7 +273,7 @@ if __name__ == '__main__':
 
         fl_gif_backend = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=60_000 + seed),
-            max_episode_steps=100
+            max_episode_steps=FROZENLAKE_MAX_STEPS
         )
         fl_rgb_env = CustomisedFrozenLakeEnv(
             render_mode="rgb_array",
