@@ -1,10 +1,11 @@
 """
-Unit tests for Taxi & MiniGrid x NetworkX pipeline with R(s,a,s').
+Unit tests for Taxi, FrozenLake & MiniGrid x NetworkX pipeline with R(s,a,s').
 
 Flows:
-  A) Taxi (dry)    -> MDPNetwork (deterministic) -> DP -> GIF
-  B) Taxi (rainy)  -> MDPNetwork (stochastic)    -> NetworkX env -> DP -> GIF
-  C) MiniGrid (det)-> MDPNetwork (deterministic) -> NetworkX env -> DP -> GIF
+  A) Taxi (dry)          -> MDPNetwork (deterministic) -> DP -> GIF
+  B) Taxi (rainy)        -> MDPNetwork (stochastic)    -> NetworkX env -> DP -> GIF
+  C) FrozenLake 8x8 (slippery) -> MDPNetwork (stochastic) -> NetworkX env -> DP -> GIF
+  D) MiniGrid (det)      -> MDPNetwork (deterministic) -> NetworkX env -> DP -> GIF
 """
 
 import os
@@ -14,6 +15,7 @@ from PIL import Image, ImageDraw
 import numpy as np
 
 from customised_toy_text_envs.customised_taxi import CustomisedTaxiEnv
+from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
 from customised_minigrid_env.customised_minigrid_env import CustomMiniGridEnv
 from networkx_env.networkx_env import NetworkXMDPEnvironment
 from mdp_network.solvers import optimal_value_iteration, policy_evaluation
@@ -56,7 +58,7 @@ def record_policy_gif(
     Run episodes following a (probabilistic) policy and collect frames.
 
     Notes:
-    - For Taxi: obs is already an integer state id -> keep use_encode=False (default).
+    - For Taxi/FrozenLake: obs is already an integer state id -> keep use_encode=False (default).
     - For MiniGrid (dict obs): pass use_encode=True or provide state_fn to return an int id
       (e.g., lambda env, obs: env.encode_state()).
     """
@@ -70,7 +72,7 @@ def record_policy_gif(
         elif use_encode and hasattr(env, "encode_state"):
             state = env.encode_state()
         else:
-            state = obs  # works for Taxi; MiniGrid should not rely on this path
+            state = obs  # works for Taxi/FrozenLake
 
         # First frame
         frame = env.render()
@@ -139,9 +141,10 @@ if __name__ == "__main__":
     output_dir = "./outputs"
     ensure_dir(output_dir)
 
-    print("=== Taxi & MiniGrid x NetworkX Unit Test (R(s,a,s')) ===")
+    print("=== Taxi, FrozenLake & MiniGrid x NetworkX Unit Test (R(s,a,s')) ===")
     taxi_action_names = ["South", "North", "East", "West", "Pickup", "Dropoff"]
-    gamma, theta, max_iter = 0.99, 1e-6, 1000
+    fl_action_names = ["Left", "Down", "Right", "Up"]
+    gamma, theta, max_iter = 0.99, 1e-3, 1000
 
     # ---------------------------------------------------------
     # Group A: Deterministic (dry Taxi) => MDPNetwork => DP => GIF
@@ -239,25 +242,65 @@ if __name__ == "__main__":
         print("Warning: no frames for stochastic Taxi GIF")
 
     # ---------------------------------------------------------
-    # Group C: MiniGrid (deterministic) => MDPNetwork => NetworkX => DP => GIF
+    # Group C: FrozenLake 8x8 (slippery) => MDPNetwork => NetworkX => DP => GIF
     # ---------------------------------------------------------
-    print("\n=== Group C: MiniGrid (deterministic) via NetworkX ===")
-    # NOTE: choose your layout file; deterministic here just means we export dynamics as-is
+    print("\n=== Group C: FrozenLake 8x8 (slippery) via NetworkX ===")
+    fl_env = CustomisedFrozenLakeEnv(render_mode=None, map_name="8x8", is_slippery=True)
+    fl_env.reset(seed=999)
+    print(f"FrozenLake 8x8 (slippery): {fl_env.observation_space.n} states, {fl_env.action_space.n} actions")
+
+    fl_mdp: MDPNetwork = fl_env.get_mdp_network()
+    print(f"FrozenLake MDP: |S|={len(fl_mdp.states)}, |T|={len(fl_mdp.terminal_states)}")
+    summarize_stochasticity(fl_mdp)
+
+    fl_mdp_path = os.path.join(output_dir, "stoch_frozenlake8x8_mdp.json")
+    fl_mdp.export_to_json(fl_mdp_path)
+    print(f"Exported FrozenLake stochastic MDP: {fl_mdp_path}")
+
+    fl_nx_env = NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None)
+    print(f"NetworkX env (FrozenLake MDP): {fl_nx_env.observation_space.n} states")
+
+    fl_rand_pol = create_random_policy(fl_mdp)
+    print("\n--- Policy Evaluation (C) ---")
+    _ = policy_evaluation(fl_mdp, fl_rand_pol, gamma, theta, max_iter)
+    print("--- Optimal Value Iteration (C) ---")
+    fl_V, fl_Q = optimal_value_iteration(fl_mdp, gamma, theta, max_iter)
+
+    fl_rand_pol.export_to_csv(os.path.join(output_dir, "stoch_frozenlake_random_policy.csv"))
+    fl_V.export_to_csv(os.path.join(output_dir, "stoch_frozenlake_optimal_values.csv"))
+    fl_Q.export_to_csv(os.path.join(output_dir, "stoch_frozenlake_optimal_q_values.csv"))
+    print("Saved FrozenLake stochastic CSVs (policy/value/Q).")
+
+    fl_opt_pol = q_table_to_policy(fl_Q, fl_mdp.states, fl_mdp.num_actions, temperature=0.0)
+
+    print("\nCreating stochastic GIF (NetworkX-backed, FrozenLake renderer)...")
+    # Renderer env; backend transitions come from NetworkX
+    fl_rgb_env = CustomisedFrozenLakeEnv(render_mode="rgb_array", map_name="8x8", is_slippery=True, networkx_env=fl_nx_env)
+    fl_frames = record_policy_gif(fl_rgb_env, fl_opt_pol, fl_action_names, seed=314, episodes=3, max_steps=200)
+    if fl_frames:
+        fl_gif = os.path.join(output_dir, "stoch_frozenlake_optimal_policy_demo.gif")
+        fl_frames[0].save(fl_gif, save_all=True, append_images=fl_frames[1:], duration=500, loop=0)
+        print(f"Saved GIF: {fl_gif}")
+    else:
+        print("Warning: no frames for FrozenLake GIF")
+
+    # ---------------------------------------------------------
+    # Group D: MiniGrid (deterministic) => MDPNetwork => NetworkX => DP => GIF
+    # ---------------------------------------------------------
+    print("\n=== Group D: MiniGrid (deterministic) via NetworkX ===")
+    # Choose your layout file; deterministic here means we export the actual fixed-layout dynamics
     mg_map_path = "../customised_minigrid_env/maps/three-rooms.json"
 
-    # Build MDP from MiniGrid configuration
     mg_env_for_mdp = CustomMiniGridEnv(
         json_file_path=mg_map_path,
         config=None,
-        display_size=None,          # let env choose
-        display_mode="middle",      # fixed placement for reproducibility
-        random_rotate=False,        # keep fixed
-        random_flip=False,          # keep fixed
+        display_size=None,
+        display_mode="middle",
+        random_rotate=False,
+        random_flip=False,
         render_carried_objs=True,
         render_mode=None,
     )
-    # Some MiniGrid configs may randomize within allowed regions; if your implementation enforces "det only",
-    # the constructor or get_mdp_network should raise on randomness flags as agreed earlier.
     mg_env_for_mdp.reset(seed=7)
 
     mg_mdp: MDPNetwork = mg_env_for_mdp.get_mdp_network()
@@ -267,11 +310,10 @@ if __name__ == "__main__":
     mg_mdp.export_to_json(mg_mdp_path)
     print(f"Exported MiniGrid deterministic MDP: {mg_mdp_path}")
 
-    # DP on MiniGrid MDP
     mg_rand_pol = create_random_policy(mg_mdp)
-    print("\n--- Policy Evaluation (C) ---")
+    print("\n--- Policy Evaluation (D) ---")
     _ = policy_evaluation(mg_mdp, mg_rand_pol, gamma, theta, max_iter)
-    print("--- Optimal Value Iteration (C) ---")
+    print("--- Optimal Value Iteration (D) ---")
     mg_V, mg_Q = optimal_value_iteration(mg_mdp, gamma, theta, max_iter)
 
     mg_rand_pol.export_to_csv(os.path.join(output_dir, "det_minigrid_random_policy.csv"))
@@ -281,10 +323,7 @@ if __name__ == "__main__":
 
     mg_opt_pol = q_table_to_policy(mg_Q, mg_mdp.states, mg_mdp.num_actions, temperature=0.0)
 
-    # Drive MiniGrid rendering with a NetworkX-backed env created from mg_mdp
     mg_nx_env = NetworkXMDPEnvironment(mdp_network=mg_mdp, render_mode=None)
-
-    # Action labels for MiniGrid (adjust if your SimpleActions differs)
     mg_action_names = ["left", "right", "forward", "toggle"]
 
     print("\nCreating deterministic GIF (MiniGrid, NetworkX-backed)...")
@@ -297,14 +336,13 @@ if __name__ == "__main__":
         random_flip=False,
         render_carried_objs=True,
         render_mode="rgb_array",
-        networkx_env=mg_nx_env,  # backend: NetworkXMDPEnvironment
+        networkx_env=mg_nx_env,
     )
 
-    # For MiniGrid, use encode_state() to get an integer state id
     mg_frames = record_policy_gif(
         mg_rgb_env, mg_opt_pol, mg_action_names,
         seed=300, episodes=3, max_steps=200,
-        use_encode=True,  # or pass state_fn=lambda env, obs: env.encode_state()
+        use_encode=True,  # use env.encode_state() as state id
     )
     if mg_frames:
         mg_gif = os.path.join(output_dir, "det_minigrid_optimal_policy_demo.gif")
@@ -319,8 +357,10 @@ if __name__ == "__main__":
     print("\n=== Summary ===")
     print(f"Deterministic Taxi MDP JSON: {det_mdp_path}")
     print(f"Stochastic   Taxi MDP JSON: {stoch_mdp_path}")
+    print(f"Stochastic   FrozenLake MDP JSON: {fl_mdp_path}")
     print(f"Deterministic MiniGrid MDP JSON: {mg_mdp_path}")
     print("Deterministic CSVs: det_taxi_random_policy.csv, det_taxi_optimal_values.csv, det_taxi_optimal_q_values.csv")
     print("Stochastic   CSVs: stoch_taxi_random_policy.csv, stoch_taxi_optimal_values.csv, stoch_taxi_optimal_q_values.csv")
+    print("FrozenLake   CSVs: stoch_frozenlake_random_policy.csv, stoch_frozenlake_optimal_values.csv, stoch_frozenlake_optimal_q_values.csv")
     print("MiniGrid     CSVs: det_minigrid_random_policy.csv, det_minigrid_optimal_values.csv, det_minigrid_optimal_q_values.csv")
-    print("GIFs: det_taxi_optimal_policy_demo.gif, stoch_taxi_optimal_policy_demo.gif, det_minigrid_optimal_policy_demo.gif")
+    print("GIFs: det_taxi_optimal_policy_demo.gif, stoch_taxi_optimal_policy_demo.gif, stoch_frozenlake_optimal_policy_demo.gif, det_minigrid_optimal_policy_demo.gif")
