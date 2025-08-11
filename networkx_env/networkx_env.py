@@ -8,25 +8,12 @@ from mdp_network import MDPNetwork
 
 
 class NetworkXMDPEnvironment(gym.Env):
-    """
-    Gymnasium env backed by an MDPNetwork.
-    Uses R(s, a, s') via mdp.sample_step.
-    """
-
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
-
     def __init__(self,
                  mdp_network: Optional[MDPNetwork] = None,
                  config_path: Optional[str] = None,
                  render_mode: Optional[str] = None,
-                 output_string_states: bool = False):
-        """
-        Args:
-            mdp_network: pre-built MDPNetwork
-            config_path: JSON config (used when mdp_network is None)
-            render_mode: "human" | "rgb_array" | None
-            output_string_states: output string states if mapping exists
-        """
+                 output_string_states: bool = False,
+                 seed: Optional[int] = None):
         super().__init__()
 
         # Init MDP
@@ -37,10 +24,8 @@ class NetworkXMDPEnvironment(gym.Env):
         else:
             raise ValueError("Either mdp_network or config_path must be provided")
 
-        # Output preference
         self.output_string_states = output_string_states and self.mdp.has_string_mapping
 
-        # Spaces
         self.action_space = spaces.Discrete(self.mdp.num_actions)
         self.observation_space = spaces.Discrete(len(self.mdp.states))
 
@@ -50,41 +35,50 @@ class NetworkXMDPEnvironment(gym.Env):
         self.window = None
         self.clock = None
 
+        # Random generator (numpy RNG)
+        self.rng: np.random.Generator = np.random.default_rng(seed)
+
         # State
         self.current_state: Optional[Union[int, str]] = None
 
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[Union[int, str], Dict]:
-        """Reset to a random start state."""
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+        """
+        Reset to a random start state.
+        Uses numpy Generator self.rng for reproducible randomness.
+        """
         super().reset(seed=seed)
-        self.current_state = self.mdp.sample_start_state(self.np_random, as_string=self.output_string_states)
+        if seed is not None:
+            # Re-seed numpy generator for reproducibility
+            self.rng = np.random.default_rng(seed)
+
+        self.current_state = self.mdp.sample_start_state(self.rng, as_string=self.output_string_states)
 
         if self.render_mode == "human":
             self.render()
 
         return self.current_state, {}
 
-    def step(self, action: int) -> Tuple[Union[int, str], float, bool, bool, Dict]:
+    def step(self, action: int):
         """One environment step using R(s, a, s')."""
         if self.current_state is None:
             raise RuntimeError("Environment not reset. Call reset() before step().")
 
-        # Sample (s', r) from the MDP
         next_state, reward = self.mdp.sample_step(
             self.current_state,
             int(action),
-            self.np_random,
+            self.rng,  # use numpy RNG
             as_string=self.output_string_states
         )
 
         self.current_state = next_state
-
         terminated = self.mdp.is_terminal_state(next_state)
-        truncated = False  # No time limit here
+        truncated = False
 
         if self.render_mode == "human":
             self.render()
 
         return next_state, float(reward), bool(terminated), bool(truncated), {}
+
 
     def render(self):
         """Pygame render of the underlying graph."""

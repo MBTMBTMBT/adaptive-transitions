@@ -548,6 +548,49 @@ def q_table_to_policy(q_table: QTable,
     return policy
 
 
+def blend_policies(target: PolicyTable,
+                   prior: PolicyTable,
+                   weight: float) -> PolicyTable:
+    """
+    Blend two policies using linear interpolation.
+
+    Args:
+        target: Target policy (weight=0 returns this)
+        prior: Prior policy (weight=1 returns this)
+        weight: Blend weight [0,1]. 0=target, 1=prior
+
+    Returns:
+        Blended policy: (1-weight)*target + weight*prior
+    """
+    if not (0.0 <= weight <= 1.0):
+        raise ValueError("Weight must be in [0,1]")
+
+    # Get all states from both policies
+    all_states = set(target.get_all_states()) | set(prior.get_all_states())
+    all_actions = set(target.get_all_actions()) | set(prior.get_all_actions())
+
+    blended = PolicyTable()
+
+    for state in all_states:
+        target_probs = target.get_action_probabilities(state)
+        prior_probs = prior.get_action_probabilities(state)
+
+        # Blend probabilities for each action
+        blended_probs = {}
+        for action in all_actions:
+            target_prob = target_probs.get(action, 0.0)
+            prior_prob = prior_probs.get(action, 0.0)
+            blended_probs[action] = (1 - weight) * target_prob + weight * prior_prob
+
+        # Remove zero probabilities for cleaner representation
+        blended_probs = {a: p for a, p in blended_probs.items() if p > 0.0}
+
+        if blended_probs:  # Only set if non-empty
+            blended.set_action_probabilities(state, blended_probs)
+
+    return blended
+
+
 class RewardDistributionTable:
     """
     Reward distribution table representation for MDP reward analysis.

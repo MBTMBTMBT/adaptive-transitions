@@ -8,7 +8,7 @@ from mdp_network.samplers import deterministic_mdp_sampling
 from customised_minigrid_env.customised_minigrid_env import CustomMiniGridEnv
 
 
-def ensure_output_dir(output_dir: str = "./outputs"):
+def ensure_output_dir(output_dir: str = "./outputs/mdp_tests"):
     """Create output directory if it doesn't exist."""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
         # Test 5: Reward Distribution
         print("\n=== Test 5: Reward Distribution ===")
-        reward_count_dist, reward_prob_dist = compute_reward_distribution(mdp, occupancy, delta=1e-6)
+        reward_count_dist, reward_prob_dist = compute_reward_distribution(mdp, occupancy, policy=random_policy, delta=1e-6)
         reward_count_dist, reward_prob_dist = reward_count_dist.normalize_rewards_to_0_1(), reward_prob_dist.normalize_rewards_to_0_1()
 
         print("Reward Distribution Results:")
