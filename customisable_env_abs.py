@@ -11,15 +11,15 @@ class CustomisableEnvAbs(ABC):
         self.networkx_env = networkx_env
 
     @abstractmethod
-    def encode_state(self,) -> Union[int, str]:
+    def encode_state(self,) -> int:
         pass
 
     @abstractmethod
-    def decode_state(self, state: Union[int, str]) -> Tuple[ObsType, Dict[str, Any]]:
+    def decode_state(self, state: int) -> Tuple[ObsType, Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def get_start_states(self,) -> List[Union[int, str]]:
+    def get_start_states(self,) -> List[int]:
         pass
 
     @abstractmethod
