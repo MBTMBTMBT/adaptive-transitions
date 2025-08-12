@@ -49,56 +49,6 @@ def get_registered_score_fn(name: str) -> ScoreFn:
 
 
 # -------------------------------
-# MDP clone & (de)serialization (no deepcopy)
-# -------------------------------
-
-def mdp_to_config_and_maps(src: 'MDPNetwork') -> Tuple[Dict, Optional[Dict[int, Any]], Optional[Dict[Any, int]]]:
-    """
-    Build a serializable config dict (same schema as export_to_json) and return optional mappings.
-    This avoids deepcopy and enables safe inter-process transport.
-    """
-    transitions: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
-    for s in src.states:
-        action_map: Dict[int, Dict[int, Dict[str, float]]] = {}
-        for sp in src.graph.successors(s):
-            edata = src.graph[s][sp]
-            if "transitions" not in edata:
-                continue
-            for a, ar in edata["transitions"].items():
-                action_map.setdefault(int(a), {})
-                action_map[int(a)][int(sp)] = {"p": float(ar["p"]), "r": float(ar["r"])}
-        if action_map:
-            s_trans: Dict[str, Dict[str, Dict[str, float]]] = {}
-            for a, sp_dict in action_map.items():
-                a_str = str(int(a))
-                s_trans.setdefault(a_str, {})
-                for sp, ar in sp_dict.items():
-                    s_trans[a_str][str(int(sp))] = {"p": float(ar["p"]), "r": float(ar["r"])}
-            transitions[str(int(s))] = s_trans
-
-    cfg: Dict = {
-        "num_actions": int(src.num_actions),
-        "states": [int(s) for s in src.states],
-        "start_states": [int(s) for s in src.start_states],
-        "terminal_states": [int(s) for s in src.terminal_states],
-        "default_reward": float(src.default_reward),
-        "transitions": transitions,
-    }
-
-    if src.tags:
-        cfg["tags"] = {k: sorted(int(x) for x in v) for k, v in src.tags.items()}
-
-    int_to_state = src.int_to_state if getattr(src, "has_string_mapping", False) else None
-    state_to_int = src.state_to_int if getattr(src, "has_string_mapping", False) else None
-    return cfg, int_to_state, state_to_int
-
-
-def clone_mdp_network(src: 'MDPNetwork') -> 'MDPNetwork':
-    cfg, int_to_state, state_to_int = mdp_to_config_and_maps(src)
-    return MDPNetwork(config_data=cfg, int_to_state=int_to_state, state_to_int=state_to_int)
-
-
-# -------------------------------
 # Single distance function (fixed signature via GAConfig)
 # -------------------------------
 
@@ -471,7 +421,7 @@ def mutation_reward_smallstep(mdp: 'MDPNetwork',
 def crossover_action_block(parent_a: 'MDPNetwork',
                            parent_b: 'MDPNetwork',
                            rng: np.random.Generator) -> 'MDPNetwork':
-    child = clone_mdp_network(parent_a)
+    child = parent_a.clone()
     for s in child.states:
         if s in child.terminal_states:
             continue
@@ -504,9 +454,12 @@ def tournament_select(pop: List['MDPNetwork'],
 # Parallel scoring workers (name-based only)
 # -------------------------------
 
-def _score_worker_by_name(payload: Tuple[Dict, Optional[Dict[int, Any]], Optional[Dict[Any, int]], str, Tuple[Any, ...], Dict[str, Any]]) -> float:
-    cfg, int_to_state, state_to_int, fn_name, args, kwargs = payload
-    mdp = MDPNetwork(config_data=cfg, int_to_state=int_to_state, state_to_int=state_to_int)
+def _score_worker_by_name(payload: Tuple[Dict[str, Any], str, Tuple[Any, ...], Dict[str, Any]]) -> float:
+    """
+    payload = (portable, score_fn_name, args, kwargs)
+    """
+    portable, fn_name, args, kwargs = payload
+    mdp = MDPNetwork.from_portable(portable)
     fn = get_registered_score_fn(fn_name)
     return float(fn(mdp, *args, **kwargs))
 
@@ -525,10 +478,8 @@ def evaluate_mdp_list(
         raise ValueError("n_workers must be >= 1.")
     args = score_args or ()
     kwargs = score_kwargs or {}
-    payloads = []
-    for m in mdps:
-        cfg, int_to_state, state_to_int = mdp_to_config_and_maps(m)
-        payloads.append((cfg, int_to_state, state_to_int, score_fn_name, args, kwargs))
+
+    payloads = [(m.to_portable(), score_fn_name, args, kwargs) for m in mdps]
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         results = list(ex.map(_score_worker_by_name, payloads))
     return [float(x) for x in results]
@@ -548,40 +499,39 @@ def _apply_mutations(ind: 'MDPNetwork', rng: np.random.Generator, whitelist: Set
     mutation_reward_smallstep(ind, rng, cfg)
 
 
-def _child_worker(payload: Dict[str, Any]) -> Tuple[Dict, Optional[Dict[int, Any]], Optional[Dict[Any, int]]]:
+def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build one child in a worker process.
-    Usage:
-      - Init: provide base_cfg/int_to_state/state_to_int (no parents)
-      - Mate: provide pa_cfg/pa_i2s/pa_s2i and pb_cfg/pb_i2s/pb_s2i (+ do_crossover)
+    Returns child's portable dict from to_portable().
+    Two modes:
+      - Init: payload has "base_portable"
+      - Mate: payload has "pa_portable", "pb_portable", "do_crossover"
     """
     cfg: GAConfig = payload["cfg"]
     whitelist: Set[EdgeTriple] = set(payload["whitelist"])
     rng = np.random.default_rng(payload["seed"])
 
-    def _mk_from_cfg(c: Dict, m1, m2) -> MDPNetwork:
-        return MDPNetwork(config_data=c, int_to_state=m1, state_to_int=m2)
+    def _mk_from_portable(p: Dict[str, Any]) -> MDPNetwork:
+        return MDPNetwork.from_portable(p)
 
-    if "pa_cfg" in payload:
+    if "pa_portable" in payload:
         # Mate path
-        pa_cfg, pa_i2s, pa_s2i = payload["pa_cfg"], payload["pa_i2s"], payload["pa_s2i"]
-        pb_cfg, pb_i2s, pb_s2i = payload["pb_cfg"], payload["pb_i2s"], payload["pb_s2i"]
+        pa = _mk_from_portable(payload["pa_portable"])
+        pb = _mk_from_portable(payload["pb_portable"])
         do_crossover: bool = payload["do_crossover"]
-        pa = _mk_from_cfg(pa_cfg, pa_i2s, pa_s2i)
-        pb = _mk_from_cfg(pb_cfg, pb_i2s, pb_s2i)
+
         if do_crossover:
             child = crossover_action_block(pa, pb, rng)
         else:
-            child = clone_mdp_network(pa if rng.random() < 0.5 else pb)
+            child = (pa if rng.random() < 0.5 else pb).clone()
+
         _apply_mutations(child, rng, whitelist, cfg)
-        return mdp_to_config_and_maps(child)
+        return child.to_portable()
 
     else:
         # Init path
-        base_cfg, itos, stoi = payload["base_cfg"], payload["int_to_state"], payload["state_to_int"]
-        ind = _mk_from_cfg(base_cfg, itos, stoi)
+        ind = _mk_from_portable(payload["base_portable"])
         _apply_mutations(ind, rng, whitelist, cfg)
-        return mdp_to_config_and_maps(ind)
+        return ind.to_portable()
 
 
 # -------------------------------
@@ -609,22 +559,19 @@ class MDPEvolutionGA:
         self.rng = np.random.default_rng(cfg.seed)
 
         # Baseline and whitelist
-        self.base_mdp = clone_mdp_network(base_mdp)
+        self.base_mdp = base_mdp.clone()
         self.whitelist: Set[EdgeTriple] = build_original_whitelist(self.base_mdp)
 
-        # Cache serialized baseline for workers
-        self._base_cfg, self._base_i2s, self._base_s2i = mdp_to_config_and_maps(self.base_mdp)
+        # Single portable blob for cross-process transport
+        self._base_portable = self.base_mdp.to_portable()
 
     # ---------- initialization ----------
 
     def _init_population(self) -> List['MDPNetwork']:
-        pop: List[MDPNetwork] = [clone_mdp_network(self.base_mdp)]
+        pop: List[MDPNetwork] = [self.base_mdp.clone()]
         need = self.cfg.population_size - 1
         if need <= 0:
             return pop
-
-        if self.cfg.mutation_n_workers < 1:
-            raise ValueError("mutation_n_workers must be >= 1 (parallel-only).")
 
         payloads: List[Dict[str, Any]] = []
         for _ in range(need):
@@ -632,27 +579,24 @@ class MDPEvolutionGA:
                 "cfg": self.cfg,
                 "whitelist": list(self.whitelist),
                 "seed": int(self.rng.integers(0, 2 ** 63 - 1)),
-                "base_cfg": self._base_cfg,
-                "int_to_state": self._base_i2s,
-                "state_to_int": self._base_s2i,
+                "base_portable": self._base_portable,
             })
         with ProcessPoolExecutor(max_workers=self.cfg.mutation_n_workers) as ex:
             results = list(ex.map(_child_worker, payloads))
-        for (cfg_d, i2s, s2i) in results:
-            pop.append(MDPNetwork(config_data=cfg_d, int_to_state=i2s, state_to_int=s2i))
+
+        for portable in results:
+            pop.append(MDPNetwork.from_portable(portable))
         return pop
 
     def _make_children_parallel(self, parents_pairs: List[Tuple['MDPNetwork', 'MDPNetwork']]) -> List['MDPNetwork']:
         payloads: List[Dict[str, Any]] = []
         for (pa, pb) in parents_pairs:
-            pa_cfg, pa_i2s, pa_s2i = mdp_to_config_and_maps(pa)
-            pb_cfg, pb_i2s, pb_s2i = mdp_to_config_and_maps(pb)
             payloads.append({
                 "cfg": self.cfg,
                 "whitelist": list(self.whitelist),
                 "seed": int(self.rng.integers(0, 2 ** 63 - 1)),
-                "pa_cfg": pa_cfg, "pa_i2s": pa_i2s, "pa_s2i": pa_s2i,
-                "pb_cfg": pb_cfg, "pb_i2s": pb_i2s, "pb_s2i": pb_s2i,
+                "pa_portable": pa.to_portable(),
+                "pb_portable": pb.to_portable(),
                 "do_crossover": bool(self.rng.random() < self.cfg.crossover_rate),
             })
 
@@ -660,8 +604,8 @@ class MDPEvolutionGA:
             results = list(ex.map(_child_worker, payloads))
 
         children: List[MDPNetwork] = []
-        for (cfg_d, i2s, s2i) in results:
-            children.append(MDPNetwork(config_data=cfg_d, int_to_state=i2s, state_to_int=s2i))
+        for portable in results:
+            children.append(MDPNetwork.from_portable(portable))
         return children
 
     # ---------- evaluation ----------
@@ -682,18 +626,21 @@ class MDPEvolutionGA:
         scores = self._evaluate_population(pop)
 
         best_idx = int(np.argmax(scores))
-        best_mdp = clone_mdp_network(pop[best_idx])
+        best_mdp = pop[best_idx].clone()  # use instance clone()
         best_score = float(scores[best_idx])
         history: List[float] = [best_score]
 
         print(f"[Init] pop={len(pop)} | best={best_score:.6f} | "
               f"mean={np.mean(scores):.6f} | std={np.std(scores):.6f}")
 
+        # 2) Generations
         for gen in range(self.cfg.generations):
+            # Elitism: keep top-k clones
             elite_count = min(self.cfg.elitism_num, len(pop))
             elite_idxs = list(np.argsort(scores)[-elite_count:])
-            elites = [clone_mdp_network(pop[int(i)]) for i in elite_idxs]
+            elites = [pop[int(i)].clone() for i in elite_idxs]  # clone elites
 
+            # Fill the rest with children (always via parallel path in this design)
             target = self.cfg.population_size - elite_count
             if target <= 0:
                 new_pop: List[MDPNetwork] = elites
@@ -707,16 +654,18 @@ class MDPEvolutionGA:
                 children = self._make_children_parallel(parents_pairs)
                 new_pop = elites + children
 
+            # Move to next generation
             pop = new_pop
             scores = self._evaluate_population(pop)
 
+            # Track best-of-generation and update global best if improved
             gen_best_idx = int(np.argmax(scores))
             gen_best_score = float(scores[gen_best_idx])
 
             improved = gen_best_score > best_score
             if improved:
                 best_score = gen_best_score
-                best_mdp = clone_mdp_network(pop[gen_best_idx])
+                best_mdp = pop[gen_best_idx].clone()  # clone the new best
 
             history.append(best_score)
 

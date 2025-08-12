@@ -2,9 +2,10 @@ import json
 from typing import Dict, Optional, Any, Union, Tuple, List, Set
 import numpy as np
 import networkx as nx
+from serialisable import Serialisable
 
 
-class MDPNetwork:
+class MDPNetwork(Serialisable):
     """
     MDP over a directed graph with R(s, a, s').
     JSON schema adds optional "tags": {"name": [state_ids...], ...}.
@@ -332,3 +333,64 @@ class MDPNetwork:
 
         with open(output_path, 'w') as f:
             json.dump(export_config, f, indent=2)
+
+    def to_portable(self) -> Dict[str, Any]:
+        """
+        Build a JSON-serializable dict that fully describes this MDP.
+        Contains only basic Python types (lists/dicts/ints/floats/strings).
+        Safe to pass across processes. Does NOT write to disk.
+        Schema:
+          {
+            "config": { ... }          # same JSON-like schema as export_to_json
+            "int_to_state": { ... }    # optional (None if no string mapping)
+            "state_to_int": { ... }    # optional (None if no string mapping)
+          }
+        """
+        transitions: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
+
+        for s in self.states:
+            s_trans: Dict[str, Dict[str, Dict[str, float]]] = {}
+            action_map: Dict[int, Dict[int, Dict[str, float]]] = {}
+            for sp in self.graph.successors(s):
+                edata = self.graph[s][sp]
+                if "transitions" not in edata:
+                    continue
+                for a, ar in edata["transitions"].items():
+                    action_map.setdefault(int(a), {})
+                    action_map[int(a)][int(sp)] = {"p": float(ar["p"]), "r": float(ar["r"])}
+            for a, sp_dict in action_map.items():
+                a_str = str(int(a))
+                s_trans.setdefault(a_str, {})
+                for sp, ar in sp_dict.items():
+                    s_trans[a_str][str(int(sp))] = {"p": float(ar["p"]), "r": float(ar["r"])}
+            if s_trans:
+                transitions[str(int(s))] = s_trans
+
+        portable_config: Dict[str, Any] = {
+            "num_actions": int(self.num_actions),
+            "states": [int(s) for s in self.states],
+            "start_states": [int(s) for s in self.start_states],
+            "terminal_states": [int(s) for s in self.terminal_states],
+            "default_reward": float(self.default_reward),
+            "transitions": transitions,
+        }
+
+        if self.tags:
+            portable_config["tags"] = {k: sorted(int(x) for x in v) for k, v in self.tags.items()}
+
+        return {
+            "config": portable_config,
+            # keep mappings only if they exist; values are JSON-friendly already
+            "int_to_state": self.int_to_state if self.has_string_mapping else None,
+            "state_to_int": self.state_to_int if self.has_string_mapping else None,
+        }
+
+    @classmethod
+    def from_portable(cls, portable: Dict[str, Any]) -> "MDPNetwork":
+        """
+        Rebuild an MDPNetwork instance from a portable dict produced by to_portable().
+        """
+        cfg = portable["config"]
+        itos = portable.get("int_to_state", None)
+        stoi = portable.get("state_to_int", None)
+        return cls(config_data=cfg, int_to_state=itos, state_to_int=stoi)

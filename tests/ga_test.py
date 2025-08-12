@@ -14,7 +14,6 @@ from mdp_network.ga_mdp_search import (
     register_score_fn,
     example_score_fn,
     evaluate_mdp_list,
-    clone_mdp_network,
 )
 
 from mdp_network.mdp_network import MDPNetwork
@@ -94,7 +93,7 @@ if __name__ == "__main__":
 
     # Optional: parallel evaluate_mdp_list sanity check
     print("\n=== Parallel evaluate_mdp_list sanity check ===")
-    batch = [mdp, clone_mdp_network(mdp), clone_mdp_network(mdp)]
+    batch = [mdp, mdp.clone(), mdp.clone()]
     scores = evaluate_mdp_list(batch, score_fn_name="example", n_workers=cfg.n_workers)
     print("Batch scores:", [round(s, 6) for s in scores])
     assert isinstance(scores, list) and len(scores) == len(batch)

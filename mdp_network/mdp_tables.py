@@ -5,12 +5,14 @@ import scipy
 import numpy as np
 
 from mdp_network import MDPNetwork
+from serialisable import Serialisable
 
 
-class QTable:
+class QTable(Serialisable):
     """
     Q-table representation for MDP Q-values.
     Supports CSV import/export functionality.
+    Also implements Serialisable for in-memory, cross-process transport.
     """
 
     def __init__(self, q_values: Optional[Dict[int, Dict[int, float]]] = None):
@@ -20,8 +22,37 @@ class QTable:
         Args:
             q_values: Dictionary mapping state -> action -> q_value
         """
-        self.q_values = q_values if q_values is not None else {}
+        self.q_values: Dict[int, Dict[int, float]] = q_values if q_values is not None else {}
 
+    # -------- Serialisable interface --------
+    def to_portable(self) -> Dict[str, Any]:
+        """
+        Build a JSON-serializable dict:
+          {"q_values": {state: {action: q}}}
+        Keys are kept as ints; values cast to float for JSON safety.
+        """
+        return {
+            "q_values": {
+                int(s): {int(a): float(v) for a, v in acts.items()}
+                for s, acts in self.q_values.items()
+            }
+        }
+
+    @classmethod
+    def from_portable(cls, portable: Dict[str, Any]) -> "QTable":
+        """
+        Rebuild from dict produced by to_portable(). Tolerates string/int keys.
+        """
+        raw = portable.get("q_values", {})
+        q_values: Dict[int, Dict[int, float]] = {}
+        for s_k, acts in raw.items():
+            s = int(s_k)
+            q_values[s] = {int(a_k): float(v) for a_k, v in acts.items()}
+        return cls(q_values=q_values)
+
+    # clone() comes from Serialisable via round-trip
+
+    # -------- QTable API --------
     def get_q_value(self, state: int, action: int) -> float:
         """Get Q-value for a state-action pair."""
         return self.q_values.get(state, {}).get(action, 0.0)
@@ -30,7 +61,7 @@ class QTable:
         """Set Q-value for a state-action pair."""
         if state not in self.q_values:
             self.q_values[state] = {}
-        self.q_values[state][action] = value
+        self.q_values[state][action] = float(value)
 
     def get_best_action(self, state: int) -> Tuple[int, float]:
         """
@@ -41,10 +72,9 @@ class QTable:
         """
         if state not in self.q_values or not self.q_values[state]:
             return 0, 0.0
-
         best_action = max(self.q_values[state], key=self.q_values[state].get)
         best_value = self.q_values[state][best_action]
-        return best_action, best_value
+        return best_action, float(best_value)
 
     def get_all_states(self) -> List[int]:
         """Get all states in the Q-table."""
@@ -62,7 +92,6 @@ class QTable:
         with open(file_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['state', 'action', 'q_value'])
-
             for state in sorted(self.q_values.keys()):
                 for action in sorted(self.q_values[state].keys()):
                     writer.writerow([state, action, self.q_values[state][action]])
@@ -76,27 +105,19 @@ class QTable:
             raise FileNotFoundError(f"CSV file not found: {file_path}")
 
         self.q_values = {}
-
         with open(file_path, 'r') as csvfile:
             reader = csv.DictReader(csvfile)
-
             for row in reader:
                 state = int(row['state'])
                 action = int(row['action'])
                 q_value = float(row['q_value'])
-
                 if state not in self.q_values:
                     self.q_values[state] = {}
-
                 self.q_values[state][action] = q_value
 
     def __str__(self, max_states: int = 20, max_actions_per_state: int = 10) -> str:
         """
         String representation of Q-table with flexible formatting for large dimensions.
-
-        Args:
-            max_states: Maximum number of states to display
-            max_actions_per_state: Maximum number of actions to display per state
         """
         if not self.q_values:
             return "Q-Table: Empty"
@@ -105,7 +126,6 @@ class QTable:
         total_states = len(states)
         total_entries = sum(len(self.q_values[state]) for state in states)
 
-        # Get all unique actions for table header
         all_actions = set()
         for state_actions in self.q_values.values():
             all_actions.update(state_actions.keys())
@@ -113,9 +133,7 @@ class QTable:
 
         result = f"Q-Table ({total_states} states, {total_entries} entries):\n"
 
-        # If we have few states and actions, show as formatted table
         if total_states <= max_states and len(all_actions) <= max_actions_per_state:
-            # Table format
             header = "State".ljust(8)
             for action in all_actions:
                 header += f"Action {action}".rjust(12)
@@ -129,22 +147,16 @@ class QTable:
                     row += f"{value:11.4f}".rjust(12)
                 result += row + "\n"
         else:
-            # Compact format for large tables
             display_states = states[:max_states]
-
             for state in display_states:
                 result += f"State {state}: "
                 actions = sorted(self.q_values[state].items())
-
                 if len(actions) <= max_actions_per_state:
-                    # Show all actions
                     action_strs = [f"A{action}={value:.4f}" for action, value in actions]
                 else:
-                    # Show top actions by value and truncate
                     top_actions = sorted(actions, key=lambda x: x[1], reverse=True)
                     action_strs = [f"A{action}={value:.4f}" for action, value in top_actions[:max_actions_per_state]]
                     action_strs.append(f"... and {len(actions) - max_actions_per_state} more")
-
                 result += ", ".join(action_strs) + "\n"
 
             if total_states > max_states:
@@ -153,10 +165,11 @@ class QTable:
         return result
 
 
-class ValueTable:
+class ValueTable(Serialisable):
     """
     Value table representation for MDP state values.
     Supports CSV import/export functionality.
+    Also implements Serialisable.
     """
 
     def __init__(self, values: Optional[Dict[int, float]] = None):
@@ -166,15 +179,32 @@ class ValueTable:
         Args:
             values: Dictionary mapping state -> value
         """
-        self.values = values if values is not None else {}
+        self.values: Dict[int, float] = values if values is not None else {}
 
+    # -------- Serialisable interface --------
+    def to_portable(self) -> Dict[str, Any]:
+        """
+        Build a JSON-serializable dict:
+          {"values": {state: value}}
+        """
+        return {"values": {int(s): float(v) for s, v in self.values.items()}}
+
+    @classmethod
+    def from_portable(cls, portable: Dict[str, Any]) -> "ValueTable":
+        raw = portable.get("values", {})
+        values = {int(s_k): float(v) for s_k, v in raw.items()}
+        return cls(values=values)
+
+    # clone() comes from Serialisable
+
+    # -------- ValueTable API --------
     def get_value(self, state: int) -> float:
         """Get value for a state."""
-        return self.values.get(state, 0.0)
+        return float(self.values.get(state, 0.0))
 
     def set_value(self, state: int, value: float):
         """Set value for a state."""
-        self.values[state] = value
+        self.values[state] = float(value)
 
     def get_best_state(self) -> Tuple[int, float]:
         """
@@ -185,10 +215,9 @@ class ValueTable:
         """
         if not self.values:
             return 0, 0.0
-
         best_state = max(self.values, key=self.values.get)
         best_value = self.values[best_state]
-        return best_state, best_value
+        return int(best_state), float(best_value)
 
     def get_all_states(self) -> List[int]:
         """Get all states in the Value table."""
@@ -202,7 +231,6 @@ class ValueTable:
         with open(file_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['state', 'value'])
-
             for state in sorted(self.values.keys()):
                 writer.writerow([state, self.values[state]])
 
@@ -215,10 +243,8 @@ class ValueTable:
             raise FileNotFoundError(f"CSV file not found: {file_path}")
 
         self.values = {}
-
         with open(file_path, 'r') as csvfile:
             reader = csv.DictReader(csvfile)
-
             for row in reader:
                 state = int(row['state'])
                 value = float(row['value'])
@@ -227,27 +253,19 @@ class ValueTable:
     def __str__(self, max_states: int = 50, columns: int = 4) -> str:
         """
         String representation of Value table with flexible formatting for large dimensions.
-
-        Args:
-            max_states: Maximum number of states to display
-            columns: Number of columns for compact display
         """
         if not self.values:
             return "Value Table: Empty"
 
         states = sorted(self.values.keys())
         total_states = len(states)
-
         result = f"Value Table ({total_states} states):\n"
 
-        # If we have few states, show as formatted table
         if total_states <= max_states:
             if total_states <= 20:
-                # Single column format for small tables
                 for state in states:
                     result += f"State {state:3d}: V = {self.values[state]:8.4f}\n"
             else:
-                # Multi-column format for medium tables
                 result += "\n"
                 for i in range(0, len(states), columns):
                     row_states = states[i:i + columns]
@@ -256,37 +274,30 @@ class ValueTable:
                         line += f"S{state:3d}:{self.values[state]:7.4f}  "
                     result += line + "\n"
         else:
-            # Compact format for very large tables
             display_states = states[:max_states]
-
-            # Show statistics
             values_array = [self.values[state] for state in states]
             min_val = min(values_array)
             max_val = max(values_array)
             avg_val = sum(values_array) / len(values_array)
-
             result += f"Stats: Min={min_val:.4f}, Max={max_val:.4f}, Avg={avg_val:.4f}\n\n"
-
-            # Show sample of states
             result += "Sample states:\n"
             for i in range(0, len(display_states), columns):
                 row_states = display_states[i:i + columns]
                 line = ""
                 for state in row_states:
                     line += f"S{state:3d}:{self.values[state]:7.4f}  "
-                result += line + "\n"
-
+                    result += line + "\n"
             if total_states > max_states:
                 result += f"\n... and {total_states - max_states} more states"
-
         return result
 
 
-class PolicyTable:
+class PolicyTable(Serialisable):
     """
     Policy table representation for MDP policies.
     Supports probabilistic policies (action probability distributions).
     Supports CSV import/export functionality.
+    Also implements Serialisable.
     """
 
     def __init__(self, policy: Optional[Dict[int, Dict[int, float]]] = None):
@@ -296,23 +307,45 @@ class PolicyTable:
         Args:
             policy: Dictionary mapping state -> {action: probability}
         """
-        self.policy = policy if policy is not None else {}
+        self.policy: Dict[int, Dict[int, float]] = policy if policy is not None else {}
 
+    # -------- Serialisable interface --------
+    def to_portable(self) -> Dict[str, Any]:
+        """
+        Build a JSON-serializable dict:
+          {"policy": {state: {action: prob}}}
+        """
+        return {
+            "policy": {
+                int(s): {int(a): float(p) for a, p in acts.items()}
+                for s, acts in self.policy.items()
+            }
+        }
+
+    @classmethod
+    def from_portable(cls, portable: Dict[str, Any]) -> "PolicyTable":
+        raw = portable.get("policy", {})
+        policy: Dict[int, Dict[int, float]] = {}
+        for s_k, acts in raw.items():
+            s = int(s_k)
+            policy[s] = {int(a_k): float(p) for a_k, p in acts.items()}
+        return cls(policy=policy)
+
+    # clone() comes from Serialisable
+
+    # -------- PolicyTable API --------
     def get_action_probabilities(self, state: int) -> Dict[int, float]:
         """Get action probability distribution for a state."""
         return self.policy.get(state, {0: 1.0})
 
     def set_action_probabilities(self, state: int, action_probs: Dict[int, float]):
-        """Set action probability distribution for a state."""
-        # Normalize probabilities to sum to 1
-        total_prob = sum(action_probs.values())
+        """Set action probability distribution for a state (normalized)."""
+        total_prob = float(sum(action_probs.values()))
         if total_prob > 0:
-            normalized_probs = {action: prob / total_prob for action, prob in action_probs.items()}
+            normalized_probs = {int(a): float(p) / total_prob for a, p in action_probs.items()}
         else:
-            # If all probabilities are zero, default to uniform distribution
-            num_actions = len(action_probs)
-            normalized_probs = {action: 1.0 / num_actions for action in action_probs.keys()}
-
+            num_actions = max(1, len(action_probs))
+            normalized_probs = {int(a): 1.0 / num_actions for a in action_probs.keys()}
         self.policy[state] = normalized_probs
 
     def get_action(self, state: int) -> int:
@@ -324,38 +357,38 @@ class PolicyTable:
 
     def set_action(self, state: int, action: int):
         """Set deterministic action for a state (for compatibility)."""
-        self.policy[state] = {action: 1.0}
+        self.policy[state] = {int(action): 1.0}
 
     def sample_action(self, state: int, rng: np.random.Generator) -> int:
         """Sample an action according to the policy distribution."""
         action_probs = self.get_action_probabilities(state)
         actions = list(action_probs.keys())
         probabilities = list(action_probs.values())
-        return rng.choice(actions, p=probabilities)
+        return int(rng.choice(actions, p=probabilities))
 
     def get_action_probability(self, state: int, action: int) -> float:
         """Get probability of taking a specific action in a state."""
         action_probs = self.get_action_probabilities(state)
-        return action_probs.get(action, 0.0)
+        return float(action_probs.get(action, 0.0))
 
     def get_most_common_action(self) -> Tuple[int, int]:
         """
         Get the most common action and its count.
-
-        Returns:
-            Tuple of (most_common_action, count)
+        Returns: (most_common_action, count)
         """
         if not self.policy:
             return 0, 0
-
-        action_counts = {}
+        action_counts: Dict[int, int] = {}
         for state_policy in self.policy.values():
+            if not state_policy:
+                continue
             most_likely_action = max(state_policy, key=state_policy.get)
             action_counts[most_likely_action] = action_counts.get(most_likely_action, 0) + 1
-
+        if not action_counts:
+            return 0, 0
         most_common_action = max(action_counts, key=action_counts.get)
         count = action_counts[most_common_action]
-        return most_common_action, count
+        return int(most_common_action), int(count)
 
     def get_all_states(self) -> List[int]:
         """Get all states in the Policy table."""
@@ -376,7 +409,6 @@ class PolicyTable:
         with open(file_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['state', 'action', 'probability'])
-
             for state in sorted(self.policy.keys()):
                 for action, prob in sorted(self.policy[state].items()):
                     writer.writerow([state, action, prob])
@@ -390,15 +422,12 @@ class PolicyTable:
             raise FileNotFoundError(f"CSV file not found: {file_path}")
 
         self.policy = {}
-
         with open(file_path, 'r') as csvfile:
             reader = csv.DictReader(csvfile)
-
             for row in reader:
                 state = int(row['state'])
                 action = int(row['action'])
                 probability = float(row['probability'])
-
                 if state not in self.policy:
                     self.policy[state] = {}
                 self.policy[state][action] = probability
@@ -406,10 +435,6 @@ class PolicyTable:
     def __str__(self, max_states: int = 30, show_deterministic_only: bool = False) -> str:
         """
         String representation of Policy table with flexible formatting for large dimensions.
-
-        Args:
-            max_states: Maximum number of states to display
-            show_deterministic_only: If True, only show the most likely action for each state
         """
         if not self.policy:
             return "Policy Table: Empty"
@@ -417,31 +442,26 @@ class PolicyTable:
         states = sorted(self.policy.keys())
         total_states = len(states)
 
-        # Count deterministic vs probabilistic policies
         deterministic_count = 0
         for state_policy in self.policy.values():
             max_prob = max(state_policy.values()) if state_policy else 0.0
-            if max_prob >= 0.99:  # Consider as deterministic if probability >= 0.99
+            if max_prob >= 0.99:
                 deterministic_count += 1
 
         result = f"Policy Table ({total_states} states, {deterministic_count} deterministic):\n"
 
-        # If mostly deterministic or requested, show compact deterministic format
-        if show_deterministic_only or (deterministic_count / total_states > 0.8 and total_states > 20):
+        if show_deterministic_only or (total_states > 20 and deterministic_count / max(total_states, 1) > 0.8):
             result += "\nDeterministic actions (probability >= 0.99):\n"
             display_states = states[:max_states]
-
-            # Group by action for compact display
-            action_groups = {}
+            action_groups: Dict[int, List[int]] = {}
             for state in display_states:
                 state_policy = self.policy[state]
+                if not state_policy:
+                    continue
                 best_action = max(state_policy, key=state_policy.get)
                 best_prob = state_policy[best_action]
-
                 if best_prob >= 0.99:
-                    if best_action not in action_groups:
-                        action_groups[best_action] = []
-                    action_groups[best_action].append(state)
+                    action_groups.setdefault(best_action, []).append(state)
 
             for action in sorted(action_groups.keys()):
                 states_list = action_groups[action]
@@ -450,7 +470,6 @@ class PolicyTable:
                 else:
                     result += f"Action {action}: States {states_list[:10]} ... and {len(states_list) - 10} more\n"
 
-            # Show non-deterministic states
             non_det_states = []
             for state in display_states:
                 state_policy = self.policy[state]
@@ -464,26 +483,17 @@ class PolicyTable:
                     result += str(non_det_states) + "\n"
                 else:
                     result += f"{non_det_states[:10]} ... and {len(non_det_states) - 10} more\n"
-
         else:
-            # Full probabilistic format
             display_states = states[:max_states]
-
             for state in display_states:
                 result += f"State {state}: "
                 state_policy = self.policy[state]
-
-                # Sort actions by probability (descending)
                 sorted_actions = sorted(state_policy.items(), key=lambda x: x[1], reverse=True)
-
                 if len(sorted_actions) <= 5:
-                    # Show all actions
                     action_strs = [f"A{action}={prob:.3f}" for action, prob in sorted_actions]
                 else:
-                    # Show top 5 actions
                     action_strs = [f"A{action}={prob:.3f}" for action, prob in sorted_actions[:5]]
                     action_strs.append(f"... +{len(sorted_actions) - 5} more")
-
                 result += "{" + ", ".join(action_strs) + "}\n"
 
         if total_states > max_states:
