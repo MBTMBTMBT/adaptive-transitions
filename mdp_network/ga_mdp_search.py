@@ -1,29 +1,23 @@
 # ga_mdp_search.py
 # Genetic search system for MDPNetwork (structure + probability + reward) with
-# optional parallel scoring using a process pool (Linux, Python 3.10).
+# optional parallel scoring and parallel offspring mutation using a process pool (Linux, Python 3.10).
 #
-# Key points:
-# - Simple tournament selection and (s,a)-block crossover.
-# - Add-edge sampling is distance-weighted; new-edge reward = mean inbound rewards to s'.
-# - Deletion honors a whitelist of original transitions (never delete originals).
-# - Small-step mutations with fixed hyperparameters (no annealing).
-# - Parallel evaluation API to score a whole list of MDPs and return a list of scores.
-# - Multiple score functions supported via a registry (name -> callable).
-#
-# NOTE: For parallel mode, it's safest to register your score function under a name
-# and pass that name so worker processes can look it up reliably.
+# Simplified rules:
+# - Only one distance: directed_prob_distance (fixed signature via GAConfig dist_* params).
+# - Parallel scoring ONLY via name-registered score fns (no picklable callable path).
+# - Offspring creation is process-pool only (no serial path).
+# - Inter-process transport uses minimal JSON-like config to rebuild MDPs.
 
 from __future__ import annotations
 
 from typing import Callable, Dict, Tuple, List, Optional, Set, Any
 from dataclasses import dataclass
 import math
-import pickle
 import os
 
 import numpy as np
 import networkx as nx
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 
 from mdp_network import MDPNetwork
 
@@ -34,9 +28,8 @@ from mdp_network import MDPNetwork
 State = int
 Action = int
 EdgeTriple = Tuple[State, Action, State]
-ScoreFn = Callable[['MDPNetwork'], float]
+ScoreFn = Callable[['MDPNetwork', Any], float]
 DistanceFn = Callable[['MDPNetwork', State, State], float]
-
 
 # -------------------------------
 # Score function registry
@@ -46,7 +39,6 @@ SCORE_FN_REGISTRY: Dict[str, ScoreFn] = {}
 
 
 def register_score_fn(name: str, fn: ScoreFn) -> None:
-    """Register a score function for use in parallel workers by name."""
     SCORE_FN_REGISTRY[name] = fn
 
 
@@ -54,15 +46,6 @@ def get_registered_score_fn(name: str) -> ScoreFn:
     if name not in SCORE_FN_REGISTRY:
         raise KeyError(f"Score function '{name}' is not registered.")
     return SCORE_FN_REGISTRY[name]
-
-
-def is_picklable(obj: Any) -> bool:
-    """Best-effort check for picklability."""
-    try:
-        pickle.dumps(obj)
-        return True
-    except Exception:
-        return False
 
 
 # -------------------------------
@@ -111,28 +94,87 @@ def mdp_to_config_and_maps(src: 'MDPNetwork') -> Tuple[Dict, Optional[Dict[int, 
 
 
 def clone_mdp_network(src: 'MDPNetwork') -> 'MDPNetwork':
-    """Clone by reconstructing from a config dict."""
     cfg, int_to_state, state_to_int = mdp_to_config_and_maps(src)
     return MDPNetwork(config_data=cfg, int_to_state=int_to_state, state_to_int=state_to_int)
 
 
 # -------------------------------
-# Default distance function
+# Single distance function (fixed signature via GAConfig)
 # -------------------------------
 
-def default_distance_fn(mdp: 'MDPNetwork', s: State, sp: State) -> float:
+def directed_prob_distance(
+    mdp: 'MDPNetwork',
+    s: State,
+    sp: State,
+    *,
+    max_hops: Optional[int],
+    node_cap: Optional[int],
+    weight_eps: float,
+    unreachable: float,
+) -> float:
     """
-    Graph-based distance. Uses undirected shortest-path length on the current graph topology.
-    If unreachable, returns a large constant. Distance to self is 0.
+    Directed distance using edge weights w(u->v) = 1 - max_a P(v | u, a).
+    Search is restricted to a subgraph reachable from s within `max_hops` hops (unweighted).
+    If `node_cap` is set, cap total expanded nodes. Outside subgraph -> `unreachable`.
     """
     if s == sp:
         return 0.0
-    G_u = mdp.graph.to_undirected(as_view=True)
-    try:
-        d = nx.shortest_path_length(G_u, s, sp)
-        return float(d)
-    except nx.NetworkXNoPath:
-        return 1e6
+
+    G = mdp.graph  # directed
+
+    # 1) Build allowed node set via BFS (unweighted) within max_hops
+    if max_hops is not None:
+        hop_dist = nx.single_source_shortest_path_length(G, source=s, cutoff=max_hops)
+        allowed = set(hop_dist.keys())
+    else:
+        allowed = {s}
+        q = [s]
+        while q and (node_cap is None or len(allowed) < node_cap):
+            u = q.pop(0)
+            for v in G.successors(u):
+                if v not in allowed:
+                    allowed.add(v)
+                    q.append(v)
+
+    # Optional hard cap
+    if node_cap is not None and len(allowed) > node_cap:
+        if 'hop_dist' in locals():
+            kept = sorted(allowed, key=lambda x: hop_dist.get(x, 10**9))[:node_cap]
+            allowed = set(kept)
+        else:
+            allowed = set(list(allowed)[:node_cap])
+
+    if sp not in allowed:
+        return float(unreachable)
+
+    # 2) Dijkstra within allowed subgraph; edge weight = 1 - max_a p(u->v|a)
+    import heapq
+    INF = float('inf')
+    dist: Dict[int, float] = {s: 0.0}
+    heap: List[Tuple[float, int]] = [(0.0, s)]
+
+    while heap:
+        du, u = heapq.heappop(heap)
+        if du > dist.get(u, INF):
+            continue
+        if u == sp:
+            return float(du)
+        for v in G.successors(u):
+            if v not in allowed:
+                continue
+            edata = G[u][v]
+            if "transitions" not in edata or not edata["transitions"]:
+                continue
+            pmax = 0.0
+            for _a, ar in edata["transitions"].items():
+                pmax = max(pmax, float(ar["p"]))
+            w = max(weight_eps, 1.0 - pmax)
+            nd = du + w
+            if nd < dist.get(v, INF):
+                dist[v] = nd
+                heapq.heappush(heap, (nd, v))
+
+    return float(unreachable)
 
 
 # -------------------------------
@@ -146,7 +188,7 @@ class GAConfig:
     generations: int = 100
     tournament_k: int = 2
     elitism_num: int = 8
-    crossover_rate: float = 1.0  # apply crossover for most children
+    crossover_rate: float = 1.0
 
     # Structural constraints
     allow_self_loops: bool = True
@@ -156,29 +198,40 @@ class GAConfig:
 
     # Add-edge parameters
     add_edge_attempts_per_child: int = 2
-    epsilon_new_prob: float = 0.02  # base initial prob for a new edge
-    gamma_sample: float = 1.0       # strength for distance-weighted candidate sampling
-    gamma_prob: float = 0.0         # if >0, scale p_new by exp(-gamma_prob * distance)
+    epsilon_new_prob: float = 0.02
+    gamma_sample: float = 1.0
+    gamma_prob: float = 0.0
 
     # Delete-edge parameters
     delete_edge_attempts_per_child: int = 1
-    delete_tau: float = 1.0         # weight ~ (p+eps)^(-tau)
+    delete_tau: float = 1.0
     delete_eps: float = 1e-9
 
-    # Probability tweak parameters (pairwise small transfer)
-    prob_tweak_actions_per_child: int = 20   # number of (s,a) to tweak per child
-    prob_pairwise_step: float = 0.02         # max delta to move between two edges in a pair
+    # Probability tweak parameters
+    prob_tweak_actions_per_child: int = 20
+    prob_pairwise_step: float = 0.02
 
     # Reward tweak parameters
-    reward_tweak_edges_per_child: int = 50   # number of (s,a,s') to tweak per child
-    reward_k_percent: float = 0.02           # maximum relative change per tweak (e.g., 0.02 = 2%)
-    reward_ref_floor: float = 1e-3           # baseline to avoid zero step when |r|~0
-    reward_min: Optional[float] = None       # clip lower bound (None = no clip)
-    reward_max: Optional[float] = None       # clip upper bound (None = no clip)
+    reward_tweak_edges_per_child: int = 50
+    reward_k_percent: float = 0.02
+    reward_ref_floor: float = 1e-3
+    reward_min: Optional[float] = None
+    reward_max: Optional[float] = None
 
-    # Parallel evaluation
-    n_workers: int = 1                       # 1 = serial; >1 = process pool
-    score_fn_name: Optional[str] = None      # prefer using a registered name in parallel mode
+    # Parallel evaluation (scores)
+    n_workers: int = 1                    # >=1 = process pool (1 means a single worker process)
+    score_fn_name: Optional[str] = None   # required if n_workers > 1
+    score_args: Optional[Tuple[Any, ...]] = None
+    score_kwargs: Optional[Dict[str, Any]] = None
+
+    # Parallel mutation (offspring creation)
+    mutation_n_workers: int = 1           # 1 = serial; >1 = parallel child creation
+
+    # Distance parameters (applied consistently in main & workers)
+    dist_max_hops: Optional[int] = None
+    dist_node_cap: Optional[int] = None
+    dist_weight_eps: float = 1e-9
+    dist_unreachable: float = 1e6
 
     # Randomness
     seed: Optional[int] = None
@@ -189,7 +242,6 @@ class GAConfig:
 # -------------------------------
 
 def get_outgoing_for_action(mdp: 'MDPNetwork', s: State, a: Action) -> Dict[State, Tuple[float, float]]:
-    """Return a dict: sp -> (p, r) for a given (s,a)."""
     out: Dict[State, Tuple[float, float]] = {}
     for sp in mdp.graph.successors(s):
         edata = mdp.graph[s][sp]
@@ -204,10 +256,6 @@ def set_outgoing_for_action(mdp: 'MDPNetwork',
                             s: State,
                             a: Action,
                             new_map: Dict[State, Tuple[float, float]]):
-    """
-    Overwrite the (s,a) outgoing distribution with new_map (sp -> (p, r)).
-    After writing, renormalizes to ensure sum p == 1 (if total>0).
-    """
     for sp in list(mdp.graph.successors(s)):
         edata = mdp.graph[s][sp]
         if "transitions" in edata and a in edata["transitions"]:
@@ -222,7 +270,6 @@ def set_outgoing_for_action(mdp: 'MDPNetwork',
 
 
 def inbound_reward_mean(mdp: 'MDPNetwork', sp: State, fallback: float) -> float:
-    """Mean reward over all incoming edges to target sp; fallback if none."""
     vals: List[float] = []
     for s in mdp.graph.predecessors(sp):
         edata = mdp.graph[s][sp]
@@ -234,7 +281,6 @@ def inbound_reward_mean(mdp: 'MDPNetwork', sp: State, fallback: float) -> float:
 
 
 def action_out_degree(mdp: 'MDPNetwork', s: State, a: Action) -> int:
-    """Number of next states with non-zero probability for (s,a)."""
     return sum(
         1 for sp in mdp.graph.successors(s)
         if "transitions" in mdp.graph[s][sp] and a in mdp.graph[s][sp]["transitions"]
@@ -242,7 +288,6 @@ def action_out_degree(mdp: 'MDPNetwork', s: State, a: Action) -> int:
 
 
 def list_all_action_pairs(mdp: 'MDPNetwork') -> List[Tuple[State, Action]]:
-    """List all (s,a) pairs for non-terminal s."""
     pairs: List[Tuple[State, Action]] = []
     for s in mdp.states:
         if s in mdp.terminal_states:
@@ -253,7 +298,6 @@ def list_all_action_pairs(mdp: 'MDPNetwork') -> List[Tuple[State, Action]]:
 
 
 def list_all_triples(mdp: 'MDPNetwork') -> List[EdgeTriple]:
-    """List all (s,a,s') that currently exist."""
     triples: List[EdgeTriple] = []
     for s in mdp.states:
         for sp in mdp.graph.successors(s):
@@ -266,7 +310,6 @@ def list_all_triples(mdp: 'MDPNetwork') -> List[EdgeTriple]:
 
 
 def build_original_whitelist(mdp: 'MDPNetwork') -> Set[EdgeTriple]:
-    """Original (s,a,s') transitions; never delete these."""
     return set(list_all_triples(mdp))
 
 
@@ -274,11 +317,20 @@ def build_original_whitelist(mdp: 'MDPNetwork') -> Set[EdgeTriple]:
 # Mutation operators
 # -------------------------------
 
+def _dist_from_cfg(mdp: 'MDPNetwork', s: State, sp: State, cfg: GAConfig) -> float:
+    return directed_prob_distance(
+        mdp, s, sp,
+        max_hops=cfg.dist_max_hops,
+        node_cap=cfg.dist_node_cap,
+        weight_eps=cfg.dist_weight_eps,
+        unreachable=cfg.dist_unreachable,
+    )
+
+
 def mutation_add_edge(mdp: 'MDPNetwork',
                       rng: np.random.Generator,
                       dist_fn: DistanceFn,
                       cfg: GAConfig):
-    """Add a new (s,a,s') preferring nearer s' by distance weighting."""
     candidates_sa = [(s, a) for (s, a) in list_all_action_pairs(mdp)
                      if action_out_degree(mdp, s, a) < cfg.max_out_degree]
     if not candidates_sa:
@@ -301,7 +353,7 @@ def mutation_add_edge(mdp: 'MDPNetwork',
     if weights.sum() == 0.0:
         return
     weights /= weights.sum()
-    sp_new = int(sp_candidates[int(np.random.choice(len(sp_candidates), p=weights))])
+    sp_new = int(rng.choice(sp_candidates, p=weights))
 
     d_new = dist_fn(mdp, s, sp_new)
     p_new = cfg.epsilon_new_prob
@@ -323,7 +375,6 @@ def mutation_delete_edge(mdp: 'MDPNetwork',
                          rng: np.random.Generator,
                          whitelist: Set[EdgeTriple],
                          cfg: GAConfig):
-    """Delete a non-whitelisted edge, preferring smaller-prob edges; keep min_out_degree."""
     pairs = []
     for (s, a) in list_all_action_pairs(mdp):
         out_map = get_outgoing_for_action(mdp, s, a)
@@ -339,7 +390,7 @@ def mutation_delete_edge(mdp: 'MDPNetwork',
     ps = np.array([out_map[sp][0] for sp in deletable], dtype=float)
     w = np.power(ps + cfg.delete_eps, -cfg.delete_tau)
     w /= w.sum()
-    sp_del = int(deletable[int(rng.choice(len(deletable), p=w))])
+    sp_del = int(rng.choice(deletable, p=w))
 
     del out_map[sp_del]
     if len(out_map) < cfg.min_out_degree:
@@ -362,7 +413,6 @@ def mutation_delete_edge(mdp: 'MDPNetwork',
 def mutation_prob_pairwise(mdp: 'MDPNetwork',
                            rng: np.random.Generator,
                            cfg: GAConfig):
-    """For several (s,a), move a small probability mass between two successors."""
     pairs_sa = list_all_action_pairs(mdp)
     if not pairs_sa:
         return
@@ -397,7 +447,6 @@ def mutation_prob_pairwise(mdp: 'MDPNetwork',
 def mutation_reward_smallstep(mdp: 'MDPNetwork',
                               rng: np.random.Generator,
                               cfg: GAConfig):
-    """Tweak rewards for several random (s,a,s') with a bounded relative step (<= k%)."""
     triples = list_all_triples(mdp)
     if not triples:
         return
@@ -422,11 +471,6 @@ def mutation_reward_smallstep(mdp: 'MDPNetwork',
 def crossover_action_block(parent_a: 'MDPNetwork',
                            parent_b: 'MDPNetwork',
                            rng: np.random.Generator) -> 'MDPNetwork':
-    """
-    (s,a)-level crossover: for each (s,a), copy the whole outgoing table from either A or B.
-    Then renormalize per (s,a).
-    Assumes both parents share the same states/actions metadata.
-    """
     child = clone_mdp_network(parent_a)
     for s in child.states:
         if s in child.terminal_states:
@@ -445,7 +489,6 @@ def tournament_select(pop: List['MDPNetwork'],
                       scores: List[float],
                       rng: np.random.Generator,
                       k: int) -> 'MDPNetwork':
-    """k-way tournament selection. Returns a reference (not a copy)."""
     idxs = rng.choice(len(pop), size=k, replace=False)
     best_idx = int(idxs[0])
     best_score = scores[best_idx]
@@ -458,78 +501,87 @@ def tournament_select(pop: List['MDPNetwork'],
 
 
 # -------------------------------
-# Parallel scoring workers
+# Parallel scoring workers (name-based only)
 # -------------------------------
 
-def _score_worker_by_name(payload: Tuple[Dict, Optional[Dict[int, Any]], Optional[Dict[Any, int]], str]) -> float:
-    """
-    Worker: rebuild MDP from config and call a registered score function by name.
-    Payload: (cfg, int_to_state, state_to_int, score_fn_name)
-    """
-    cfg, int_to_state, state_to_int, fn_name = payload
+def _score_worker_by_name(payload: Tuple[Dict, Optional[Dict[int, Any]], Optional[Dict[Any, int]], str, Tuple[Any, ...], Dict[str, Any]]) -> float:
+    cfg, int_to_state, state_to_int, fn_name, args, kwargs = payload
     mdp = MDPNetwork(config_data=cfg, int_to_state=int_to_state, state_to_int=state_to_int)
     fn = get_registered_score_fn(fn_name)
-    return float(fn(mdp))
-
-
-def _score_worker_with_callable(payload: Tuple[Dict, Optional[Dict[int, Any]], Optional[Dict[Any, int]], ScoreFn]) -> float:
-    """
-    Worker: rebuild MDP and call a picklable score function (top-level).
-    Payload: (cfg, int_to_state, state_to_int, score_fn_callable)
-    """
-    cfg, int_to_state, state_to_int, fn = payload
-    mdp = MDPNetwork(config_data=cfg, int_to_state=int_to_state, state_to_int=state_to_int)
-    return float(fn(mdp))
+    return float(fn(mdp, *args, **kwargs))
 
 
 def evaluate_mdp_list(
     mdps: List['MDPNetwork'],
-    score_fn: Optional[ScoreFn] = None,
-    score_fn_name: Optional[str] = None,
-    n_workers: int = 1,
+    *,
+    score_fn_name: str,
+    n_workers: int,
+    score_args: Optional[Tuple[Any, ...]] = None,
+    score_kwargs: Optional[Dict[str, Any]] = None,
 ) -> List[float]:
+    if score_fn_name is None:
+        raise ValueError("score_fn_name is required (parallel-only).")
+    if n_workers < 1:
+        raise ValueError("n_workers must be >= 1.")
+    args = score_args or ()
+    kwargs = score_kwargs or {}
+    payloads = []
+    for m in mdps:
+        cfg, int_to_state, state_to_int = mdp_to_config_and_maps(m)
+        payloads.append((cfg, int_to_state, state_to_int, score_fn_name, args, kwargs))
+    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        results = list(ex.map(_score_worker_by_name, payloads))
+    return [float(x) for x in results]
+
+
+# -------------------------------
+# Parallel offspring worker (init or mate)
+# -------------------------------
+
+def _apply_mutations(ind: 'MDPNetwork', rng: np.random.Generator, whitelist: Set[EdgeTriple], cfg: GAConfig):
+    dist_fn = lambda mdp, s, sp: _dist_from_cfg(mdp, s, sp, cfg)
+    for _ in range(cfg.add_edge_attempts_per_child):
+        mutation_add_edge(ind, rng, dist_fn, cfg)
+    for _ in range(cfg.delete_edge_attempts_per_child):
+        mutation_delete_edge(ind, rng, whitelist, cfg)
+    mutation_prob_pairwise(ind, rng, cfg)
+    mutation_reward_smallstep(ind, rng, cfg)
+
+
+def _child_worker(payload: Dict[str, Any]) -> Tuple[Dict, Optional[Dict[int, Any]], Optional[Dict[Any, int]]]:
     """
-    Evaluate a list of MDPNetwork individuals and return a list of scores.
-    - If n_workers == 1: serial evaluation.
-    - If n_workers > 1:
-        * Preferred: provide score_fn_name of a registered function.
-        * Fallback: if a picklable score_fn is given, we can parallelize as well.
-        * Otherwise, falls back to serial to stay safe.
+    Build one child in a worker process.
+    Usage:
+      - Init: provide base_cfg/int_to_state/state_to_int (no parents)
+      - Mate: provide pa_cfg/pa_i2s/pa_s2i and pb_cfg/pb_i2s/pb_s2i (+ do_crossover)
     """
-    if n_workers <= 1:
-        # Serial path on the live objects (no reconstruction overhead).
-        if score_fn_name is not None:
-            fn = get_registered_score_fn(score_fn_name)
-            return [float(fn(m)) for m in mdps]
-        elif score_fn is not None:
-            return [float(score_fn(m)) for m in mdps]
+    cfg: GAConfig = payload["cfg"]
+    whitelist: Set[EdgeTriple] = set(payload["whitelist"])
+    rng = np.random.default_rng(payload["seed"])
+
+    def _mk_from_cfg(c: Dict, m1, m2) -> MDPNetwork:
+        return MDPNetwork(config_data=c, int_to_state=m1, state_to_int=m2)
+
+    if "pa_cfg" in payload:
+        # Mate path
+        pa_cfg, pa_i2s, pa_s2i = payload["pa_cfg"], payload["pa_i2s"], payload["pa_s2i"]
+        pb_cfg, pb_i2s, pb_s2i = payload["pb_cfg"], payload["pb_i2s"], payload["pb_s2i"]
+        do_crossover: bool = payload["do_crossover"]
+        pa = _mk_from_cfg(pa_cfg, pa_i2s, pa_s2i)
+        pb = _mk_from_cfg(pb_cfg, pb_i2s, pb_s2i)
+        if do_crossover:
+            child = crossover_action_block(pa, pb, rng)
         else:
-            raise ValueError("Either score_fn_name or score_fn must be provided.")
+            child = clone_mdp_network(pa if rng.random() < 0.5 else pb)
+        _apply_mutations(child, rng, whitelist, cfg)
+        return mdp_to_config_and_maps(child)
 
-    # Parallel path (process pool)
-    if score_fn_name is not None:
-        # Build payloads using configs
-        payloads = []
-        for m in mdps:
-            cfg, int_to_state, state_to_int = mdp_to_config_and_maps(m)
-            payloads.append((cfg, int_to_state, state_to_int, score_fn_name))
-        with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            results = list(ex.map(_score_worker_by_name, payloads))
-        return [float(x) for x in results]
-
-    if score_fn is not None and is_picklable(score_fn):
-        payloads = []
-        for m in mdps:
-            cfg, int_to_state, state_to_int = mdp_to_config_and_maps(m)
-            payloads.append((cfg, int_to_state, state_to_int, score_fn))
-        with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            results = list(ex.map(_score_worker_with_callable, payloads))
-        return [float(x) for x in results]
-
-    # Fallback: serial if we cannot safely parallelize
-    if score_fn is not None:
-        return [float(score_fn(m)) for m in mdps]
-    raise ValueError("Parallel requested but neither a registered score_fn_name nor a picklable score_fn was provided.")
+    else:
+        # Init path
+        base_cfg, itos, stoi = payload["base_cfg"], payload["int_to_state"], payload["state_to_int"]
+        ind = _mk_from_cfg(base_cfg, itos, stoi)
+        _apply_mutations(ind, rng, whitelist, cfg)
+        return mdp_to_config_and_maps(ind)
 
 
 # -------------------------------
@@ -538,81 +590,94 @@ def evaluate_mdp_list(
 
 class MDPEvolutionGA:
     """
-    Genetic algorithm over MDPNetwork with:
-    - distance-weighted add-edge,
+    GA over MDPNetwork with:
+    - distance-weighted add-edge (directed_prob_distance),
     - probability pairwise tweaks,
     - reward bounded small-step tweaks,
-    - deletion preferring low-prob edges (never delete original whitelist edges).
-    - Optional parallel evaluation via process pool.
+    - deletion preferring low-prob edges (never delete original whitelist edges),
+    - parallel evaluation and parallel offspring creation only.
     """
 
     def __init__(self,
                  base_mdp: 'MDPNetwork',
-                 score_fn: Optional[ScoreFn],      # may be None if you use score_fn_name
-                 cfg: GAConfig,
-                 dist_fn: Optional[DistanceFn] = None):
-        if (cfg.score_fn_name is None) and (score_fn is None):
-            raise ValueError("Provide either cfg.score_fn_name (registered) or a score_fn callable.")
+                 cfg: GAConfig):
+        if cfg.score_fn_name is None:
+            raise ValueError("score_fn_name is required (parallel-only).")
+        if cfg.n_workers < 1 or cfg.mutation_n_workers < 1:
+            raise ValueError("n_workers and mutation_n_workers must be >= 1.")
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg.seed)
-        self.score_fn = score_fn
-        self.dist_fn = dist_fn or default_distance_fn
 
         # Baseline and whitelist
         self.base_mdp = clone_mdp_network(base_mdp)
         self.whitelist: Set[EdgeTriple] = build_original_whitelist(self.base_mdp)
 
+        # Cache serialized baseline for workers
+        self._base_cfg, self._base_i2s, self._base_s2i = mdp_to_config_and_maps(self.base_mdp)
+
     # ---------- initialization ----------
 
     def _init_population(self) -> List['MDPNetwork']:
-        """Initial population: baseline + diversified variants."""
-        pop: List[MDPNetwork] = []
-        pop.append(clone_mdp_network(self.base_mdp))
+        pop: List[MDPNetwork] = [clone_mdp_network(self.base_mdp)]
+        need = self.cfg.population_size - 1
+        if need <= 0:
+            return pop
 
-        for _ in range(self.cfg.population_size - 1):
-            ind = clone_mdp_network(self.base_mdp)
-            for _ in range(self.cfg.add_edge_attempts_per_child):
-                mutation_add_edge(ind, self.rng, self.dist_fn, self.cfg)
-            for _ in range(self.cfg.delete_edge_attempts_per_child):
-                mutation_delete_edge(ind, self.rng, self.whitelist, self.cfg)
-            mutation_prob_pairwise(ind, self.rng, self.cfg)
-            mutation_reward_smallstep(ind, self.rng, self.cfg)
-            pop.append(ind)
+        if self.cfg.mutation_n_workers < 1:
+            raise ValueError("mutation_n_workers must be >= 1 (parallel-only).")
+
+        payloads: List[Dict[str, Any]] = []
+        for _ in range(need):
+            payloads.append({
+                "cfg": self.cfg,
+                "whitelist": list(self.whitelist),
+                "seed": int(self.rng.integers(0, 2 ** 63 - 1)),
+                "base_cfg": self._base_cfg,
+                "int_to_state": self._base_i2s,
+                "state_to_int": self._base_s2i,
+            })
+        with ProcessPoolExecutor(max_workers=self.cfg.mutation_n_workers) as ex:
+            results = list(ex.map(_child_worker, payloads))
+        for (cfg_d, i2s, s2i) in results:
+            pop.append(MDPNetwork(config_data=cfg_d, int_to_state=i2s, state_to_int=s2i))
         return pop
 
-    def _make_child(self, parent_a: 'MDPNetwork', parent_b: 'MDPNetwork') -> 'MDPNetwork':
-        """Create a child by optional crossover and then apply fixed mutations."""
-        if self.rng.random() < self.cfg.crossover_rate:
-            child = crossover_action_block(parent_a, parent_b, self.rng)
-        else:
-            child = clone_mdp_network(parent_a if self.rng.random() < 0.5 else parent_b)
+    def _make_children_parallel(self, parents_pairs: List[Tuple['MDPNetwork', 'MDPNetwork']]) -> List['MDPNetwork']:
+        payloads: List[Dict[str, Any]] = []
+        for (pa, pb) in parents_pairs:
+            pa_cfg, pa_i2s, pa_s2i = mdp_to_config_and_maps(pa)
+            pb_cfg, pb_i2s, pb_s2i = mdp_to_config_and_maps(pb)
+            payloads.append({
+                "cfg": self.cfg,
+                "whitelist": list(self.whitelist),
+                "seed": int(self.rng.integers(0, 2 ** 63 - 1)),
+                "pa_cfg": pa_cfg, "pa_i2s": pa_i2s, "pa_s2i": pa_s2i,
+                "pb_cfg": pb_cfg, "pb_i2s": pb_i2s, "pb_s2i": pb_s2i,
+                "do_crossover": bool(self.rng.random() < self.cfg.crossover_rate),
+            })
 
-        for _ in range(self.cfg.add_edge_attempts_per_child):
-            mutation_add_edge(child, self.rng, self.dist_fn, self.cfg)
-        for _ in range(self.cfg.delete_edge_attempts_per_child):
-            mutation_delete_edge(child, self.rng, self.whitelist, self.cfg)
-        mutation_prob_pairwise(child, self.rng, self.cfg)
-        mutation_reward_smallstep(child, self.rng, self.cfg)
-        return child
+        with ProcessPoolExecutor(max_workers=self.cfg.mutation_n_workers) as ex:
+            results = list(ex.map(_child_worker, payloads))
+
+        children: List[MDPNetwork] = []
+        for (cfg_d, i2s, s2i) in results:
+            children.append(MDPNetwork(config_data=cfg_d, int_to_state=i2s, state_to_int=s2i))
+        return children
 
     # ---------- evaluation ----------
 
     def _evaluate_population(self, pop: List['MDPNetwork']) -> List[float]:
-        """Evaluate population serially or in parallel as configured."""
         return evaluate_mdp_list(
             mdps=pop,
-            score_fn=self.score_fn,
             score_fn_name=self.cfg.score_fn_name,
             n_workers=self.cfg.n_workers,
+            score_args=self.cfg.score_args,
+            score_kwargs=self.cfg.score_kwargs,
         )
 
     # ---------- public API ----------
 
     def run(self) -> Tuple['MDPNetwork', float, List[float]]:
-        """
-        Run GA for a fixed number of generations.
-        Returns: (best_mdp, best_score, history_best_scores_per_generation)
-        """
         pop = self._init_population()
         scores = self._evaluate_population(pop)
 
@@ -621,7 +686,6 @@ class MDPEvolutionGA:
         best_score = float(scores[best_idx])
         history: List[float] = [best_score]
 
-        # --- print init stats ---
         print(f"[Init] pop={len(pop)} | best={best_score:.6f} | "
               f"mean={np.mean(scores):.6f} | std={np.std(scores):.6f}")
 
@@ -630,12 +694,18 @@ class MDPEvolutionGA:
             elite_idxs = list(np.argsort(scores)[-elite_count:])
             elites = [clone_mdp_network(pop[int(i)]) for i in elite_idxs]
 
-            new_pop: List[MDPNetwork] = elites[:]
-            while len(new_pop) < self.cfg.population_size:
-                p1 = tournament_select(pop, scores, self.rng, self.cfg.tournament_k)
-                p2 = tournament_select(pop, scores, self.rng, self.cfg.tournament_k)
-                child = self._make_child(p1, p2)
-                new_pop.append(child)
+            target = self.cfg.population_size - elite_count
+            if target <= 0:
+                new_pop: List[MDPNetwork] = elites
+            else:
+                parents_pairs: List[Tuple[MDPNetwork, MDPNetwork]] = []
+                for _ in range(target):
+                    p1 = tournament_select(pop, scores, self.rng, self.cfg.tournament_k)
+                    p2 = tournament_select(pop, scores, self.rng, self.cfg.tournament_k)
+                    parents_pairs.append((p1, p2))
+
+                children = self._make_children_parallel(parents_pairs)
+                new_pop = elites + children
 
             pop = new_pop
             scores = self._evaluate_population(pop)
@@ -643,7 +713,6 @@ class MDPEvolutionGA:
             gen_best_idx = int(np.argmax(scores))
             gen_best_score = float(scores[gen_best_idx])
 
-            # Check improvement against historical best BEFORE updating it
             improved = gen_best_score > best_score
             if improved:
                 best_score = gen_best_score
@@ -651,7 +720,6 @@ class MDPEvolutionGA:
 
             history.append(best_score)
 
-            # --- print per-generation stats ---
             print(f"[Gen {gen + 1}/{self.cfg.generations}] elites={elite_count} | "
                   f"gen_best={gen_best_score:.6f} | mean={np.mean(scores):.6f} | "
                   f"std={np.std(scores):.6f} | best_so_far={best_score:.6f} | "
@@ -659,16 +727,12 @@ class MDPEvolutionGA:
 
         return best_mdp, best_score, history
 
+
 # -------------------------------
 # Example score fn + registration
 # -------------------------------
 
-def example_score_fn(mdp: 'MDPNetwork') -> float:
-    """
-    Placeholder scoring function.
-    Replace this with your domain-specific evaluation (DP/simulation/etc.).
-    Must return a single scalar (higher is better).
-    """
+def example_score_fn(mdp: 'MDPNetwork', *args, **kwargs) -> float:
     total = 0.0
     for s in mdp.states:
         if s in mdp.terminal_states:
@@ -678,64 +742,99 @@ def example_score_fn(mdp: 'MDPNetwork') -> float:
     return float(total)
 
 
-# Register the example under a name so parallel workers can find it.
 register_score_fn("example", example_score_fn)
 
 
-# -------------------------------
-# Example wiring (optional)
-# -------------------------------
+if __name__ == "__main__":
+    # ----- build a tiny demo MDP (5 states, 2 actions) -----
+    nS, nA = 5, 2
+    cfg_demo: Dict[str, Any] = {
+        "num_actions": nA,
+        "states": list(range(nS)),
+        "start_states": [0],
+        "terminal_states": [4],
+        "default_reward": 0.0,
+        "transitions": {
+            "0": {
+                "0": {"1": {"p": 0.8, "r": 0.0}, "0": {"p": 0.2, "r": 0.0}},
+                "1": {"2": {"p": 1.0, "r": 0.0}},
+            },
+            "1": {
+                "0": {"2": {"p": 0.7, "r": 0.0}, "3": {"p": 0.3, "r": 0.0}},
+                "1": {"1": {"p": 1.0, "r": 0.0}},
+            },
+            "2": {
+                "0": {"3": {"p": 1.0, "r": 0.0}},
+                "1": {"2": {"p": 1.0, "r": 0.0}},
+            },
+            "3": {
+                "0": {"4": {"p": 0.9, "r": 1.0}, "3": {"p": 0.1, "r": 0.0}},
+                "1": {"1": {"p": 1.0, "r": 0.0}},
+            },
+        },
+    }
+    base_mdp = MDPNetwork(config_data=cfg_demo)
 
-def main_example(base_mdp: 'MDPNetwork'):
-    """
-    Minimal example showing how to run the GA.
-    For parallel evaluation, set cfg.n_workers > 1 and provide cfg.score_fn_name
-    that was registered via register_score_fn(...).
-    """
+    # Ensure example score fn is registered
+    register_score_fn("example", example_score_fn)
+
+    # ----- GA config -----
     cfg = GAConfig(
-        population_size=80,
-        generations=50,
+        population_size=64,
+        generations=10,
         tournament_k=2,
-        elitism_num=8,
+        elitism_num=4,
         crossover_rate=1.0,
         allow_self_loops=True,
         min_out_degree=1,
-        max_out_degree=8,
+        max_out_degree=6,
         prob_floor=1e-6,
-        add_edge_attempts_per_child=2,
+        add_edge_attempts_per_child=1,
         epsilon_new_prob=0.02,
         gamma_sample=1.0,
         gamma_prob=0.0,
         delete_edge_attempts_per_child=1,
         delete_tau=1.0,
         delete_eps=1e-9,
-        prob_tweak_actions_per_child=20,
+        prob_tweak_actions_per_child=8,
         prob_pairwise_step=0.02,
-        reward_tweak_edges_per_child=50,
+        reward_tweak_edges_per_child=16,
         reward_k_percent=0.02,
         reward_ref_floor=1e-3,
         reward_min=None,
         reward_max=None,
 
-        # ---- parallel settings ----
-        n_workers=os.cpu_count() or 4,   # e.g., use all cores
-        score_fn_name="example",         # use a registered fn for parallel safety
-        seed=42,
+        # Parallel scoring (name-based only)
+        n_workers=max(1, os.cpu_count() or 1),
+        score_fn_name="example",
+        score_args=None,
+        score_kwargs=None,
+
+        # Parallel offspring
+        mutation_n_workers=max(1, os.cpu_count() or 1),
+
+        # Distance params (used both in main & workers)
+        dist_max_hops=3,
+        dist_node_cap=1000,
+        dist_weight_eps=1e-6,
+        dist_unreachable=1e6,
+
+        seed=123,
     )
 
     ga = MDPEvolutionGA(
         base_mdp=base_mdp,
-        score_fn=None,                # use name-based lookup in workers
         cfg=cfg,
-        dist_fn=default_distance_fn
     )
 
     best_mdp, best_score, history = ga.run()
+    print("\n=== GA finished ===")
     print("Best score:", best_score)
-    # best_mdp.export_to_json("best_mdp.json")
+    print("History:", [round(x, 6) for x in history])
 
-
-# If you want to enable running as a script, uncomment below and provide a base MDP:
-# if __name__ == "__main__":
-#     # Load or build your base MDPNetwork here, then call main_example(base_mdp)
-#     pass
+    # Optionally export the best model
+    out_dir = "./outputs_ga_demo"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "best_mdp_demo.json")
+    best_mdp.export_to_json(out_path)
+    print("Saved best MDP to:", out_path)

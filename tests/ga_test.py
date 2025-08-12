@@ -1,17 +1,13 @@
 # test_ga_frozenlake8x8.py
 # English comments only. Minimal, self-contained sanity test for ga_mdp_search.
-# - Builds an MDPNetwork from Gymnasium FrozenLake 8x8 (slippery)
+# - Builds an MDPNetwork from CustomisedFrozenLakeEnv (8x8, slippery) via get_mdp_network()
 # - Runs the GA for a few generations with small population
 # - Uses process pool parallel scoring to validate the path
 # - Prints best score and simple assertions
 
 import os
-from typing import Dict, Any, Tuple
 
-# ---- Gymnasium FrozenLake for building the MDP ----
-import gymnasium as gym
-
-# ---- Your GA system ----
+# ---- GA system ----
 from mdp_network.ga_mdp_search import (
     GAConfig,
     MDPEvolutionGA,
@@ -21,91 +17,42 @@ from mdp_network.ga_mdp_search import (
     clone_mdp_network,
 )
 
-# ---- Import MDPNetwork (adjust import path to your project if needed) ----
-try:
-    # common package-style path
-    from mdp_network.mdp_network import MDPNetwork  # type: ignore
-except Exception:
-    # fallback: same-folder module or plain name
-    from MDPNetwork import MDPNetwork  # type: ignore
+from mdp_network.mdp_network import MDPNetwork
+
+# ---- Custom env that exposes an MDPNetwork ----
+from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
 
 
-def frozenlake_to_mdp_config(map_name: str = "8x8", is_slippery: bool = True) -> Tuple[Dict[str, Any], None, None]:
+def build_frozenlake_mdp_via_env(map_name: str = "8x8", is_slippery: bool = True) -> MDPNetwork:
     """
-    Build a config_data dict for MDPNetwork from Gymnasium FrozenLake-v1.
-    Returns (config_data, int_to_state, state_to_int); mappings are None here.
+    Create an MDPNetwork by constructing CustomisedFrozenLakeEnv and calling get_mdp_network().
+    This mirrors the setup used in test_q_learning_stoch_envs.py.
     """
-    env = gym.make("FrozenLake-v1", map_name=map_name, is_slippery=is_slippery)
+    env = CustomisedFrozenLakeEnv(render_mode=None, map_name=map_name, is_slippery=is_slippery)
     env.reset(seed=0)
-    P = env.unwrapped.P  # shape: dict[state][action] -> list of (p, next_state, reward, done)
-
-    nS = env.observation_space.n
-    nA = env.action_space.n
-    default_reward = 0.0
-
-    # Detect terminal states: in FrozenLake, terminals self-loop with done=True and prob=1.0 for all actions.
-    terminal_states = []
-    for s in range(nS):
-        is_terminal = True
-        for a in range(nA):
-            trans = P[s][a]
-            # Terminal if only one outcome and it's (1.0, s, r, True)
-            if not (len(trans) == 1 and trans[0][3] is True and trans[0][1] == s and abs(trans[0][0] - 1.0) < 1e-12):
-                is_terminal = False
-                break
-        if is_terminal:
-            terminal_states.append(s)
-
-    # Build transitions dict in the schema expected by MDPNetwork
-    transitions: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
-    for s in range(nS):
-        s_map: Dict[str, Dict[str, Dict[str, float]]] = {}
-        for a in range(nA):
-            next_map: Dict[str, Dict[str, float]] = {}
-            for (p, sp, r, _done) in P[s][a]:
-                # Aggregate in case multiple entries go to the same sp (should not happen here, but safe)
-                entry = next_map.setdefault(str(int(sp)), {"p": 0.0, "r": 0.0})
-                entry["p"] += float(p)
-                # In FrozenLake, reward is deterministic per outcome; keep the last seen (all same except goal=1.0)
-                entry["r"] = float(r)
-            if next_map:
-                s_map[str(int(a))] = next_map
-        if s_map:
-            transitions[str(int(s))] = s_map
-
-    cfg = {
-        "num_actions": int(nA),
-        "states": list(range(nS)),
-        "start_states": [0],  # FrozenLake starts at top-left
-        "terminal_states": terminal_states,
-        "default_reward": float(default_reward),
-        "transitions": transitions,
-    }
-    return cfg, None, None
-
-
-def build_frozenlake_mdp(map_name: str = "8x8", is_slippery: bool = True) -> MDPNetwork:
-    """Create an MDPNetwork instance from FrozenLake config."""
-    cfg, int_to_state, state_to_int = frozenlake_to_mdp_config(map_name, is_slippery)
-    return MDPNetwork(config_data=cfg, int_to_state=int_to_state, state_to_int=state_to_int)
+    mdp = env.get_mdp_network()
+    return mdp
 
 
 if __name__ == "__main__":
     out_dir = "./outputs/ga_test"
 
-    print("\n=== Build FrozenLake 8x8 (slippery) MDPNetwork ===")
-    mdp = build_frozenlake_mdp(map_name="8x8", is_slippery=True)
+    print("\n=== Build FrozenLake 8x8 (slippery) MDPNetwork via CustomisedFrozenLakeEnv ===")
+    mdp = build_frozenlake_mdp_via_env(map_name="8x8", is_slippery=True)
     print(f"|S|={len(mdp.states)}  |A|={mdp.num_actions}  terminals={len(mdp.terminal_states)}")
 
     # Register example score function under a name for parallel workers.
     register_score_fn("example", example_score_fn)
 
-    # Small GA config for a quick sanity check (and enable process pool)
+    # Choose worker counts (>=1). Use 2 if available to validate process pool path.
+    workers = min(2, os.cpu_count() or 2)
+
+    # Small GA config for a quick sanity check
     cfg = GAConfig(
-        population_size=256,
+        population_size=512,
         generations=64,
         tournament_k=2,
-        elitism_num=16,
+        elitism_num=64,
         crossover_rate=0.5,
         allow_self_loops=True,
         min_out_degree=1,
@@ -126,27 +73,33 @@ if __name__ == "__main__":
         reward_min=None,
         reward_max=None,
 
-        # Parallel scoring: use 2 workers to validate process pool path
-        n_workers=min(2, os.cpu_count() or 2),
+        # Parallel scoring (name-based only)
+        n_workers=workers,
         score_fn_name="example",
+
+        # Parallel offspring (process-pool only)
+        mutation_n_workers=workers,
+
+        # Distance params (applied in main & workers)
+        dist_max_hops=32,
+        dist_node_cap=2048,
+        dist_weight_eps=1e-6,
+        dist_unreachable=1e6,
+
         seed=123,
     )
 
     # GA driver
-    ga = MDPEvolutionGA(
-        base_mdp=mdp,
-        score_fn=None,               # use name-based lookup for parallel workers
-        cfg=cfg,
-    )
+    ga = MDPEvolutionGA(base_mdp=mdp, cfg=cfg)
 
-    # Optional: quick check that parallel batch evaluation works on a list
+    # Optional: parallel evaluate_mdp_list sanity check
     print("\n=== Parallel evaluate_mdp_list sanity check ===")
     batch = [mdp, clone_mdp_network(mdp), clone_mdp_network(mdp)]
     scores = evaluate_mdp_list(batch, score_fn_name="example", n_workers=cfg.n_workers)
     print("Batch scores:", [round(s, 6) for s in scores])
     assert isinstance(scores, list) and len(scores) == len(batch)
 
-    # Run GA for a few generations
+    # Run GA
     print("\n=== Run GA for a few generations ===")
     best_mdp, best_score, history = ga.run()
     print("Best score:", best_score)
@@ -155,7 +108,7 @@ if __name__ == "__main__":
     # Simple sanity assertions
     assert isinstance(best_mdp, MDPNetwork)
     assert len(history) == cfg.generations + 1  # includes initial evaluation
-    print("\nOK: GA ran successfully on FrozenLake 8x8 with parallel scoring.")
+    print("\nOK: GA ran successfully on FrozenLake 8x8 with parallel scoring & offspring.")
 
     # Save the best MDP as JSON
     os.makedirs(out_dir, exist_ok=True)
