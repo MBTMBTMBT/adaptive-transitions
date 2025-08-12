@@ -6,7 +6,7 @@ import numpy as np
 
 from mdp_network import MDPNetwork
 from mdp_network.solvers import policy_evaluation
-from mdp_tables import PolicyTable, ValueTable, blend_policies
+from mdp_network.mdp_tables import PolicyTable, ValueTable, blend_policies
 
 
 # How to actually compute this, we need a discussion.

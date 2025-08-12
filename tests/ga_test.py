@@ -1,7 +1,10 @@
 # test_ga_frozenlake8x8.py
 # English comments only. Minimal, self-contained sanity test for NSGA-II GA.
 # - Builds an MDPNetwork from CustomisedFrozenLakeEnv (8x8, slippery)
-# - Runs the GA (NSGA-II) for a few generations with small population
+# - Precomputes baseline (policy + occupancy) on the base MDP (serial)
+# - Runs the GA (NSGA-II) with two objectives:
+#       1) obj_policy_kl_similarity  (maximize -KL)
+#       2) obj_perf_integral         (maximize performance integral)
 # - Uses process pool parallel scoring to validate the path
 # - Prints Pareto front info and simple assertions
 
@@ -13,14 +16,18 @@ from mdp_network.ga_mdp_search import (
     MDPEvolutionGA,
     register_score_fn,
     evaluate_mdp_objectives,
-    obj_reward_sum,
-    obj_sparse_structure,
+    obj_policy_kl_similarity,
+    obj_perf_integral,
 )
 
 from mdp_network.mdp_network import MDPNetwork
 
+# ---- Tables (Serialisable) ----
+from mdp_network.mdp_tables import PolicyTable, ValueTable, QTable, q_table_to_policy  # noqa: F401
+
 # ---- Custom env that exposes an MDPNetwork ----
 from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
+from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 
 
 def build_frozenlake_mdp_via_env(map_name: str = "8x8", is_slippery: bool = True) -> MDPNetwork:
@@ -39,19 +46,19 @@ if __name__ == "__main__":
     print(f"|S|={len(mdp.states)}  |A|={mdp.num_actions}  terminals={len(mdp.terminal_states)}")
 
     # Register objective functions under names for parallel workers.
-    register_score_fn("obj_reward_sum", obj_reward_sum)
-    register_score_fn("obj_sparse_structure", obj_sparse_structure)
+    register_score_fn("obj_policy_kl_similarity", obj_policy_kl_similarity)
+    register_score_fn("obj_perf_integral", obj_perf_integral)
 
-    # Choose worker counts (>=1). Use 2 if available to validate process pool path.
-    workers = min(2, os.cpu_count() or 2)
+    workers = os.cpu_count()
 
-    # Smallish GA config for a quick sanity check (feel free to tweak sizes)
+    # GA config tuned small for a quick sanity run (feel free to increase later)
     cfg = GAConfig(
         population_size=512,
         generations=64,
         tournament_k=2,
         elitism_num=64,
         crossover_rate=0.5,
+
         allow_self_loops=True,
         min_out_degree=1,
         max_out_degree=6,
@@ -66,12 +73,10 @@ if __name__ == "__main__":
         reward_tweak_edges_per_child=5,
         reward_k_percent=0.05,
         reward_ref_floor=1e-3,
-        reward_min=None,
-        reward_max=None,
 
         # Parallel scoring (multi-objective)
         n_workers=workers,
-        score_fn_names=["obj_reward_sum", "obj_sparse_structure"],
+        score_fn_names=["obj_policy_kl_similarity", "obj_perf_integral"],
         score_args=None,
         score_kwargs=None,
 
@@ -84,13 +89,37 @@ if __name__ == "__main__":
         dist_weight_eps=1e-6,
         dist_unreachable=1e6,
 
+        # VI / softmax / KL / perf defaults (can tweak)
+        vi_gamma=0.99,
+        vi_theta=1e-4,
+        vi_max_iterations=1000,
+        policy_temperature=1.0,
+        kl_delta=1e-3,
+        perf_numpoints=64,
+        perf_gamma=None,          # None -> fallback to vi_gamma
+        perf_theta=None,          # None -> fallback to vi_theta
+        perf_max_iterations=None, # None -> fallback to vi_max_iterations
+
         seed=123,
     )
 
     # GA driver
     ga = MDPEvolutionGA(base_mdp=mdp, cfg=cfg)
 
-    # Optional: parallel evaluate_mdp_objectives sanity check
+    # ----- Serial PRECOMPUTE on the BASE MDP (so KL has a proper baseline) -----
+    V, Q = optimal_value_iteration(
+        mdp, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
+    )
+    base_policy = q_table_to_policy(
+        Q, states=list(mdp.states), num_actions=mdp.num_actions, temperature=cfg.policy_temperature
+    )
+    base_occupancy = compute_occupancy_measure(
+        mdp, base_policy, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
+    )
+    # Provide artifacts to GA so workers can consume them via kwargs["precomputed_portables"]
+    ga.precomputed_artifacts = [base_policy, base_occupancy]
+
+    # ----- Optional: parallel evaluate_mdp_objectives sanity check -----
     print("\n=== Parallel evaluate_mdp_objectives sanity check ===")
     batch = [mdp, mdp.clone(), mdp.clone()]
     obj_vecs = evaluate_mdp_objectives(
@@ -98,14 +127,26 @@ if __name__ == "__main__":
         score_fn_names=cfg.score_fn_names or [],
         n_workers=cfg.n_workers,
         score_args=cfg.score_args,
-        score_kwargs=cfg.score_kwargs,
-        precomputed_portables=None,
+        score_kwargs={
+            # mirror what GA will auto-inject
+            "vi_gamma": cfg.vi_gamma,
+            "vi_theta": cfg.vi_theta,
+            "vi_max_iterations": cfg.vi_max_iterations,
+            "policy_temperature": cfg.policy_temperature,
+            "kl_delta": cfg.kl_delta,
+            "perf_numpoints": cfg.perf_numpoints,
+            "perf_gamma": cfg.perf_gamma if cfg.perf_gamma is not None else cfg.vi_gamma,
+            "perf_theta": cfg.perf_theta if cfg.perf_theta is not None else cfg.vi_theta,
+            "perf_max_iterations": cfg.perf_max_iterations if cfg.perf_max_iterations is not None else cfg.vi_max_iterations,
+        },
+        # broadcast the same baseline artifacts the GA will broadcast at run()
+        precomputed_portables=[base_policy.to_portable(), base_occupancy.to_portable()],
     )
     print("Batch objective vectors:", [[round(x, 6) for x in v] for v in obj_vecs])
     assert isinstance(obj_vecs, list) and len(obj_vecs) == len(batch)
     assert all(isinstance(v, list) and len(v) == len(cfg.score_fn_names or []) for v in obj_vecs)
 
-    # Run GA (NSGA-II)
+    # ----- Run GA (NSGA-II) -----
     print("\n=== Run NSGA-II GA for a few generations ===")
     pareto_mdps, pareto_objs, pop, pop_objs = ga.run()
 
@@ -119,12 +160,13 @@ if __name__ == "__main__":
     assert all(isinstance(m, MDPNetwork) for m in pareto_mdps)
     assert len(pareto_objs) == len(pareto_mdps)
     assert all(len(v) == len(cfg.score_fn_names or []) for v in pareto_objs)
+    assert len(pareto_mdps) >= 1
 
     print("\nOK: NSGA-II GA ran successfully on FrozenLake 8x8 with parallel scoring & offspring.")
 
     # Save the Pareto front MDPs as JSON (save top K or all)
     os.makedirs(out_dir, exist_ok=True)
-    K = min(10, len(pareto_mdps))
+    K = min(5, len(pareto_mdps))
     for i in range(K):
         out_path = os.path.join(out_dir, f"pareto_{i}_objs_{'_'.join(f'{v:.4f}' for v in pareto_objs[i])}.json")
         pareto_mdps[i].export_to_json(out_path)

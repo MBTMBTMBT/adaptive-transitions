@@ -9,16 +9,19 @@ def policy_evaluation(mdp_network: MDPNetwork,
                       policy: PolicyTable,
                       gamma: float = 0.99,
                       theta: float = 1e-6,
-                      max_iterations: int = 1000) -> ValueTable:
+                      max_iterations: int = 1000,
+                      verbose: bool = False) -> ValueTable:
     """
     Evaluate V^π using R(s,a,s').
+    Set verbose=True to print progress.
     """
     value_table = ValueTable()
     states = mdp_network.states
     for s in states:
         value_table.set_value(s, 0.0)
 
-    print(f"Policy evaluation started: {len(states)} states, gamma={gamma}, theta={theta}")
+    if verbose:
+        print(f"Policy evaluation started: {len(states)} states, gamma={gamma}, theta={theta}")
 
     for it in range(max_iterations):
         max_delta = 0.0
@@ -50,13 +53,15 @@ def policy_evaluation(mdp_network: MDPNetwork,
             value_table.set_value(s, new_v)
             max_delta = max(max_delta, abs(new_v - old_v))
 
-        if (it + 1) % 100 == 0:
+        if verbose and (it + 1) % 100 == 0:
             print(f"  Policy evaluation iteration {it + 1}: max_change = {max_delta:.6f}")
         if max_delta < theta:
-            print(f"Policy evaluation converged after {it + 1} iterations, final max_change = {max_delta:.6f}")
+            if verbose:
+                print(f"Policy evaluation converged after {it + 1} iterations, final max_change = {max_delta:.6f}")
             break
     else:
-        print(f"Policy evaluation reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
+        if verbose:
+            print(f"Policy evaluation reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
 
     return value_table
 
@@ -64,9 +69,11 @@ def policy_evaluation(mdp_network: MDPNetwork,
 def optimal_value_iteration(mdp_network: MDPNetwork,
                             gamma: float = 0.99,
                             theta: float = 1e-6,
-                            max_iterations: int = 1000) -> Tuple[ValueTable, QTable]:
+                            max_iterations: int = 1000,
+                            verbose: bool = False) -> Tuple[ValueTable, QTable]:
     """
     Compute V* and Q* using R(s,a,s').
+    Set verbose=True to print progress.
     """
     value_table = ValueTable()
     q_table = QTable()
@@ -79,7 +86,8 @@ def optimal_value_iteration(mdp_network: MDPNetwork,
         for a in range(A):
             q_table.set_q_value(s, a, 0.0)
 
-    print(f"Optimal value iteration started: {len(states)} states, {A} actions, gamma={gamma}, theta={theta}")
+    if verbose:
+        print(f"Optimal value iteration started: {len(states)} states, {A} actions, gamma={gamma}, theta={theta}")
 
     for it in range(max_iterations):
         max_delta = 0.0
@@ -110,13 +118,15 @@ def optimal_value_iteration(mdp_network: MDPNetwork,
             value_table.set_value(s, new_v)
             max_delta = max(max_delta, abs(new_v - old_v))
 
-        if (it + 1) % 100 == 0:
+        if verbose and (it + 1) % 100 == 0:
             print(f"  Optimal value iteration {it + 1}: max_change = {max_delta:.6f}")
         if max_delta < theta:
-            print(f"Optimal value iteration converged after {it + 1} iterations, final max_change = {max_delta:.6f}")
+            if verbose:
+                print(f"Optimal value iteration converged after {it + 1} iterations, final max_change = {max_delta:.6f}")
             break
     else:
-        print(f"Optimal value iteration reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
+        if verbose:
+            print(f"Optimal value iteration reached maximum iterations ({max_iterations}), final max_change = {max_delta:.6f}")
 
     return value_table, q_table
 
@@ -127,9 +137,11 @@ def q_learning(mdp_network: MDPNetwork,
                epsilon: float = 0.1,
                num_episodes: int = 10000,
                max_steps_per_episode: int = 1000,
-               seed: Optional[int] = None) -> Tuple[QTable, ValueTable]:
+               seed: Optional[int] = None,
+               verbose: bool = False) -> Tuple[QTable, ValueTable]:
     """
     Tabular Q-learning with R(s,a,s') via mdp.sample_step.
+    Set verbose=True to print progress.
     """
     rng = np.random.default_rng(seed)
     q_table = QTable()
@@ -143,8 +155,9 @@ def q_learning(mdp_network: MDPNetwork,
         for a in range(A):
             q_table.set_q_value(s, a, 0.0)
 
-    print(f"Q-Learning started: {len(states)} states, {A} actions, {num_episodes} episodes")
-    print(f"  Parameters: alpha={alpha}, gamma={gamma}, epsilon={epsilon}")
+    if verbose:
+        print(f"Q-Learning started: {len(states)} states, {A} actions, {num_episodes} episodes")
+        print(f"  Parameters: alpha={alpha}, gamma={gamma}, epsilon={epsilon}")
 
     for ep in range(num_episodes):
         s = mdp_network.sample_start_state(rng)
@@ -175,7 +188,7 @@ def q_learning(mdp_network: MDPNetwork,
 
             s = sp
 
-        if (ep + 1) % 1000 == 0:
+        if verbose and (ep + 1) % 1000 == 0:
             total_q = sum(q_table.get_q_value(s, a) for s in states for a in range(A))
             avg_q = total_q / (len(states) * A)
             print(f"  Q-Learning episode {ep + 1}/{num_episodes}: avg_q_value = {avg_q:.4f}, last_episode_steps = {episode_steps}")
@@ -188,7 +201,8 @@ def q_learning(mdp_network: MDPNetwork,
             _, best_q = q_table.get_best_action(s)
             value_table.set_value(s, best_q)
 
-    print("Q-Learning completed")
+    if verbose:
+        print("Q-Learning completed")
     return q_table, value_table
 
 
@@ -196,12 +210,12 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
                               policy: PolicyTable,
                               gamma: float = 0.99,
                               theta: float = 1e-6,
-                              max_iterations: int = 1000) -> ValueTable:
+                              max_iterations: int = 1000,
+                              verbose: bool = False) -> ValueTable:
     """
-    Compute occupancy measure for a given policy in MDP.
-    Now supports probabilistic policies.
-
+    Compute occupancy measure for a given policy in MDP (supports probabilistic policies).
     Returns a ValueTable containing the expected cumulative frequency of visiting each state.
+    Set verbose=True to print progress.
     """
     # Initialize occupancy measure table
     occupancy_table = ValueTable()
@@ -218,7 +232,8 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
     start_states = list(mdp_network.start_states)
 
     if not start_states:
-        print("Warning: No start states found")
+        if verbose:
+            print("Warning: No start states found")
         return occupancy_table
 
     # Uniform initial distribution over start states
@@ -226,8 +241,9 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
     for state in start_states:
         current_distribution[state] = initial_prob
 
-    print(f"Occupancy measure computation started: {len(states)} states, {len(start_states)} start states")
-    print(f"  Parameters: gamma={gamma}, theta={theta}")
+    if verbose:
+        print(f"Occupancy measure computation started: {len(states)} states, {len(start_states)} start states")
+        print(f"  Parameters: gamma={gamma}, theta={theta}")
 
     # Iterative computation of occupancy measures
     for iteration in range(max_iterations):
@@ -277,36 +293,40 @@ def compute_occupancy_measure(mdp_network: MDPNetwork,
         current_distribution = next_distribution
 
         # Print debug info every 100 iterations
-        if (iteration + 1) % 100 == 0:
+        if verbose and (iteration + 1) % 100 == 0:
             total_occupancy = sum(occupancy_table.get_value(state) for state in states)
             print(f"  Occupancy measure iteration {iteration + 1}: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
 
         # Check for convergence
         if max_change < theta:
-            total_occupancy = sum(occupancy_table.get_value(state) for state in states)
-            print(f"Occupancy measure computation converged after {iteration + 1} iterations")
-            print(f"  Final: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
+            if verbose:
+                total_occupancy = sum(occupancy_table.get_value(state) for state in states)
+                print(f"Occupancy measure computation converged after {iteration + 1} iterations")
+                print(f"  Final: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
             break
     else:
-        total_occupancy = sum(occupancy_table.get_value(state) for state in states)
-        print(f"Occupancy measure computation reached maximum iterations ({max_iterations})")
-        print(f"  Final: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
+        if verbose:
+            total_occupancy = sum(occupancy_table.get_value(state) for state in states)
+            print(f"Occupancy measure computation reached maximum iterations ({max_iterations})")
+            print(f"  Final: max_change = {max_change:.6f}, total_occupancy = {total_occupancy:.4f}")
 
-    # Remove the line that forces terminal states to zero - they should keep their occupancy!
-    # The terminal states now correctly maintain their visit counts
+    # Terminal states keep their occupancy; no zeroing.
 
     return occupancy_table
 
 
 def compute_reward_distribution(mdp_network: MDPNetwork,
-                                occupancy_table: 'ValueTable',
-                                policy: 'PolicyTable',
-                                delta: float = 0.01) -> Tuple['RewardDistributionTable', 'RewardDistributionTable']:
+                                occupancy_table: ValueTable,
+                                policy: PolicyTable,
+                                delta: float = 0.01,
+                                verbose: bool = False) -> Tuple[RewardDistributionTable, RewardDistributionTable]:
     """
     Compute distribution over transition rewards under (occupancy, policy).
     Count for reward r is: sum_s Occ(s) * sum_a pi(a|s) * sum_{s'} P(s'|s,a) * 1[r_{s,a,s'}=r].
+    Set verbose=True to print progress.
     """
-    print(f"Computing reward distribution with delta precision: {delta:.2e}")
+    if verbose:
+        print(f"Computing reward distribution with delta precision: {delta:.2e}")
 
     count_dist = RewardDistributionTable(delta=delta)
     states = mdp_network.states
@@ -336,14 +356,16 @@ def compute_reward_distribution(mdp_network: MDPNetwork,
                     r = mdp_network.get_transition_reward(s, a, sp)
                     count_dist.add_count(r, occ * pi_sa * p)
 
-    print(f"Processed {processed_states} states with positive occupancy")
+    if verbose:
+        print(f"Processed {processed_states} states with positive occupancy")
     prob_dist = count_dist.normalize_to_probabilities()
 
-    total = count_dist.get_total_count()
-    uniq = len(count_dist.get_all_rewards())
-    print(f"Reward distribution computed:\n  Total occupancy-weighted transitions: {total:.6f}\n  Unique rewards: {uniq}")
-    if uniq > 0:
-        mr, mc = count_dist.get_most_frequent_reward()
-        print(f"  Most frequent reward: {mr:.6f} (weight: {mc:.6f})")
+    if verbose:
+        total = count_dist.get_total_count()
+        uniq = len(count_dist.get_all_rewards())
+        print(f"Reward distribution computed:\n  Total occupancy-weighted transitions: {total:.6f}\n  Unique rewards: {uniq}")
+        if uniq > 0:
+            mr, mc = count_dist.get_most_frequent_reward()
+            print(f"  Most frequent reward: {mr:.6f} (weight: {mc:.6f})")
 
     return count_dist, prob_dist
