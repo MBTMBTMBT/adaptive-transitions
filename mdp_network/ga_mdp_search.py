@@ -1,12 +1,6 @@
 # ga_mdp_search.py
 # Genetic search system for MDPNetwork (structure + probability + reward) with
 # optional parallel scoring and parallel offspring mutation using a process pool (Linux, Python 3.10).
-#
-# Simplified rules:
-# - Only one distance: directed_prob_distance (fixed signature via GAConfig dist_* params).
-# - Parallel scoring ONLY via name-registered score fns (no picklable callable path).
-# - Offspring creation is process-pool only (no serial path).
-# - Inter-process transport uses minimal JSON-like config to rebuild MDPs.
 
 from __future__ import annotations
 
@@ -19,6 +13,7 @@ import numpy as np
 import networkx as nx
 from concurrent.futures import ProcessPoolExecutor
 
+from serialisable import Serialisable
 from mdp_network import MDPNetwork
 
 # -------------------------------
@@ -152,10 +147,8 @@ class GAConfig:
     gamma_sample: float = 1.0
     gamma_prob: float = 0.0
 
-    # Delete-edge parameters
-    delete_edge_attempts_per_child: int = 1
-    delete_tau: float = 1.0
-    delete_eps: float = 1e-9
+    # Delete-edge parameters (prune by threshold; no stochastic deletion anymore)
+    prune_prob_threshold: Optional[float] = None
 
     # Probability tweak parameters
     prob_tweak_actions_per_child: int = 20
@@ -296,7 +289,7 @@ def mutation_add_edge(mdp: 'MDPNetwork',
 
     weights = []
     for sp in sp_candidates:
-        d = dist_fn(mdp, s, sp)
+        d = _dist_from_cfg(mdp, s, sp, cfg)
         w = math.exp(-cfg.gamma_sample * d) if cfg.gamma_sample > 0.0 else 1.0
         weights.append(w)
     weights = np.asarray(weights, dtype=float)
@@ -305,7 +298,7 @@ def mutation_add_edge(mdp: 'MDPNetwork',
     weights /= weights.sum()
     sp_new = int(rng.choice(sp_candidates, p=weights))
 
-    d_new = dist_fn(mdp, s, sp_new)
+    d_new = _dist_from_cfg(mdp, s, sp_new, cfg)
     p_new = cfg.epsilon_new_prob
     if cfg.gamma_prob > 0.0:
         p_new = min(cfg.epsilon_new_prob, cfg.epsilon_new_prob * math.exp(-cfg.gamma_prob * d_new))
@@ -321,43 +314,24 @@ def mutation_add_edge(mdp: 'MDPNetwork',
     set_outgoing_for_action(mdp, s, a, out_map)
 
 
-def mutation_delete_edge(mdp: 'MDPNetwork',
-                         rng: np.random.Generator,
-                         whitelist: Set[EdgeTriple],
-                         cfg: GAConfig):
-    pairs = []
-    for (s, a) in list_all_action_pairs(mdp):
-        out_map = get_outgoing_for_action(mdp, s, a)
-        if len(out_map) <= cfg.min_out_degree:
+def prune_low_prob_transitions(mdp: 'MDPNetwork', threshold: float):
+    """
+    Remove ALL transitions with probability < threshold, action by action.
+    - Ignores whitelist and min_out_degree.
+    - After pruning each (s,a), probabilities are renormalized over the remaining successors.
+    - If nothing remains for (s,a), that action becomes empty (no outgoing succs); this is allowed.
+    """
+    thr = float(threshold)
+    for s in mdp.states:
+        if s in mdp.terminal_states:
             continue
-        deletable = [sp for sp in out_map.keys() if (s, a, sp) not in whitelist]
-        if deletable:
-            pairs.append((s, a, out_map, deletable))
-    if not pairs:
-        return
-
-    s, a, out_map, deletable = pairs[rng.integers(0, len(pairs))]
-    ps = np.array([out_map[sp][0] for sp in deletable], dtype=float)
-    w = np.power(ps + cfg.delete_eps, -cfg.delete_tau)
-    w /= w.sum()
-    sp_del = int(rng.choice(deletable, p=w))
-
-    del out_map[sp_del]
-    if len(out_map) < cfg.min_out_degree:
-        return
-
-    total = sum(p for (p, _) in out_map.values())
-    if total <= 0:
-        m = len(out_map)
-        for sp in out_map:
-            _, r = out_map[sp]
-            out_map[sp] = (1.0 / m, r)
-    else:
-        for sp in out_map:
-            p, r = out_map[sp]
-            out_map[sp] = (max(cfg.prob_floor, p / total), r)
-
-    set_outgoing_for_action(mdp, s, a, out_map)
+        for a in range(mdp.num_actions):
+            out_map = get_outgoing_for_action(mdp, s, a)
+            if not out_map:
+                continue
+            kept = {sp: (p, r) for sp, (p, r) in out_map.items() if p >= thr}
+            if len(kept) != len(out_map):
+                set_outgoing_for_action(mdp, s, a, kept)
 
 
 def mutation_prob_pairwise(mdp: 'MDPNetwork',
@@ -454,14 +428,23 @@ def tournament_select(pop: List['MDPNetwork'],
 # Parallel scoring workers (name-based only)
 # -------------------------------
 
-def _score_worker_by_name(payload: Tuple[Dict[str, Any], str, Tuple[Any, ...], Dict[str, Any]]) -> float:
+def _score_worker_by_name(payload: Tuple[Dict[str, Any], str, Tuple[Any, ...], Dict[str, Any], Optional[List[Dict[str, Any]]]]) -> float:
     """
-    payload = (portable, score_fn_name, args, kwargs)
+    payload = (mdp_portable, score_fn_name, args, kwargs, precomputed_portables)
+    precomputed_portables is a list of dicts produced by Serialisable.to_portable() in main process.
     """
-    portable, fn_name, args, kwargs = payload
+    portable, fn_name, args, kwargs, precomputed_portables = payload
     mdp = MDPNetwork.from_portable(portable)
     fn = get_registered_score_fn(fn_name)
-    return float(fn(mdp, *args, **kwargs))
+
+    # Inject precomputed into kwargs (non-destructive)
+    if precomputed_portables is not None and "precomputed_portables" not in kwargs:
+        local_kwargs = dict(kwargs)
+        local_kwargs["precomputed_portables"] = precomputed_portables
+    else:
+        local_kwargs = kwargs
+
+    return float(fn(mdp, *args, **local_kwargs))
 
 
 def evaluate_mdp_list(
@@ -471,6 +454,7 @@ def evaluate_mdp_list(
     n_workers: int,
     score_args: Optional[Tuple[Any, ...]] = None,
     score_kwargs: Optional[Dict[str, Any]] = None,
+    precomputed_portables: Optional[List[Dict[str, Any]]] = None,  # PRECOMPUTE: pass-through
 ) -> List[float]:
     if score_fn_name is None:
         raise ValueError("score_fn_name is required (parallel-only).")
@@ -479,7 +463,10 @@ def evaluate_mdp_list(
     args = score_args or ()
     kwargs = score_kwargs or {}
 
-    payloads = [(m.to_portable(), score_fn_name, args, kwargs) for m in mdps]
+    payloads = [
+        (m.to_portable(), score_fn_name, args, kwargs, precomputed_portables)
+        for m in mdps
+    ]
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         results = list(ex.map(_score_worker_by_name, payloads))
     return [float(x) for x in results]
@@ -490,13 +477,20 @@ def evaluate_mdp_list(
 # -------------------------------
 
 def _apply_mutations(ind: 'MDPNetwork', rng: np.random.Generator, whitelist: Set[EdgeTriple], cfg: GAConfig):
-    dist_fn = lambda mdp, s, sp: _dist_from_cfg(mdp, s, sp, cfg)
+    # Distance-weighted add edge
     for _ in range(cfg.add_edge_attempts_per_child):
-        mutation_add_edge(ind, rng, dist_fn, cfg)
-    for _ in range(cfg.delete_edge_attempts_per_child):
-        mutation_delete_edge(ind, rng, whitelist, cfg)
+        mutation_add_edge(ind, rng, lambda _m, _s, _sp: _dist_from_cfg(ind, _s, _sp, cfg), cfg)
+
+    # Probability local pairwise tweaks
     mutation_prob_pairwise(ind, rng, cfg)
-    mutation_reward_smallstep(ind, rng, cfg)
+
+    # Reward small-step (optional)
+    if cfg.reward_tweak_edges_per_child > 0:
+        mutation_reward_smallstep(ind, rng, cfg)
+
+    # Hard prune of low-prob transitions (optional)
+    if cfg.prune_prob_threshold is not None:
+        prune_low_prob_transitions(ind, cfg.prune_prob_threshold)
 
 
 def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -544,8 +538,13 @@ class MDPEvolutionGA:
     - distance-weighted add-edge (directed_prob_distance),
     - probability pairwise tweaks,
     - reward bounded small-step tweaks,
-    - deletion preferring low-prob edges (never delete original whitelist edges),
+    - hard pruning of low-prob transitions (optional),
     - parallel evaluation and parallel offspring creation only.
+
+    Precompute notes:
+    - Users may set `self.precompute_hook` to a callable: (MDPNetwork) -> List[Serialisable]
+      OR set `self.precomputed_artifacts` to an already-built list of Serialisable.
+    - We intentionally do NOT place these on GAConfig to keep GAConfig picklable for workers.
     """
 
     def __init__(self,
@@ -565,7 +564,13 @@ class MDPEvolutionGA:
         # Single portable blob for cross-process transport
         self._base_portable = self.base_mdp.to_portable()
 
-    # ---------- initialization ----------
+        # --- PRECOMPUTE hook slots (simple, main-process only; never sent to workers) ---
+        self.precomputed_artifacts: Optional[List[Serialisable]] = None
+
+        # Will hold the final JSON-friendly list of dicts ready for workers
+        self._precomputed_portables: Optional[List[Dict[str, Any]]] = None
+
+    # ---------- internal helpers ----------
 
     def _init_population(self) -> List['MDPNetwork']:
         pop: List[MDPNetwork] = [self.base_mdp.clone()]
@@ -576,7 +581,7 @@ class MDPEvolutionGA:
         payloads: List[Dict[str, Any]] = []
         for _ in range(need):
             payloads.append({
-                "cfg": self.cfg,
+                "cfg": self.cfg,  # GAConfig must remain pickle-friendly
                 "whitelist": list(self.whitelist),
                 "seed": int(self.rng.integers(0, 2 ** 63 - 1)),
                 "base_portable": self._base_portable,
@@ -608,8 +613,6 @@ class MDPEvolutionGA:
             children.append(MDPNetwork.from_portable(portable))
         return children
 
-    # ---------- evaluation ----------
-
     def _evaluate_population(self, pop: List['MDPNetwork']) -> List[float]:
         return evaluate_mdp_list(
             mdps=pop,
@@ -617,30 +620,43 @@ class MDPEvolutionGA:
             n_workers=self.cfg.n_workers,
             score_args=self.cfg.score_args,
             score_kwargs=self.cfg.score_kwargs,
+            precomputed_portables=self._precomputed_portables,  # PRECOMPUTE: broadcast to workers
         )
 
     # ---------- public API ----------
 
     def run(self) -> Tuple['MDPNetwork', float, List[float]]:
+        # ----- PRECOMPUTE: run once (serial, main process) -----
+        # This block is intentionally simple. Users can assign:
+        #   - self.precomputed_artifacts = [obj1, obj2, ...]
+        # If both are None, we skip precompute and workers receive None.
+        if self.precomputed_artifacts is not None:
+            self._precomputed_portables = [obj.to_portable() for obj in self.precomputed_artifacts]
+            print(f"[Precompute] Using provided artifacts: {len(self._precomputed_portables)} item(s).")
+        else:
+            self._precomputed_portables = None
+            print("[Precompute] Skipped (no artifacts).")
+
+        # ----- Init population & evaluate -----
         pop = self._init_population()
         scores = self._evaluate_population(pop)
 
         best_idx = int(np.argmax(scores))
-        best_mdp = pop[best_idx].clone()  # use instance clone()
+        best_mdp = pop[best_idx].clone()
         best_score = float(scores[best_idx])
         history: List[float] = [best_score]
 
         print(f"[Init] pop={len(pop)} | best={best_score:.6f} | "
               f"mean={np.mean(scores):.6f} | std={np.std(scores):.6f}")
 
-        # 2) Generations
+        # ----- Generations -----
         for gen in range(self.cfg.generations):
-            # Elitism: keep top-k clones
+            # Elitism
             elite_count = min(self.cfg.elitism_num, len(pop))
             elite_idxs = list(np.argsort(scores)[-elite_count:])
-            elites = [pop[int(i)].clone() for i in elite_idxs]  # clone elites
+            elites = [pop[int(i)].clone() for i in elite_idxs]
 
-            # Fill the rest with children (always via parallel path in this design)
+            # Children via parallel path
             target = self.cfg.population_size - elite_count
             if target <= 0:
                 new_pop: List[MDPNetwork] = elites
@@ -654,18 +670,18 @@ class MDPEvolutionGA:
                 children = self._make_children_parallel(parents_pairs)
                 new_pop = elites + children
 
-            # Move to next generation
+            # Next generation
             pop = new_pop
             scores = self._evaluate_population(pop)
 
-            # Track best-of-generation and update global best if improved
+            # Track best
             gen_best_idx = int(np.argmax(scores))
             gen_best_score = float(scores[gen_best_idx])
 
             improved = gen_best_score > best_score
             if improved:
                 best_score = gen_best_score
-                best_mdp = pop[gen_best_idx].clone()  # clone the new best
+                best_mdp = pop[gen_best_idx].clone()
 
             history.append(best_score)
 
@@ -682,6 +698,16 @@ class MDPEvolutionGA:
 # -------------------------------
 
 def example_score_fn(mdp: 'MDPNetwork', *args, **kwargs) -> float:
+    """
+    Example: simple sum of expected rewards over all (s, a), skipping terminals.
+    Demonstrates how to read precomputed_portables if present.
+    """
+    _pre = kwargs.get("precomputed_portables", None)  # List[dict] or None
+    # If you had a QTable portable at _pre[0], you could hydrate it here, e.g.:
+    # from mdp_network.mdp_tables import QTable
+    # q = QTable.from_portable(_pre[0])  # if your QTable implements Serialisable
+    # ... use q in scoring ...
+
     total = 0.0
     for s in mdp.states:
         if s in mdp.terminal_states:
@@ -742,9 +768,7 @@ if __name__ == "__main__":
         epsilon_new_prob=0.02,
         gamma_sample=1.0,
         gamma_prob=0.0,
-        delete_edge_attempts_per_child=1,
-        delete_tau=1.0,
-        delete_eps=1e-9,
+        prune_prob_threshold=1e-3,
         prob_tweak_actions_per_child=8,
         prob_pairwise_step=0.02,
         reward_tweak_edges_per_child=16,
