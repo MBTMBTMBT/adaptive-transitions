@@ -1,6 +1,14 @@
 # ga_mdp_search.py
-# Genetic search system for MDPNetwork (structure + probability + reward) with
-# optional parallel scoring and parallel offspring mutation using a process pool (Linux, Python 3.10).
+# Genetic search system for MDPNetwork (structure + probability + reward)
+# with optional parallel scoring and parallel offspring mutation using a process pool (Linux, Python 3.10).
+#
+# This version switches the selection/elitism to NSGA-II (multi-objective).
+# Minimal-invasive changes:
+# - score_fn_names: List[str] (>=1) replaces single-objective name.
+# - Parallel evaluation returns objective vectors (one float per registered score fn).
+# - NSGA-II: fast non-dominated sorting + crowding distance; parent selection uses (rank,crowding) tournament.
+# - run() returns the final Pareto front (several best) and the final population (all),
+#   so you get "a few best or all" in one shot.
 
 from __future__ import annotations
 
@@ -23,6 +31,7 @@ from mdp_network import MDPNetwork
 State = int
 Action = int
 EdgeTriple = Tuple[State, Action, State]
+# Each score fn still returns a scalar; we aggregate multiple of them into a vector.
 ScoreFn = Callable[['MDPNetwork', Any], float]
 DistanceFn = Callable[['MDPNetwork', State, State], float]
 
@@ -132,7 +141,7 @@ class GAConfig:
     population_size: int = 80
     generations: int = 100
     tournament_k: int = 2
-    elitism_num: int = 8
+    elitism_num: int = 8          # kept for compatibility; NSGA-II ignores explicit "elitism" and uses union-selection
     crossover_rate: float = 1.0
 
     # Structural constraints
@@ -147,7 +156,7 @@ class GAConfig:
     gamma_sample: float = 1.0
     gamma_prob: float = 0.0
 
-    # Delete-edge parameters (prune by threshold; no stochastic deletion anymore)
+    # Pruning (hard threshold)
     prune_prob_threshold: Optional[float] = None
 
     # Probability tweak parameters
@@ -162,13 +171,14 @@ class GAConfig:
     reward_max: Optional[float] = None
 
     # Parallel evaluation (scores)
-    n_workers: int = 1                    # >=1 = process pool (1 means a single worker process)
-    score_fn_name: Optional[str] = None   # required if n_workers > 1
+    n_workers: int = 1
+    # MULTI-OBJECTIVE: register 2+ score function names here (order = objective order).
+    score_fn_names: Optional[List[str]] = None
     score_args: Optional[Tuple[Any, ...]] = None
     score_kwargs: Optional[Dict[str, Any]] = None
 
     # Parallel mutation (offspring creation)
-    mutation_n_workers: int = 1           # 1 = serial; >1 = parallel child creation
+    mutation_n_workers: int = 1
 
     # Distance parameters (applied consistently in main & workers)
     dist_max_hops: Optional[int] = None
@@ -317,9 +327,7 @@ def mutation_add_edge(mdp: 'MDPNetwork',
 def prune_low_prob_transitions(mdp: 'MDPNetwork', threshold: float):
     """
     Remove ALL transitions with probability < threshold, action by action.
-    - Ignores whitelist and min_out_degree.
-    - After pruning each (s,a), probabilities are renormalized over the remaining successors.
-    - If nothing remains for (s,a), that action becomes empty (no outgoing succs); this is allowed.
+    After pruning each (s,a), probabilities are renormalized over the remaining successors.
     """
     thr = float(threshold)
     for s in mdp.states:
@@ -389,7 +397,7 @@ def mutation_reward_smallstep(mdp: 'MDPNetwork',
 
 
 # -------------------------------
-# Crossover and selection
+# Crossover
 # -------------------------------
 
 def crossover_action_block(parent_a: 'MDPNetwork',
@@ -409,67 +417,157 @@ def crossover_action_block(parent_a: 'MDPNetwork',
     return child
 
 
-def tournament_select(pop: List['MDPNetwork'],
-                      scores: List[float],
-                      rng: np.random.Generator,
-                      k: int) -> 'MDPNetwork':
+# -------------------------------
+# NSGA-II tools (maximization)
+# -------------------------------
+
+def _dominates_max(a: List[float], b: List[float]) -> bool:
+    """Return True if vector a Pareto-dominates b (all objectives >= and at least one >)."""
+    ge = True
+    gt = False
+    for ai, bi in zip(a, b):
+        if ai < bi:
+            ge = False
+            break
+        if ai > bi:
+            gt = True
+    return ge and gt
+
+
+def fast_non_dominated_sort(objs: List[List[float]]) -> List[List[int]]:
+    """
+    Standard fast non-dominated sorting (NSGA-II), adapted to maximization.
+    Returns a list of fronts, each is a list of indices (F1, F2, ...).
+    """
+    N = len(objs)
+    S = [set() for _ in range(N)]
+    n = [0] * N
+    fronts: List[List[int]] = [[]]
+
+    for p in range(N):
+        for q in range(N):
+            if p == q:
+                continue
+            if _dominates_max(objs[p], objs[q]):
+                S[p].add(q)
+            elif _dominates_max(objs[q], objs[p]):
+                n[p] += 1
+        if n[p] == 0:
+            fronts[0].append(p)
+
+    i = 0
+    while fronts[i]:
+        Q: List[int] = []
+        for p in fronts[i]:
+            for q in S[p]:
+                n[q] -= 1
+                if n[q] == 0:
+                    Q.append(q)
+        i += 1
+        fronts.append(Q)
+    fronts.pop()  # remove last empty
+    return fronts
+
+
+def compute_crowding_distance(objs: List[List[float]], idxs: List[int]) -> Dict[int, float]:
+    """
+    Crowding distance within a front. We do objective-wise sorting and accumulate normalized gaps.
+    Works for maximization/minimization equally as it uses relative spacing.
+    """
+    M = len(objs[0]) if objs else 0
+    Nf = len(idxs)
+    if Nf == 0:
+        return {}
+    distance = {i: 0.0 for i in idxs}
+    if Nf <= 2:
+        # Boundary protection
+        for i in idxs:
+            distance[i] = float('inf')
+        return distance
+
+    for m in range(M):
+        vals = [objs[i][m] for i in idxs]
+        order = [x for _, x in sorted(zip(vals, idxs))]  # ascending
+        vmin, vmax = vals[np.argmin(vals)], vals[np.argmax(vals)]
+        if vmax == vmin:
+            # no spread on this objective; contribute nothing
+            continue
+        # boundary points
+        distance[order[0]] = float('inf')
+        distance[order[-1]] = float('inf')
+        # internal points
+        for k in range(1, Nf - 1):
+            i_prev, i_next = order[k - 1], order[k + 1]
+            i_mid = order[k]
+            gap = (objs[i_next][m] - objs[i_prev][m]) / (vmax - vmin)
+            distance[i_mid] += gap
+    return distance
+
+
+def tournament_select_mo(pop: List['MDPNetwork'],
+                         rng: np.random.Generator,
+                         k: int,
+                         ranks: List[int],
+                         crowding: Dict[int, float]) -> 'MDPNetwork':
+    """Tournament by (rank asc, crowding desc)."""
     idxs = rng.choice(len(pop), size=k, replace=False)
-    best_idx = int(idxs[0])
-    best_score = scores[best_idx]
-    for i in idxs[1:]:
-        si = scores[int(i)]
-        if si > best_score:
-            best_idx = int(i)
-            best_score = si
-    return pop[best_idx]
+    best = int(idxs[0])
+    for j in idxs[1:]:
+        j = int(j)
+        if ranks[j] < ranks[best]:
+            best = j
+        elif ranks[j] == ranks[best] and crowding.get(j, 0.0) > crowding.get(best, 0.0):
+            best = j
+    return pop[best]
 
 
 # -------------------------------
-# Parallel scoring workers (name-based only)
+# Parallel scoring workers (multi-objective)
 # -------------------------------
 
-def _score_worker_by_name(payload: Tuple[Dict[str, Any], str, Tuple[Any, ...], Dict[str, Any], Optional[List[Dict[str, Any]]]]) -> float:
+def _score_worker_multi(payload: Tuple[Dict[str, Any], List[str], Tuple[Any, ...], Dict[str, Any], Optional[List[Dict[str, Any]]]]) -> List[float]:
     """
-    payload = (mdp_portable, score_fn_name, args, kwargs, precomputed_portables)
-    precomputed_portables is a list of dicts produced by Serialisable.to_portable() in main process.
+    payload = (mdp_portable, score_fn_names, args, kwargs, precomputed_portables)
+    Returns a list of floats (objective vector).
     """
-    portable, fn_name, args, kwargs, precomputed_portables = payload
+    portable, fn_names, args, kwargs, precomputed_portables = payload
     mdp = MDPNetwork.from_portable(portable)
-    fn = get_registered_score_fn(fn_name)
-
-    # Inject precomputed into kwargs (non-destructive)
     if precomputed_portables is not None and "precomputed_portables" not in kwargs:
         local_kwargs = dict(kwargs)
         local_kwargs["precomputed_portables"] = precomputed_portables
     else:
         local_kwargs = kwargs
 
-    return float(fn(mdp, *args, **local_kwargs))
+    vals: List[float] = []
+    for name in fn_names:
+        fn = get_registered_score_fn(name)
+        vals.append(float(fn(mdp, *args, **local_kwargs)))
+    return vals
 
 
-def evaluate_mdp_list(
+def evaluate_mdp_objectives(
     mdps: List['MDPNetwork'],
     *,
-    score_fn_name: str,
+    score_fn_names: List[str],
     n_workers: int,
     score_args: Optional[Tuple[Any, ...]] = None,
     score_kwargs: Optional[Dict[str, Any]] = None,
-    precomputed_portables: Optional[List[Dict[str, Any]]] = None,  # PRECOMPUTE: pass-through
-) -> List[float]:
-    if score_fn_name is None:
-        raise ValueError("score_fn_name is required (parallel-only).")
+    precomputed_portables: Optional[List[Dict[str, Any]]] = None,
+) -> List[List[float]]:
+    if not score_fn_names:
+        raise ValueError("score_fn_names must be a non-empty list (>=1).")
     if n_workers < 1:
         raise ValueError("n_workers must be >= 1.")
     args = score_args or ()
     kwargs = score_kwargs or {}
 
     payloads = [
-        (m.to_portable(), score_fn_name, args, kwargs, precomputed_portables)
+        (m.to_portable(), score_fn_names, args, kwargs, precomputed_portables)
         for m in mdps
     ]
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
-        results = list(ex.map(_score_worker_by_name, payloads))
-    return [float(x) for x in results]
+        results = list(ex.map(_score_worker_multi, payloads))
+    return [list(map(float, r)) for r in results]
 
 
 # -------------------------------
@@ -477,18 +575,11 @@ def evaluate_mdp_list(
 # -------------------------------
 
 def _apply_mutations(ind: 'MDPNetwork', rng: np.random.Generator, whitelist: Set[EdgeTriple], cfg: GAConfig):
-    # Distance-weighted add edge
     for _ in range(cfg.add_edge_attempts_per_child):
         mutation_add_edge(ind, rng, lambda _m, _s, _sp: _dist_from_cfg(ind, _s, _sp, cfg), cfg)
-
-    # Probability local pairwise tweaks
     mutation_prob_pairwise(ind, rng, cfg)
-
-    # Reward small-step (optional)
     if cfg.reward_tweak_edges_per_child > 0:
         mutation_reward_smallstep(ind, rng, cfg)
-
-    # Hard prune of low-prob transitions (optional)
     if cfg.prune_prob_threshold is not None:
         prune_low_prob_transitions(ind, cfg.prune_prob_threshold)
 
@@ -508,7 +599,6 @@ def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         return MDPNetwork.from_portable(p)
 
     if "pa_portable" in payload:
-        # Mate path
         pa = _mk_from_portable(payload["pa_portable"])
         pb = _mk_from_portable(payload["pb_portable"])
         do_crossover: bool = payload["do_crossover"]
@@ -520,38 +610,35 @@ def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         _apply_mutations(child, rng, whitelist, cfg)
         return child.to_portable()
-
     else:
-        # Init path
         ind = _mk_from_portable(payload["base_portable"])
         _apply_mutations(ind, rng, whitelist, cfg)
         return ind.to_portable()
 
 
 # -------------------------------
-# GA main class
+# GA main class (NSGA-II)
 # -------------------------------
 
 class MDPEvolutionGA:
     """
-    GA over MDPNetwork with:
-    - distance-weighted add-edge (directed_prob_distance),
+    NSGA-II over MDPNetwork with:
+    - distance-weighted add-edge,
     - probability pairwise tweaks,
     - reward bounded small-step tweaks,
-    - hard pruning of low-prob transitions (optional),
-    - parallel evaluation and parallel offspring creation only.
+    - optional hard pruning of low-prob transitions,
+    - parallel evaluation and parallel offspring creation.
 
     Precompute notes:
-    - Users may set `self.precompute_hook` to a callable: (MDPNetwork) -> List[Serialisable]
-      OR set `self.precomputed_artifacts` to an already-built list of Serialisable.
-    - We intentionally do NOT place these on GAConfig to keep GAConfig picklable for workers.
+    - Set `self.precomputed_artifacts = [Serialisable, ...]` before run().
+      They are serialized once and broadcast to workers via kwargs["precomputed_portables"].
     """
 
     def __init__(self,
                  base_mdp: 'MDPNetwork',
                  cfg: GAConfig):
-        if cfg.score_fn_name is None:
-            raise ValueError("score_fn_name is required (parallel-only).")
+        if not cfg.score_fn_names or len(cfg.score_fn_names) < 1:
+            raise ValueError("NSGA-II requires score_fn_names (>=1).")
         if cfg.n_workers < 1 or cfg.mutation_n_workers < 1:
             raise ValueError("n_workers and mutation_n_workers must be >= 1.")
         self.cfg = cfg
@@ -564,10 +651,8 @@ class MDPEvolutionGA:
         # Single portable blob for cross-process transport
         self._base_portable = self.base_mdp.to_portable()
 
-        # --- PRECOMPUTE hook slots (simple, main-process only; never sent to workers) ---
+        # Precompute slots
         self.precomputed_artifacts: Optional[List[Serialisable]] = None
-
-        # Will hold the final JSON-friendly list of dicts ready for workers
         self._precomputed_portables: Optional[List[Dict[str, Any]]] = None
 
     # ---------- internal helpers ----------
@@ -581,7 +666,7 @@ class MDPEvolutionGA:
         payloads: List[Dict[str, Any]] = []
         for _ in range(need):
             payloads.append({
-                "cfg": self.cfg,  # GAConfig must remain pickle-friendly
+                "cfg": self.cfg,
                 "whitelist": list(self.whitelist),
                 "seed": int(self.rng.integers(0, 2 ** 63 - 1)),
                 "base_portable": self._base_portable,
@@ -613,23 +698,28 @@ class MDPEvolutionGA:
             children.append(MDPNetwork.from_portable(portable))
         return children
 
-    def _evaluate_population(self, pop: List['MDPNetwork']) -> List[float]:
-        return evaluate_mdp_list(
+    def _evaluate_population(self, pop: List['MDPNetwork']) -> List[List[float]]:
+        return evaluate_mdp_objectives(
             mdps=pop,
-            score_fn_name=self.cfg.score_fn_name,
+            score_fn_names=self.cfg.score_fn_names or [],
             n_workers=self.cfg.n_workers,
             score_args=self.cfg.score_args,
             score_kwargs=self.cfg.score_kwargs,
-            precomputed_portables=self._precomputed_portables,  # PRECOMPUTE: broadcast to workers
+            precomputed_portables=self._precomputed_portables,
         )
 
-    # ---------- public API ----------
+    # ---------- public API (NSGA-II) ----------
 
-    def run(self) -> Tuple['MDPNetwork', float, List[float]]:
-        # ----- PRECOMPUTE: run once (serial, main process) -----
-        # This block is intentionally simple. Users can assign:
-        #   - self.precomputed_artifacts = [obj1, obj2, ...]
-        # If both are None, we skip precompute and workers receive None.
+    def run(self) -> Tuple[List['MDPNetwork'], List[List[float]], List['MDPNetwork'], List[List[float]]]:
+        """
+        Returns:
+            pareto_mdps:  List[MDPNetwork]  -- final non-dominated front (F1)
+            pareto_objs:  List[List[float]] -- objective vectors aligned with pareto_mdps
+            pop:          List[MDPNetwork]  -- final whole population
+            pop_objs:     List[List[float]] -- objective vectors for the final population
+        """
+
+        # ----- PRECOMPUTE (serial) -----
         if self.precomputed_artifacts is not None:
             self._precomputed_portables = [obj.to_portable() for obj in self.precomputed_artifacts]
             print(f"[Precompute] Using provided artifacts: {len(self._precomputed_portables)} item(s).")
@@ -637,77 +727,102 @@ class MDPEvolutionGA:
             self._precomputed_portables = None
             print("[Precompute] Skipped (no artifacts).")
 
-        # ----- Init population & evaluate -----
+        # ----- Init -----
         pop = self._init_population()
-        scores = self._evaluate_population(pop)
+        objs = self._evaluate_population(pop)
+        M = len(objs[0]) if objs else 0
 
-        best_idx = int(np.argmax(scores))
-        best_mdp = pop[best_idx].clone()
-        best_score = float(scores[best_idx])
-        history: List[float] = [best_score]
+        # Simple summary
+        def _summ(o: List[List[float]]) -> str:
+            if not o: return "NA"
+            arr = np.array(o, dtype=float)  # N x M
+            stats = []
+            for m in range(arr.shape[1]):
+                stats.append(f"obj{m}: min={arr[:,m].min():.4f} mean={arr[:,m].mean():.4f} max={arr[:,m].max():.4f}")
+            return " | ".join(stats)
 
-        print(f"[Init] pop={len(pop)} | best={best_score:.6f} | "
-              f"mean={np.mean(scores):.6f} | std={np.std(scores):.6f}")
+        print(f"[Init] pop={len(pop)} | { _summ(objs) }")
+
+        # Prepare selection metrics for parent tournaments
+        fronts = fast_non_dominated_sort(objs)
+        ranks = [0] * len(pop)
+        for r, F in enumerate(fronts):
+            for i in F:
+                ranks[i] = r
+        crowding: Dict[int, float] = {}
+        for F in fronts:
+            crowding.update(compute_crowding_distance(objs, F))
 
         # ----- Generations -----
         for gen in range(self.cfg.generations):
-            # Elitism
-            elite_count = min(self.cfg.elitism_num, len(pop))
-            elite_idxs = list(np.argsort(scores)[-elite_count:])
-            elites = [pop[int(i)].clone() for i in elite_idxs]
+            # Parent selection by (rank,crowding) tournament
+            target = self.cfg.population_size
+            parents_pairs: List[Tuple[MDPNetwork, MDPNetwork]] = []
+            for _ in range(target):
+                p1 = tournament_select_mo(pop, self.rng, self.cfg.tournament_k, ranks, crowding)
+                p2 = tournament_select_mo(pop, self.rng, self.cfg.tournament_k, ranks, crowding)
+                parents_pairs.append((p1, p2))
 
-            # Children via parallel path
-            target = self.cfg.population_size - elite_count
-            if target <= 0:
-                new_pop: List[MDPNetwork] = elites
-            else:
-                parents_pairs: List[Tuple[MDPNetwork, MDPNetwork]] = []
-                for _ in range(target):
-                    p1 = tournament_select(pop, scores, self.rng, self.cfg.tournament_k)
-                    p2 = tournament_select(pop, scores, self.rng, self.cfg.tournament_k)
-                    parents_pairs.append((p1, p2))
+            # Variation -> children
+            children = self._make_children_parallel(parents_pairs)
+            child_objs = self._evaluate_population(children)
 
-                children = self._make_children_parallel(parents_pairs)
-                new_pop = elites + children
+            # NSGA-II union selection
+            union_pop = pop + children
+            union_objs = objs + child_objs
 
-            # Next generation
-            pop = new_pop
-            scores = self._evaluate_population(pop)
+            union_fronts = fast_non_dominated_sort(union_objs)
+            new_pop: List[MDPNetwork] = []
+            new_objs: List[List[float]] = []
 
-            # Track best
-            gen_best_idx = int(np.argmax(scores))
-            gen_best_score = float(scores[gen_best_idx])
+            for F in union_fronts:
+                if len(new_pop) + len(F) <= self.cfg.population_size:
+                    new_pop.extend([union_pop[i] for i in F])
+                    new_objs.extend([union_objs[i] for i in F])
+                else:
+                    # need to select a subset by crowding distance
+                    dist = compute_crowding_distance(union_objs, F)
+                    sorted_F = sorted(F, key=lambda i: dist.get(i, 0.0), reverse=True)
+                    remain = self.cfg.population_size - len(new_pop)
+                    chosen = sorted_F[:remain]
+                    new_pop.extend([union_pop[i] for i in chosen])
+                    new_objs.extend([union_objs[i] for i in chosen])
+                    break
 
-            improved = gen_best_score > best_score
-            if improved:
-                best_score = gen_best_score
-                best_mdp = pop[gen_best_idx].clone()
+            pop, objs = new_pop, new_objs
 
-            history.append(best_score)
+            # update selection metrics for next generation
+            fronts = fast_non_dominated_sort(objs)
+            ranks = [0] * len(pop)
+            for r, F in enumerate(fronts):
+                for i in F:
+                    ranks[i] = r
+            crowding = {}
+            for F in fronts:
+                crowding.update(compute_crowding_distance(objs, F))
 
-            print(f"[Gen {gen + 1}/{self.cfg.generations}] elites={elite_count} | "
-                  f"gen_best={gen_best_score:.6f} | mean={np.mean(scores):.6f} | "
-                  f"std={np.std(scores):.6f} | best_so_far={best_score:.6f} | "
-                  f"improved={'YES' if improved else 'no'}")
+            print(f"[Gen {gen + 1}/{self.cfg.generations}] pop={len(pop)} | { _summ(objs) } | F1={len(fronts[0])}")
 
-        return best_mdp, best_score, history
+        # Final Pareto front
+        final_fronts = fast_non_dominated_sort(objs)
+        F1 = final_fronts[0] if final_fronts else list(range(len(pop)))
+        pareto_mdps = [pop[i].clone() for i in F1]
+        pareto_objs = [objs[i][:] for i in F1]
+        return pareto_mdps, pareto_objs, pop, objs
 
 
 # -------------------------------
-# Example score fn + registration
+# Example objective fns (templates) + registration
 # -------------------------------
 
-def example_score_fn(mdp: 'MDPNetwork', *args, **kwargs) -> float:
+def obj_reward_sum(mdp: 'MDPNetwork', *args, **kwargs) -> float:
     """
-    Example: simple sum of expected rewards over all (s, a), skipping terminals.
+    Template #1 (maximize):
+    Sum of expected immediate rewards over all (s,a), skipping terminals.
     Demonstrates how to read precomputed_portables if present.
     """
     _pre = kwargs.get("precomputed_portables", None)  # List[dict] or None
-    # If you had a QTable portable at _pre[0], you could hydrate it here, e.g.:
-    # from mdp_network.mdp_tables import QTable
-    # q = QTable.from_portable(_pre[0])  # if your QTable implements Serialisable
-    # ... use q in scoring ...
-
+    # If you stored a Serialisable QTable/ValueTable in _pre, you could hydrate and use it here.
     total = 0.0
     for s in mdp.states:
         if s in mdp.terminal_states:
@@ -717,7 +832,24 @@ def example_score_fn(mdp: 'MDPNetwork', *args, **kwargs) -> float:
     return float(total)
 
 
-register_score_fn("example", example_score_fn)
+def obj_sparse_structure(mdp: 'MDPNetwork', *args, **kwargs) -> float:
+    """
+    Template #2 (maximize):
+    Encourage sparsity: higher is better when there are fewer transitions.
+    We simply take negative of the total number of (s,a->sp) transitions.
+    """
+    num = 0
+    for s in mdp.states:
+        for sp in mdp.graph.successors(s):
+            edata = mdp.graph[s][sp]
+            if "transitions" in edata:
+                num += len(edata["transitions"])  # count actions with a transition to sp
+    return -float(num)
+
+
+# Register templates
+register_score_fn("obj_reward_sum", obj_reward_sum)
+register_score_fn("obj_sparse_structure", obj_sparse_structure)
 
 
 if __name__ == "__main__":
@@ -750,43 +882,47 @@ if __name__ == "__main__":
     }
     base_mdp = MDPNetwork(config_data=cfg_demo)
 
-    # Ensure example score fn is registered
-    register_score_fn("example", example_score_fn)
+    # Ensure templates are registered
+    register_score_fn("obj_reward_sum", obj_reward_sum)
+    register_score_fn("obj_sparse_structure", obj_sparse_structure)
 
-    # ----- GA config -----
+    # ----- GA config (NSGA-II with 2 objectives) -----
     cfg = GAConfig(
         population_size=64,
         generations=10,
         tournament_k=2,
-        elitism_num=4,
+        elitism_num=4,   # kept for compatibility; NSGA-II does union selection
         crossover_rate=1.0,
+
         allow_self_loops=True,
         min_out_degree=1,
         max_out_degree=6,
         prob_floor=1e-6,
+
         add_edge_attempts_per_child=1,
         epsilon_new_prob=0.02,
         gamma_sample=1.0,
         gamma_prob=0.0,
+
         prune_prob_threshold=1e-3,
+
         prob_tweak_actions_per_child=8,
         prob_pairwise_step=0.02,
+
         reward_tweak_edges_per_child=16,
         reward_k_percent=0.02,
         reward_ref_floor=1e-3,
-        reward_min=None,
-        reward_max=None,
 
-        # Parallel scoring (name-based only)
+        # Parallel scoring (multi-objective)
         n_workers=max(1, os.cpu_count() or 1),
-        score_fn_name="example",
+        score_fn_names=["obj_reward_sum", "obj_sparse_structure"],  # add more names to add more objectives
         score_args=None,
         score_kwargs=None,
 
         # Parallel offspring
         mutation_n_workers=max(1, os.cpu_count() or 1),
 
-        # Distance params (used both in main & workers)
+        # Distance params
         dist_max_hops=3,
         dist_node_cap=1000,
         dist_weight_eps=1e-6,
@@ -795,19 +931,12 @@ if __name__ == "__main__":
         seed=123,
     )
 
-    ga = MDPEvolutionGA(
-        base_mdp=base_mdp,
-        cfg=cfg,
-    )
+    ga = MDPEvolutionGA(base_mdp=base_mdp, cfg=cfg)
 
-    best_mdp, best_score, history = ga.run()
-    print("\n=== GA finished ===")
-    print("Best score:", best_score)
-    print("History:", [round(x, 6) for x in history])
+    pareto_mdps, pareto_objs, pop, pop_objs = ga.run()
 
-    # Optionally export the best model
-    out_dir = "./outputs_ga_demo"
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "best_mdp_demo.json")
-    best_mdp.export_to_json(out_path)
-    print("Saved best MDP to:", out_path)
+    print("\n=== NSGA-II finished ===")
+    print(f"Pareto front size = {len(pareto_mdps)}")
+    for i, (o) in enumerate(pareto_objs[:10]):
+        print(f"  PF[{i}] objs = {list(map(lambda x: round(x, 6), o))}")
+    print(f"Final population size = {len(pop)}")
