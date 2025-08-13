@@ -2,9 +2,8 @@
 # English comments only. Minimal, self-contained sanity test for NSGA-II GA.
 # - Builds an MDPNetwork from CustomisedFrozenLakeEnv (8x8, slippery)
 # - Precomputes baseline (policy + occupancy) on the base MDP (serial)
-# - Runs the GA (NSGA-II) with two objectives:
-#       1) obj_policy_kl_similarity  (maximize -KL)
-#       2) obj_perf_integral         (maximize performance integral)
+# - Runs the GA (NSGA-II) with a single multi-output objective:
+#       obj_multi_kl_and_perf -> returns [ -KL, performance_integral ]
 # - Uses process pool parallel scoring to validate the path
 # - Prints Pareto front info and simple assertions
 
@@ -16,8 +15,7 @@ from mdp_network.ga_mdp_search import (
     MDPEvolutionGA,
     register_score_fn,
     evaluate_mdp_objectives,
-    obj_policy_kl_similarity,
-    obj_perf_integral,
+    obj_multi_kl_and_perf,   # single multi-output objective
 )
 
 from mdp_network.mdp_network import MDPNetwork
@@ -45,16 +43,15 @@ if __name__ == "__main__":
     mdp = build_frozenlake_mdp_via_env(map_name="8x8", is_slippery=True)
     print(f"|S|={len(mdp.states)}  |A|={mdp.num_actions}  terminals={len(mdp.terminal_states)}")
 
-    # Register objective functions under names for parallel workers.
-    register_score_fn("obj_policy_kl_similarity", obj_policy_kl_similarity)
-    register_score_fn("obj_perf_integral", obj_perf_integral)
+    # Register the single multi-output objective for parallel workers.
+    register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
 
     workers = os.cpu_count()
 
-    # GA config tuned small for a quick sanity run (feel free to increase later)
+    # GA config (kept similar to your previous test; tweak down for faster runs if needed)
     cfg = GAConfig(
         population_size=512,
-        generations=64,
+        generations=256,
         tournament_k=2,
         elitism_num=64,
         crossover_rate=0.5,
@@ -70,13 +67,13 @@ if __name__ == "__main__":
         prune_prob_threshold=1e-3,
         prob_tweak_actions_per_child=50,
         prob_pairwise_step=0.05,
-        reward_tweak_edges_per_child=5,
+        reward_tweak_edges_per_child=0,  # don't change the reward
         reward_k_percent=0.05,
         reward_ref_floor=1e-3,
 
-        # Parallel scoring (multi-objective)
+        # Parallel scoring (multi-objective via single multi-output fn)
         n_workers=workers,
-        score_fn_names=["obj_policy_kl_similarity", "obj_perf_integral"],
+        score_fn_names=["obj_multi_kl_and_perf"],
         score_args=None,
         score_kwargs=None,
 
@@ -89,9 +86,9 @@ if __name__ == "__main__":
         dist_weight_eps=1e-6,
         dist_unreachable=1e6,
 
-        # VI / softmax / KL / perf defaults (can tweak)
+        # VI / softmax / KL / perf defaults
         vi_gamma=0.99,
-        vi_theta=1e-4,
+        vi_theta=1e-3,
         vi_max_iterations=1000,
         policy_temperature=1.0,
         kl_delta=1e-3,
@@ -144,7 +141,10 @@ if __name__ == "__main__":
     )
     print("Batch objective vectors:", [[round(x, 6) for x in v] for v in obj_vecs])
     assert isinstance(obj_vecs, list) and len(obj_vecs) == len(batch)
-    assert all(isinstance(v, list) and len(v) == len(cfg.score_fn_names or []) for v in obj_vecs)
+    # multi-output fn returns two objectives; assert via the observed dimension
+    expected_dim = len(obj_vecs[0])
+    assert expected_dim == 2
+    assert all(isinstance(v, list) and len(v) == expected_dim for v in obj_vecs)
 
     # ----- Run GA (NSGA-II) -----
     print("\n=== Run NSGA-II GA for a few generations ===")
@@ -159,14 +159,14 @@ if __name__ == "__main__":
     # Simple sanity assertions
     assert all(isinstance(m, MDPNetwork) for m in pareto_mdps)
     assert len(pareto_objs) == len(pareto_mdps)
-    assert all(len(v) == len(cfg.score_fn_names or []) for v in pareto_objs)
+    assert all(len(v) == expected_dim for v in pareto_objs)
     assert len(pareto_mdps) >= 1
 
     print("\nOK: NSGA-II GA ran successfully on FrozenLake 8x8 with parallel scoring & offspring.")
 
     # Save the Pareto front MDPs as JSON (save top K or all)
     os.makedirs(out_dir, exist_ok=True)
-    K = min(5, len(pareto_mdps))
+    K = len(pareto_mdps)
     for i in range(K):
         out_path = os.path.join(out_dir, f"pareto_{i}_objs_{'_'.join(f'{v:.4f}' for v in pareto_objs[i])}.json")
         pareto_mdps[i].export_to_json(out_path)

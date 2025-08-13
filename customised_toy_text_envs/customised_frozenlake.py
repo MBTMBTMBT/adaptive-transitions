@@ -1,6 +1,11 @@
-from typing import Tuple, Dict, Any, List
+import os
+from typing import Tuple, Dict, Any, List, Union
 from gymnasium.core import ObsType
 import numpy as np
+from matplotlib import pyplot as plt, cm
+from matplotlib.patches import FancyArrowPatch, Arc
+from matplotlib import patheffects as pe
+import matplotlib.colors as mcolors
 
 from mdp_network.mdp_network import MDPNetwork
 from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv
@@ -265,3 +270,208 @@ class CustomisedFrozenLakeEnv(FrozenLakeEnv, CustomisableEnvAbs):
 
     def _rc_from_state(self, s: int) -> Tuple[int, int]:
         return int(s) // self.ncol, int(s) % self.ncol
+
+
+# Compatible action-name resolver (list/tuple/dict)
+def _get_action_name(a: int) -> str:
+    try:
+        if isinstance(ACTION_NAMES, dict):
+            return str(ACTION_NAMES.get(a, a))
+        elif isinstance(ACTION_NAMES, (list, tuple)) and 0 <= a < len(ACTION_NAMES):
+            return str(ACTION_NAMES[a])
+    except Exception:
+        pass
+    return str(a)
+
+
+def plot_frozenlake_transition_overlays(
+    env: Union[FrozenLakeEnv, CustomisedFrozenLakeEnv],
+    mdp: MDPNetwork,
+    output_dir: str,
+    filename_prefix: str = "frozenlake_transitions",
+    min_prob: float = 0.05,
+    alpha: float = 0.90,              # constant transparency
+    annotate: bool = True,            # draw probability labels
+    show_self_loops: bool = False,    # draw s->s arcs
+    dpi: int = 200,
+    TARGET_CELL_PX: int = 240,        # target cell size in pixels for readability
+    ARROW_SCALE: float = 0.04,        # arrow linewidth as fraction of cell size
+    FONT_SCALE: float = 0.16,         # label font size as fraction of cell size
+    cmap_name: str = "viridis",       # colormap for probability -> color
+    GAMMA: float = 1.0                # gamma correction for probability mapping
+):
+    """
+    Draw per-action overlays of MDP transition probabilities on a FrozenLake board.
+    Visual encoding:
+      - Arrow color comes from `cmap_name` based on probability p.
+      - Arrow thickness is fixed and thin for clarity.
+      - Board image is upscaled to make cells large enough for arrows and labels.
+    """
+
+    # -------- Basic checks --------
+    assert hasattr(env, "nrow") and hasattr(env, "ncol"), "Env must have nrow/ncol."
+    nrow, ncol = env.nrow, env.ncol
+    nS = nrow * ncol
+
+    if set(mdp.states) != set(range(nS)):
+        print("[WARN] mdp.states does not match 0..nS-1")
+
+    if getattr(mdp, "num_actions", 4) != 4:
+        raise ValueError("This visualizer assumes exactly 4 actions (LEFT/DOWN/RIGHT/UP).")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # -------- Grab board background --------
+    prev_mode = getattr(env, "render_mode", None)
+    env.render_mode = "rgb_array"
+    try:
+        env.reset()
+        if hasattr(env, "initial_state_distrib"):
+            env.s = int(np.argmax(env.initial_state_distrib))
+    except Exception:
+        pass
+
+    bg_img = env.render()
+    if bg_img is None:
+        try:
+            bg_img = env._render_gui("rgb_array")  # type: ignore
+        except Exception as e:
+            raise RuntimeError("Failed to render background.") from e
+    env.render_mode = prev_mode
+
+    H, W = bg_img.shape[:2]
+    cell_w, cell_h = W / ncol, H / nrow
+
+    # -------- Auto upscale board for readability --------
+    upscale = int(np.ceil(TARGET_CELL_PX / min(cell_w, cell_h)))
+    upscale = max(1, min(upscale, 4))
+    if upscale > 1:
+        try:
+            from PIL import Image
+            bg_img = np.array(
+                Image.fromarray(bg_img).resize((int(W * upscale), int(H * upscale)), resample=Image.BICUBIC)
+            )
+        except Exception:
+            # fallback: nearest-neighbor upscale
+            bg_img = np.kron(bg_img, np.ones((upscale, upscale, 1), dtype=bg_img.dtype))
+        H, W = bg_img.shape[:2]
+        cell_w *= upscale
+        cell_h *= upscale
+
+    # -------- Coordinate and style helpers --------
+    def state_to_center_xy(s: int):
+        """Convert state index to pixel coordinates of cell center."""
+        r, c = divmod(s, ncol)
+        return (c + 0.5) * cell_w, (r + 0.5) * cell_h
+
+    def px_to_pt(px: float):
+        """Convert pixels to points given figure DPI."""
+        return float(px) * 72.0 / float(dpi)
+
+    cell_min = min(cell_w, cell_h)
+
+    # arrow and label style parameters
+    ARROW_LW_PT = px_to_pt(max(1.0, ARROW_SCALE * cell_min))
+    mutation_scale = px_to_pt(0.45 * cell_min)
+    shrink_pt = px_to_pt(0.18 * cell_min)
+    font_pt = max(6.0, min(12.0, px_to_pt(FONT_SCALE * cell_min)))
+    title_pt = max(9.0, min(14.0, px_to_pt(0.18 * cell_min)))
+
+    # text style for labels
+    text_bbox = dict(facecolor="white", alpha=0.50, edgecolor="none", boxstyle="round,pad=0.15")
+    text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
+
+    # probability -> RGBA color using colormap
+    cmap = cm.get_cmap(cmap_name)
+    norm = mcolors.PowerNorm(gamma=GAMMA, vmin=0.0, vmax=1.0)  # NEW: gamma-consistent normalization
+    def prob_to_color(p: float):
+        """Map probability to RGBA using cmap and gamma-corrected norm."""
+        return cmap(norm(np.clip(p, 0, 1)))
+
+    def draw_self_loop(ax, x, y, p):
+        """Draw a small self-loop arc with color from probability."""
+        color = prob_to_color(p)
+        radius = 0.28 * cell_min
+        arc = Arc((x + 0.4 * radius, y - 0.4 * radius),
+                  width=radius, height=radius,
+                  angle=0, theta1=30, theta2=320,
+                  linewidth=ARROW_LW_PT, color=color, alpha=alpha, zorder=3)
+        ax.add_patch(arc)
+        arr = FancyArrowPatch(
+            (x + 0.78 * radius, y - 0.55 * radius),
+            (x + 0.63 * radius, y - 0.45 * radius),
+            arrowstyle="->",
+            mutation_scale=mutation_scale,
+            linewidth=ARROW_LW_PT,
+            facecolor=color, edgecolor=color,
+            alpha=alpha, zorder=4, shrinkA=0.0, shrinkB=0.0
+        )
+        ax.add_patch(arr)
+
+    # -------- Draw one figure per action --------
+    for a in range(4):
+        fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi)
+        ax = plt.gca()
+        ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f"Action: {_get_action_name(a)}", fontsize=title_pt)
+
+        # NEW: add a colorbar legend for probability
+        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])  # required by older Matplotlib versions
+        cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
+        cbar.set_label("Transition probability", fontsize=max(8, int(title_pt * 0.7)))
+        cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
+
+        for s in range(nS):
+            probs = mdp.get_transition_probabilities(s, a)
+            if not probs:
+                continue
+            x0, y0 = state_to_center_xy(s)
+
+            for sp, p in probs.items():
+                try:
+                    sp_int = int(sp)
+                except Exception:
+                    continue
+                if p < min_prob:
+                    continue
+
+                x1, y1 = state_to_center_xy(sp_int)
+                color = prob_to_color(p)
+
+                if sp_int == s:
+                    if show_self_loops:
+                        draw_self_loop(ax, x0, y0, p)
+                        if annotate:
+                            ax.text(x0, y0 - 0.33 * cell_h, f"{p:.2f}",
+                                    ha="center", va="center", fontsize=font_pt,
+                                    bbox=text_bbox, alpha=alpha, zorder=5,
+                                    path_effects=text_effects)
+                    continue
+
+                arrow = FancyArrowPatch(
+                    (x0, y0), (x1, y1),
+                    arrowstyle="->", mutation_scale=mutation_scale,
+                    linewidth=ARROW_LW_PT,
+                    facecolor=color, edgecolor=color,
+                    alpha=alpha, zorder=3,
+                    shrinkA=shrink_pt, shrinkB=shrink_pt
+                )
+                ax.add_patch(arrow)
+
+                if annotate:
+                    mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                    ax.text(mx, my, f"{p:.2f}",
+                            ha="center", va="center", fontsize=font_pt,
+                            bbox=text_bbox, alpha=alpha, zorder=4,
+                            path_effects=text_effects)
+
+        out_name = f"{filename_prefix}_a{a}_{_get_action_name(a).lower()}.png"
+        plt.savefig(os.path.join(output_dir, out_name), bbox_inches="tight", pad_inches=0.05, dpi=dpi)
+        plt.close(fig)
+
+    print(f"[OK] Saved overlays to: {os.path.abspath(output_dir)}")

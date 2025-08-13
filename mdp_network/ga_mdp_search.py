@@ -2,14 +2,13 @@
 # Genetic search system for MDPNetwork (structure + probability + reward)
 # with optional parallel scoring and parallel offspring mutation using a process pool (Linux, Python 3.10).
 #
-# NSGA-II multi-objective version + simple serial precompute:
+# NSGA-II multi-objective version + multi-output score support:
+# - A score function may return either a single float OR a sequence of floats (objectives).
+# - evaluate_mdp_objectives concatenates outputs from one or more registered score functions.
 # - Precompute on the base MDP: Value Iteration -> Q -> softmax Policy (temperature) + Occupancy
-# - Broadcast those artifacts to scoring workers in kwargs["precomputed_portables"]
-# - Two objective templates:
-#     1) obj_policy_kl_similarity: -KL between (precomputed policy, occupancy) and (current policy, occupancy)
-#     2) obj_perf_integral:         performance curve integral using random prior vs target policy (current MDP)
-#
-# Minimal-invasive changes: keep your process model and APIs; add a few GAConfig fields.
+#   and broadcast them to workers via kwargs["precomputed_portables"].
+# - A combined score fn `obj_multi_kl_and_perf` computes (1) -KL(policy,occ) similarity
+#   to the baseline, and (2) performance integral, with a single VI on the current MDP.
 
 from __future__ import annotations
 
@@ -35,7 +34,8 @@ from mdp_network import MDPNetwork
 State = int
 Action = int
 EdgeTriple = Tuple[State, Action, State]
-ScoreFn = Callable[['MDPNetwork', Any], float]
+# A score function may return a single float OR a sequence (list/tuple/ndarray) of floats.
+ScoreFn = Callable[['MDPNetwork', Any], Any]
 DistanceFn = Callable[['MDPNetwork', State, State], float]
 
 # -------------------------------
@@ -177,19 +177,18 @@ class GAConfig:
     # Randomness
     seed: Optional[int] = None
 
-    # --------- NEW: algorithms/score parameters (with sensible defaults) ---------
-    # Value-iteration (also used for occupancy unless perf_* overrides)
+    # --------- Algorithm/score parameters ---------
     vi_gamma: float = 0.99
     vi_theta: float = 1e-6
     vi_max_iterations: int = 1000
 
-    # Softmax policy temperature for q_table_to_policy
+    # Softmax temperature for q_table_to_policy
     policy_temperature: float = 1.0
 
-    # KL small constant
+    # KL epsilon
     kl_delta: float = 1e-3
 
-    # Performance curve & integral params
+    # Performance curve params
     perf_numpoints: int = 100
     perf_gamma: Optional[float] = None
     perf_theta: Optional[float] = None
@@ -472,21 +471,36 @@ def tournament_select_mo(pop: List['MDPNetwork'],
     return pop[best]
 
 # -------------------------------
-# Parallel scoring (multi-objective)
+# Parallel scoring (multi-output aware)
 # -------------------------------
 
+def _flatten_objectives(val: Any) -> List[float]:
+    """Normalize a score fn return to a list[float]."""
+    if isinstance(val, (list, tuple)):
+        return [float(x) for x in val]
+    if isinstance(val, np.ndarray):
+        return [float(x) for x in val.ravel().tolist()]
+    # assume scalar
+    return [float(val)]
+
 def _score_worker_multi(payload: Tuple[Dict[str, Any], List[str], Tuple[Any, ...], Dict[str, Any], Optional[List[Dict[str, Any]]]]) -> List[float]:
+    """
+    payload = (mdp_portable, score_fn_names, args, kwargs, precomputed_portables)
+    Returns a list of floats (objective vector). Each function may return a float or a sequence of floats.
+    """
     portable, fn_names, args, kwargs, precomputed_portables = payload
     mdp = MDPNetwork.from_portable(portable)
     if precomputed_portables is not None and "precomputed_portables" not in kwargs:
         local_kwargs = dict(kwargs); local_kwargs["precomputed_portables"] = precomputed_portables
     else:
         local_kwargs = kwargs
-    vals: List[float] = []
+
+    out: List[float] = []
     for name in fn_names:
         fn = get_registered_score_fn(name)
-        vals.append(float(fn(mdp, *args, **local_kwargs)))
-    return vals
+        val = fn(mdp, *args, **local_kwargs)
+        out.extend(_flatten_objectives(val))
+    return out
 
 def evaluate_mdp_objectives(
     mdps: List['MDPNetwork'],
@@ -546,6 +560,7 @@ def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 class MDPEvolutionGA:
     """
     NSGA-II on MDPNetwork with optional serial precompute (policy+occupancy) broadcast to workers.
+    Score functions may return a single float or a sequence of floats (multi-output).
     """
 
     def __init__(self, base_mdp: 'MDPNetwork', cfg: GAConfig):
@@ -735,89 +750,74 @@ class MDPEvolutionGA:
         return pareto_mdps, pareto_objs, pop, objs
 
 # -------------------------------
-# Objective functions required by your spec
+# Combined multi-output objective function
 # -------------------------------
 
-def obj_policy_kl_similarity(mdp: 'MDPNetwork', *args, **kwargs) -> float:
+def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     """
-    Maximize (-KL) between the baseline (precomputed) and the current MDP:
-    - Baseline: policy1, occupancy1 come from kwargs["precomputed_portables"]
-    - Current:  run VI -> Q -> softmax policy2 (temperature), then occupancy2
-    Returns: negative KL (so that larger is better => more similar).
+    Returns two objectives [ -KL, performance_integral ] for the CURRENT MDP.
+    Shared computation (single VI -> policy -> occupancy) to avoid duplicate work.
+    Uses baseline (policy, occupancy) from kwargs["precomputed_portables"] for KL.
     """
-    # Read algorithm params
+    # VI / policy params
     gamma = float(kwargs.get("vi_gamma", 0.99))
     theta = float(kwargs.get("vi_theta", 1e-6))
     max_iter = int(kwargs.get("vi_max_iterations", 1000))
     temperature = float(kwargs.get("policy_temperature", 1.0))
     delta = float(kwargs.get("kl_delta", 1e-3))
 
-    # Rebuild baseline artifacts
-    _pre = kwargs.get("precomputed_portables", None)
+    # Perf params (fallback to VI params)
+    pgamma = float(kwargs.get("perf_gamma", gamma))
+    ptheta = float(kwargs.get("perf_theta", theta))
+    pmax_iter = int(kwargs.get("perf_max_iterations", max_iter))
+    numpoints = int(kwargs.get("perf_numpoints", 100))
+
+    # Baseline artifacts (from precompute)
     base_policy = None
     base_occupancy = None
+    _pre = kwargs.get("precomputed_portables", None)
     if _pre and len(_pre) >= 2:
         base_policy = PolicyTable.from_portable(_pre[0])
         base_occupancy = ValueTable.from_portable(_pre[1])
 
-    # Current MDP solve
-    V2, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
+    # Current MDP solve once
+    _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
     policy2: PolicyTable = q_table_to_policy(Q2, states=list(mdp.states),
                                              num_actions=mdp.num_actions,
                                              temperature=temperature)
-    occupancy2: ValueTable = compute_occupancy_measure(mdp, policy2, gamma=gamma, theta=theta, max_iterations=max_iter)
+    occupancy2: ValueTable = compute_occupancy_measure(mdp, policy=policy2,
+                                                       gamma=gamma, theta=theta, max_iterations=max_iter)
 
-    # If baseline missing (shouldn't happen if GA.run() did precompute), gracefully fallback to 0 loss
-    if base_policy is None or base_occupancy is None:
-        return 0.0
+    # Objective 1: -KL similarity to baseline (if baseline missing -> 0.0)
+    if base_policy is not None and base_occupancy is not None:
+        kl = kl_policies(
+            policy1=base_policy,
+            occupancy1=base_occupancy,
+            policy2=policy2,
+            occupancy2=occupancy2,
+            delta=delta,
+        )
+        obj1 = -float(kl)
+    else:
+        obj1 = 0.0
 
-    kl = kl_policies(
-        policy1=base_policy,
-        occupancy1=base_occupancy,
-        policy2=policy2,
-        occupancy2=occupancy2,
-        delta=delta,
-    )
-    return -float(kl)  # maximize similarity
-
-def obj_perf_integral(mdp: 'MDPNetwork', *args, **kwargs) -> float:
-    """
-    Maximize the integral under performance curve:
-    - Target policy: VI -> Q -> softmax on the CURRENT MDP.
-    - Prior policy:  random policy on the CURRENT MDP.
-    """
-    # Target via VI
-    vi_gamma = float(kwargs.get("vi_gamma", 0.99))
-    vi_theta = float(kwargs.get("vi_theta", 1e-6))
-    vi_max_iter = int(kwargs.get("vi_max_iterations", 1000))
-    temperature = float(kwargs.get("policy_temperature", 1.0))
-
-    # Perf params (fallback to VI params)
-    pgamma = float(kwargs.get("perf_gamma", vi_gamma))
-    ptheta = float(kwargs.get("perf_theta", vi_theta))
-    pmax_iter = int(kwargs.get("perf_max_iterations", vi_max_iter))
-    numpoints = int(kwargs.get("perf_numpoints", 100))
-
-    V, Q = optimal_value_iteration(mdp, gamma=vi_gamma, theta=vi_theta, max_iterations=vi_max_iter)
-    target_policy: PolicyTable = q_table_to_policy(Q, states=list(mdp.states),
-                                                   num_actions=mdp.num_actions,
-                                                   temperature=temperature)
+    # Objective 2: performance curve integral (random prior vs current target policy)
     prior_policy: PolicyTable = create_random_policy(mdp)
-
     _curve, integral = performance_curve_and_integral(
         prior_policy=prior_policy,
-        target_policy=target_policy,
+        target_policy=policy2,
         mdp_network=mdp,
         numpoints=numpoints,
         gamma=pgamma,
         theta=ptheta,
         max_iterations=pmax_iter,
     )
-    return float(integral)
+    obj2 = float(integral)
 
-# Register the two objectives
-register_score_fn("obj_policy_kl_similarity", obj_policy_kl_similarity)
-register_score_fn("obj_perf_integral", obj_perf_integral)
+    return [obj1, obj2]
+
+# Register the combined multi-output objective
+register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
 
 # -------------------------------
 # Tiny demo
@@ -841,7 +841,7 @@ if __name__ == "__main__":
     }
     base_mdp = MDPNetwork(config_data=cfg_demo)
 
-    # NSGA-II with your two objectives
+    # NSGA-II with the combined objective
     cfg = GAConfig(
         population_size=64,
         generations=8,
@@ -861,7 +861,7 @@ if __name__ == "__main__":
 
         # Parallel
         n_workers=max(1, os.cpu_count() or 1),
-        score_fn_names=["obj_policy_kl_similarity", "obj_perf_integral"],
+        score_fn_names=["obj_multi_kl_and_perf"],  # single fn; returns two objectives
         mutation_n_workers=max(1, os.cpu_count() or 1),
 
         # VI / policy / KL / perf params
@@ -871,9 +871,9 @@ if __name__ == "__main__":
         policy_temperature=1.0,
         kl_delta=1e-3,
         perf_numpoints=64,
-        perf_gamma=None,          # None -> fall back to vi_gamma
-        perf_theta=None,          # None -> fall back to vi_theta
-        perf_max_iterations=None, # None -> fall back to vi_max_iterations
+        perf_gamma=None,
+        perf_theta=None,
+        perf_max_iterations=None,
 
         seed=123,
     )
