@@ -44,16 +44,20 @@ if __name__ == "__main__":
 
     workers = os.cpu_count()
 
-    # Register the multi-output objective with per-function constants.
-    # You can tweak blend_weight here without touching the GAConfig.
-    register_score_fn("obj_multi_perf", obj_multi_perf, const={"blend_weight": 0.99})
+    # Use the new policy mixing triple everywhere
+    POLICY_MIXING = (1.0, 0.0, 0.0)
+    POLICY_TIE_TOL = 1e-3  # keep default unless you want to tweak
 
-    # GA config (kept as requested; only added add_edge_allow_out_of_scope=False)
+    # Register the multi-output objective with per-function constants.
+    # You can tweak blend_weight here without touching GAConfig/score_kwargs.
+    register_score_fn("obj_multi_perf", obj_multi_perf)
+
+    # GA config (kept as requested; we pass policy_mixing via score_kwargs so GA uses it)
     cfg = GAConfig(
-        population_size=25,
-        generations=200,
+        population_size=100,
+        generations=250,
         tournament_k=2,
-        elitism_num=5,
+        elitism_num=20,
         crossover_rate=0.5,
 
         allow_self_loops=True,
@@ -78,27 +82,31 @@ if __name__ == "__main__":
         n_workers=workers,
         score_fn_names=["obj_multi_perf"],
         score_args=None,
-        score_kwargs=None,
+        # IMPORTANT: pass policy_mixing (and optional tie_tol) so objectives use the new policy form
+        score_kwargs={
+            "policy_mixing": POLICY_MIXING,
+            "policy_tie_tol": POLICY_TIE_TOL,
+            "blend_weight": 0.8,
+        },
 
         # Parallel offspring
         mutation_n_workers=workers,
 
         # Distance / scope (used by add_edge_allow_out_of_scope)
-        dist_max_hops=10.0,
+        dist_max_hops=10,        # keep integer to avoid surprises in networkx cutoff
         dist_node_cap=64,
         dist_weight_eps=1e-6,
         dist_unreachable=1e9,
 
-        # VI / softmax / KL / perf defaults
+        # VI / policy / perf defaults
         vi_gamma=0.99,
         vi_theta=1e-3,
         vi_max_iterations=1000,
-        policy_temperature=0.01,
-        kl_delta=1e-3,
+        policy_temperature=0.01,   # temperature is still passed to q_table_to_policy
         perf_numpoints=32,
-        perf_gamma=None,          # None -> fallback to vi_gamma
-        perf_theta=None,          # None -> fallback to vi_theta
-        perf_max_iterations=None, # None -> fallback to vi_max_iterations
+        perf_gamma=None,           # None -> fallback to vi_gamma
+        perf_theta=None,           # None -> fallback to vi_theta
+        perf_max_iterations=None,  # None -> fallback to vi_max_iterations
 
         seed=4444,
     )
@@ -111,7 +119,12 @@ if __name__ == "__main__":
         mdp, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
     )
     base_policy = q_table_to_policy(
-        Q, states=list(mdp.states), num_actions=mdp.num_actions, temperature=cfg.policy_temperature
+        Q,
+        states=list(mdp.states),
+        num_actions=mdp.num_actions,
+        mixing=POLICY_MIXING,                 # NEW: use (0.9, 0.0, 0.1)
+        temperature=cfg.policy_temperature,
+        tie_tol=POLICY_TIE_TOL,               # optional: keep default or tweak
     )
     base_occupancy = compute_occupancy_measure(
         mdp, base_policy, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
@@ -128,12 +141,13 @@ if __name__ == "__main__":
         n_workers=cfg.n_workers,
         score_args=cfg.score_args,
         score_kwargs={
-            # mirror what GA will auto-inject
+            # mirror what GA will auto-inject + include policy_mixing
             "vi_gamma": cfg.vi_gamma,
             "vi_theta": cfg.vi_theta,
             "vi_max_iterations": cfg.vi_max_iterations,
             "policy_temperature": cfg.policy_temperature,
-            "kl_delta": cfg.kl_delta,
+            "policy_mixing": POLICY_MIXING,    # NEW
+            "policy_tie_tol": POLICY_TIE_TOL,  # NEW
             "perf_numpoints": cfg.perf_numpoints,
             "perf_gamma": cfg.perf_gamma if cfg.perf_gamma is not None else cfg.vi_gamma,
             "perf_theta": cfg.perf_theta if cfg.perf_theta is not None else cfg.vi_theta,

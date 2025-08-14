@@ -525,57 +525,91 @@ def create_random_policy(mdp_network: MDPNetwork) -> PolicyTable:
 def q_table_to_policy(q_table: QTable,
                       states: List[int],
                       num_actions: int,
-                      temperature: float = 1.0) -> PolicyTable:
+                      mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0),
+                      temperature: float = 1.0,
+                      tie_tol: float = 1e-6) -> PolicyTable:
     """
-    Convert Q-table to policy using softmax (Boltzmann) distribution.
+    Convert a Q-table to a mixed policy that blends (greedy, softmax, random) components.
 
     Args:
-        q_table: Q-table containing state-action values
-        states: List of all states
-        num_actions: Number of possible actions
-        temperature: Temperature parameter for softmax
-                    - temperature > 1: more exploration (more uniform)
-                    - temperature = 1: standard softmax
-                    - temperature < 1: more exploitation (more peaked)
-                    - temperature → 0: approaches greedy policy
+        q_table: Q-table containing state-action values.
+        states: List of all states to build the policy for.
+        num_actions: Number of possible actions.
+        mixing: Tuple (w_greedy, w_softmax, w_random) specifying how much probability
+                mass each component contributes before final normalization.
+                - greedy: puts all mass on max-Q actions (ties split evenly)
+                - softmax: Boltzmann over Q with `temperature`
+                - random: uniform over all actions
+                The three weights are linearly combined and then normalized.
+        temperature: Temperature for the softmax part.
+                     >1.0: smoother (more uniform); 1.0: standard; <1.0: peakier; 0.0: greedy limit.
+        tie_tol: Numerical tolerance for identifying Q-value ties in greedy component.
 
     Returns:
-        PolicyTable with probabilistic action distributions
+        PolicyTable with an explicit probability for *every* action in [0, num_actions-1].
+        Actions with zero probability are kept in the dictionary (key exists with prob=0.0).
     """
     policy = PolicyTable()
 
+    w_g, w_s, w_r = mixing
+    total_mix = w_g + w_s + w_r
+
+    # Fallback if all weights are zero: default to uniform random
+    if total_mix <= 0.0:
+        w_g, w_s, w_r = 0.0, 0.0, 1.0
+        total_mix = 1.0
+
+    # Precompute the random-uniform component
+    rand_probs = np.full(num_actions, 1.0 / max(1, num_actions), dtype=float)
+
     for state in states:
-        # Get Q-values for all actions in this state
-        q_values = []
-        for action in range(num_actions):
-            q_values.append(q_table.get_q_value(state, action))
+        # Collect Q-values for all actions (missing -> 0.0)
+        q_values = np.array([q_table.get_q_value(state, a) for a in range(num_actions)], dtype=float)
 
-        # Convert to numpy array for easier computation
-        q_array = np.array(q_values)
+        # --- Greedy component (ties get equal share) ---
+        greedy_probs = np.zeros(num_actions, dtype=float)
+        if num_actions > 0:
+            max_q = np.max(q_values) if q_values.size else 0.0
+            is_tie = np.abs(q_values - max_q) <= tie_tol
+            tie_count = int(np.sum(is_tie))
+            if tie_count > 0:
+                greedy_probs[is_tie] = 1.0 / tie_count
+            else:
+                # Shouldn't happen, but keep safe
+                greedy_probs[:] = rand_probs
 
-        # Apply temperature scaling and softmax
-        if temperature > 0:
-            # Scale by temperature
-            scaled_q = q_array / temperature
-            # Subtract max for numerical stability
-            scaled_q = scaled_q - np.max(scaled_q)
-            # Compute softmax
-            exp_q = np.exp(scaled_q)
-            probabilities = exp_q / np.sum(exp_q)
+        # --- Softmax component ---
+        if temperature <= 0.0:
+            # Degenerates to greedy
+            softmax_probs = greedy_probs.copy()
         else:
-            # Temperature = 0 means greedy policy
-            probabilities = np.zeros(num_actions)
-            best_action = np.argmax(q_values)
-            probabilities[best_action] = 1.0
+            scaled = q_values / temperature
+            scaled -= np.max(scaled)  # numerical stability
+            exp_q = np.exp(scaled, dtype=float)
+            Z = float(np.sum(exp_q))
+            if Z > 0.0 and np.isfinite(Z):
+                softmax_probs = exp_q / Z
+            else:
+                # Fallback if numerical issues arise
+                softmax_probs = rand_probs.copy()
 
-        # Create action probability dictionary
-        action_probs = {}
-        for action in range(num_actions):
-            action_probs[action] = float(probabilities[action])
+        # --- Linear mixture then normalize ---
+        mixed = w_g * greedy_probs + w_s * softmax_probs + w_r * rand_probs
+        s = float(np.sum(mixed))
+        if s > 0.0:
+            mixed /= s
+        else:
+            # Extremely unlikely (all zeros); fall back to uniform
+            mixed = rand_probs.copy()
 
+        # Build explicit dict keeping all actions (including zeros)
+        action_probs = {int(a): float(mixed[a]) for a in range(num_actions)}
+
+        # Do NOT renormalize away zeros; set_action_probabilities will only scale if needed.
         policy.set_action_probabilities(state, action_probs)
 
     return policy
+
 
 
 def blend_policies(target: PolicyTable,

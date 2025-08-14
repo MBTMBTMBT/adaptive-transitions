@@ -37,29 +37,23 @@ ScoreFn = Callable[['MDPNetwork', Any], Any]  # may return float or sequence
 DistanceFn = Callable[['MDPNetwork', State, State], float]
 
 # -------------------------------
-# Score function registry (+ per-fn constants)
+# Score function registry
 # -------------------------------
 
 SCORE_FN_REGISTRY: Dict[str, ScoreFn] = {}
-SCORE_CONST_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
-def register_score_fn(name: str, fn: ScoreFn, const: Optional[Dict[str, Any]] = None) -> None:
+def register_score_fn(name: str, fn: ScoreFn) -> None:
     """
     Register a score function.
     - name: registry key used in GAConfig.score_fn_names
     - fn:   callable(mdp, *args, **kwargs) -> float | sequence[float]
-    - const: per-function constants available inside fn via kwargs["score_const"]
     """
     SCORE_FN_REGISTRY[name] = fn
-    SCORE_CONST_REGISTRY[name] = dict(const or {})
 
 def get_registered_score_fn(name: str) -> ScoreFn:
     if name not in SCORE_FN_REGISTRY:
         raise KeyError(f"Score function '{name}' is not registered.")
     return SCORE_FN_REGISTRY[name]
-
-def get_registered_score_const(name: str) -> Dict[str, Any]:
-    return SCORE_CONST_REGISTRY.get(name, {})
 
 # -------------------------------
 # Distance (ALWAYS computed on base MDP via the caller)
@@ -207,7 +201,8 @@ class GAConfig:
     vi_max_iterations: int = 1000
 
     policy_temperature: float = 1.0
-    kl_delta: float = 1e-3
+    policy_mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0)  # NEW
+    policy_tie_tol: float = 1e-6
 
     perf_numpoints: int = 100
     perf_gamma: Optional[float] = None
@@ -521,12 +516,7 @@ def _score_worker_multi(payload: Tuple[Dict[str, Any], List[str], Tuple[Any, ...
     out: List[float] = []
     for name in fn_names:
         fn = get_registered_score_fn(name)
-        const = get_registered_score_const(name)
-        local_kwargs = dict(base_kwargs)
-        # Inject per-fn constants under a fixed key
-        if "score_const" not in local_kwargs:
-            local_kwargs["score_const"] = const
-        val = fn(mdp, *args, **local_kwargs)
+        val = fn(mdp, *args, **base_kwargs)  # constants now only via base_kwargs["score_const"]
         out.extend(_flatten_objectives(val))
     return out
 
@@ -666,7 +656,8 @@ class MDPEvolutionGA:
         kw.setdefault("vi_theta", self.cfg.vi_theta)
         kw.setdefault("vi_max_iterations", self.cfg.vi_max_iterations)
         kw.setdefault("policy_temperature", self.cfg.policy_temperature)
-        kw.setdefault("kl_delta", self.cfg.kl_delta)
+        kw.setdefault("policy_mixing", self.cfg.policy_mixing)  # NEW
+        kw.setdefault("policy_tie_tol", self.cfg.policy_tie_tol)  # NEW
         kw.setdefault("perf_numpoints", self.cfg.perf_numpoints)
         kw.setdefault("perf_gamma", self.cfg.perf_gamma if self.cfg.perf_gamma is not None else self.cfg.vi_gamma)
         kw.setdefault("perf_theta", self.cfg.perf_theta if self.cfg.perf_theta is not None else self.cfg.vi_theta)
@@ -701,9 +692,12 @@ class MDPEvolutionGA:
                 max_iterations=self.cfg.vi_max_iterations
             )
             base_policy: PolicyTable = q_table_to_policy(
-                Q, states=list(self.base_mdp.states),
+                Q,
+                states=list(self.base_mdp.states),
                 num_actions=self.base_mdp.num_actions,
-                temperature=self.cfg.policy_temperature
+                mixing=self.cfg.policy_mixing,  # NEW
+                temperature=self.cfg.policy_temperature,
+                tie_tol=self.cfg.policy_tie_tol,  # NEW
             )
             base_occupancy: ValueTable = compute_occupancy_measure(
                 self.base_mdp, base_policy,
@@ -799,11 +793,14 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     Return [ -KL(baseline || current), performance_integral ].
     Shared VI -> policy -> occupancy for current MDP.
     """
+    const = kwargs.get("score_const", {}) or {}
     gamma = float(kwargs.get("vi_gamma", 0.99))
     theta = float(kwargs.get("vi_theta", 1e-6))
     max_iter = int(kwargs.get("vi_max_iterations", 1000))
     temperature = float(kwargs.get("policy_temperature", 1.0))
-    delta = float(kwargs.get("kl_delta", 1e-3))
+    mixing = tuple(const.get("policy_mixing", kwargs.get("policy_mixing", (0.0, 1.0, 0.0))))  # NEW
+    tie_tol = float(const.get("policy_tie_tol", kwargs.get("policy_tie_tol", 1e-6)))  # NEW
+    delta = float(const.get("kl_delta", kwargs.get("kl_delta", 1e-3)))  # NEW
 
     pgamma = float(kwargs.get("perf_gamma", gamma))
     ptheta = float(kwargs.get("perf_theta", theta))
@@ -820,9 +817,14 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
 
     # Solve current
     _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
-    policy2: PolicyTable = q_table_to_policy(Q2, states=list(mdp.states),
-                                             num_actions=mdp.num_actions,
-                                             temperature=temperature)
+    policy2: PolicyTable = q_table_to_policy(
+        Q2,
+        states=list(mdp.states),
+        num_actions=mdp.num_actions,
+        mixing=mixing,  # NEW
+        temperature=temperature,
+        tie_tol=tie_tol,  # NEW
+    )
     occupancy2: ValueTable = compute_occupancy_measure(mdp, policy=policy2,
                                                        gamma=gamma, theta=theta, max_iterations=max_iter)
 
@@ -858,12 +860,14 @@ def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
       2) integral(prior = random, target = policy2)
     """
     const = kwargs.get("score_const", {}) or {}
-    blend_w = float(const.get("blend_weight", 0.8))
+    blend_w = float(const.get("blend_weight", kwargs.get("blend_weight", 0.8)))  # NEW
 
     gamma = float(kwargs.get("vi_gamma", 0.99))
     theta = float(kwargs.get("vi_theta", 1e-6))
     max_iter = int(kwargs.get("vi_max_iterations", 1000))
     temperature = float(kwargs.get("policy_temperature", 1.0))
+    mixing = tuple(const.get("policy_mixing", kwargs.get("policy_mixing", (0.0, 1.0, 0.0))))  # NEW
+    tie_tol = float(const.get("policy_tie_tol", kwargs.get("policy_tie_tol", 1e-6)))  # NEW
 
     pgamma = float(kwargs.get("perf_gamma", gamma))
     ptheta = float(kwargs.get("perf_theta", theta))
@@ -874,9 +878,14 @@ def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     base_policy = PolicyTable.from_portable(_pre[0]) if (_pre and len(_pre) >= 1) else None
 
     _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
-    policy2: PolicyTable = q_table_to_policy(Q2, states=list(mdp.states),
-                                             num_actions=mdp.num_actions,
-                                             temperature=temperature)
+    policy2: PolicyTable = q_table_to_policy(
+        Q2,
+        states=list(mdp.states),
+        num_actions=mdp.num_actions,
+        mixing=mixing,  # NEW
+        temperature=temperature,
+        tie_tol=tie_tol,  # NEW
+    )
 
     # Integral 1: blended prior -> baseline target
     blended_policy2 = blend_policies(policy2, create_random_policy(mdp), weight=blend_w)
@@ -907,6 +916,5 @@ def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     return [float(integral1), float(integral2)]
 
 
-if __name__ == "__main__":
-    register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
-    register_score_fn("obj_multi_perf", obj_multi_perf, const={"blend_weight": 0.8})
+register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
+register_score_fn("obj_multi_perf", obj_multi_perf)
