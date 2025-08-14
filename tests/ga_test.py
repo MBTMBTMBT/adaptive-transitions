@@ -46,14 +46,14 @@ if __name__ == "__main__":
 
     # Register the multi-output objective with per-function constants.
     # You can tweak blend_weight here without touching the GAConfig.
-    register_score_fn("obj_multi_perf", obj_multi_perf, const={"blend_weight": 0.8})
+    register_score_fn("obj_multi_perf", obj_multi_perf, const={"blend_weight": 0.99})
 
     # GA config (kept as requested; only added add_edge_allow_out_of_scope=False)
     cfg = GAConfig(
-        population_size=100,
+        population_size=25,
         generations=200,
         tournament_k=2,
-        elitism_num=10,
+        elitism_num=5,
         crossover_rate=0.5,
 
         allow_self_loops=True,
@@ -84,8 +84,8 @@ if __name__ == "__main__":
         mutation_n_workers=workers,
 
         # Distance / scope (used by add_edge_allow_out_of_scope)
-        dist_max_hops=5,
-        dist_node_cap=2048,
+        dist_max_hops=6.0,
+        dist_node_cap=64,
         dist_weight_eps=1e-6,
         dist_unreachable=1e9,
 
@@ -93,9 +93,9 @@ if __name__ == "__main__":
         vi_gamma=0.99,
         vi_theta=1e-3,
         vi_max_iterations=1000,
-        policy_temperature=1.0,
+        policy_temperature=0.1,
         kl_delta=1e-3,
-        perf_numpoints=64,
+        perf_numpoints=32,
         perf_gamma=None,          # None -> fallback to vi_gamma
         perf_theta=None,          # None -> fallback to vi_theta
         perf_max_iterations=None, # None -> fallback to vi_max_iterations

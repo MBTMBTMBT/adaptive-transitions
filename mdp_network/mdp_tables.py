@@ -502,6 +502,26 @@ class PolicyTable(Serialisable):
         return result
 
 
+def create_random_policy(mdp_network: MDPNetwork) -> PolicyTable:
+    """Create a uniform probabilistic policy for the MDP."""
+    policy = PolicyTable()
+    for state in mdp_network.states:
+        if mdp_network.is_terminal_state(state):
+            # Terminal states have deterministic action 0
+            policy.set_action(state, 0)
+        else:
+            # Create uniform probability distribution over actions
+            uniform_prob = 1.0 / mdp_network.num_actions
+
+            action_probs = {}
+            for action in range(mdp_network.num_actions):
+                action_probs[action] = uniform_prob
+
+            policy.set_action_probabilities(state, action_probs)
+
+    return policy
+
+
 def q_table_to_policy(q_table: QTable,
                       states: List[int],
                       num_actions: int,
@@ -1033,23 +1053,3 @@ class RewardDistributionTable:
             result += f"\n... and {total_rewards - max_rewards} more reward values"
 
         return result
-
-
-def create_random_policy(mdp_network: MDPNetwork) -> PolicyTable:
-    """Create a uniform probabilistic policy for the MDP."""
-    policy = PolicyTable()
-    for state in mdp_network.states:
-        if mdp_network.is_terminal_state(state):
-            # Terminal states have deterministic action 0
-            policy.set_action(state, 0)
-        else:
-            # Create uniform probability distribution over actions
-            uniform_prob = 1.0 / mdp_network.num_actions
-
-            action_probs = {}
-            for action in range(mdp_network.num_actions):
-                action_probs[action] = uniform_prob
-
-            policy.set_action_probabilities(state, action_probs)
-
-    return policy

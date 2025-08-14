@@ -6,7 +6,8 @@
 # - A score function may return either a float OR a sequence of floats.
 # - register_score_fn(..., const=dict) lets you pass per-function constant params at registration time.
 #   They are injected as kwargs["score_const"] in workers.
-# - Optional serial precompute on base MDP: VI -> Q -> softmax policy + occupancy, broadcast to workers.
+# - Serial precompute on base MDP: VI -> Q -> softmax policy + occupancy, broadcast to workers.
+# - Distance and search scope are ALWAYS computed on the base MDP (initial environment).
 
 from __future__ import annotations
 
@@ -61,7 +62,7 @@ def get_registered_score_const(name: str) -> Dict[str, Any]:
     return SCORE_CONST_REGISTRY.get(name, {})
 
 # -------------------------------
-# Distance
+# Distance (ALWAYS computed on base MDP via the caller)
 # -------------------------------
 
 def directed_prob_distance(
@@ -74,7 +75,7 @@ def directed_prob_distance(
     weight_eps: float,
     unreachable: float,
 ) -> float:
-    """Dijkstra on a directed graph with edge weights w(u->v)=1-max_a P(v|u,a)."""
+    """Dijkstra on a directed graph with edge weights w(u->v)=max(weight_eps, 2.0 - max_a P(v|u,a))."""
     if s == sp:
         return 0.0
     G = mdp.graph
@@ -93,7 +94,7 @@ def directed_prob_distance(
                     allowed.add(v)
                     q.append(v)
 
-    # optional cap
+    # Optional cap
     if node_cap is not None and len(allowed) > node_cap:
         if 'hop_dist' in locals():
             kept = sorted(allowed, key=lambda x: hop_dist.get(x, 10**9))[:node_cap]
@@ -130,11 +131,11 @@ def directed_prob_distance(
                 heapq.heappush(heap, (nd, v))
     return float(unreachable)
 
-def _allowed_nodes_within_scope(mdp: 'MDPNetwork', s: State, cfg: 'GAConfig') -> Set[int]:
-    """Nodes inside the search scope defined by dist_max_hops/node_cap. If dist_max_hops is None -> all states."""
+def _allowed_nodes_within_scope(mdp_ref: 'MDPNetwork', s: State, cfg: 'GAConfig') -> Set[int]:
+    """Nodes inside the search scope on the REFERENCE graph (base MDP). If dist_max_hops is None -> all states."""
     if cfg.dist_max_hops is None:
-        return set(mdp.states)
-    hop_dist = nx.single_source_shortest_path_length(mdp.graph, source=s, cutoff=cfg.dist_max_hops)
+        return set(mdp_ref.states)
+    hop_dist = nx.single_source_shortest_path_length(mdp_ref.graph, source=s, cutoff=cfg.dist_max_hops)
     allowed = set(hop_dist.keys())
     if cfg.dist_node_cap is not None and len(allowed) > cfg.dist_node_cap:
         kept = sorted(allowed, key=lambda x: hop_dist.get(x, 10**9))[:cfg.dist_node_cap]
@@ -165,7 +166,7 @@ class GAConfig:
     epsilon_new_prob: float = 0.02
     gamma_sample: float = 1.0
     gamma_prob: float = 0.0
-    # forbid adding edges to out-of-scope nodes (as defined by dist_*). Default keeps old behavior.
+    # Forbid adding edges to out-of-scope nodes (scope defined on base MDP). If True -> allow all.
     add_edge_allow_out_of_scope: bool = True
 
     # Hard pruning by threshold
@@ -191,8 +192,8 @@ class GAConfig:
     # Parallel mutation
     mutation_n_workers: int = 1
 
-    # Distance parameters
-    dist_max_hops: Optional[int] = None
+    # Distance parameters (applied on base MDP)
+    dist_max_hops: Optional[float] = None
     dist_node_cap: Optional[int] = None
     dist_weight_eps: float = 1e-9
     dist_unreachable: float = 1e6
@@ -282,6 +283,7 @@ def build_original_whitelist(mdp: 'MDPNetwork') -> Set[EdgeTriple]:
 # -------------------------------
 
 def _dist_from_cfg(mdp: 'MDPNetwork', s: State, sp: State, cfg: GAConfig) -> float:
+    # NOTE: callers ensure `mdp` is the REFERENCE (base MDP).
     return directed_prob_distance(
         mdp, s, sp,
         max_hops=cfg.dist_max_hops,
@@ -290,7 +292,15 @@ def _dist_from_cfg(mdp: 'MDPNetwork', s: State, sp: State, cfg: GAConfig) -> flo
         unreachable=cfg.dist_unreachable,
     )
 
-def mutation_add_edge(mdp: 'MDPNetwork', rng: np.random.Generator, dist_fn: DistanceFn, cfg: GAConfig):
+def mutation_add_edge(mdp: 'MDPNetwork',
+                      rng: np.random.Generator,
+                      dist_fn: DistanceFn,
+                      cfg: GAConfig,
+                      scope_fn: Optional[Callable[[State], Set[int]]] = None):
+    """
+    Add one edge with distance-weighted sampling of target states.
+    Distance and scope MUST be computed on the base MDP via dist_fn/scope_fn.
+    """
     candidates_sa = [(s, a) for (s, a) in list_all_action_pairs(mdp)
                      if action_out_degree(mdp, s, a) < cfg.max_out_degree]
     if not candidates_sa:
@@ -302,19 +312,19 @@ def mutation_add_edge(mdp: 'MDPNetwork', rng: np.random.Generator, dist_fn: Dist
     sp_candidates = [sp for sp in mdp.states
                      if (cfg.allow_self_loops or sp != s) and sp not in existing]
 
-    # NEW: strictly limit candidate sp to scope if requested
-    if not cfg.add_edge_allow_out_of_scope:
-        allowed = _allowed_nodes_within_scope(mdp, s, cfg)
+    # Restrict to scope on the reference graph if requested
+    if not cfg.add_edge_allow_out_of_scope and scope_fn is not None:
+        allowed = scope_fn(s)
         sp_candidates = [sp for sp in sp_candidates if sp in allowed]
 
     if not sp_candidates:
         return
 
-    # distance-weighted sampling
+    # Distance-weighted sampling using reference distance
     weights = []
     for sp in sp_candidates:
-        d = _dist_from_cfg(mdp, s, sp, cfg)
-        w = math.exp(-cfg.gamma_sample * d) if cfg.gamma_sample > 0.0 else 1.0
+        d = dist_fn(mdp, s, sp)
+        w = 1.0 if cfg.gamma_sample <= 0.0 else math.exp(-cfg.gamma_sample * d)
         weights.append(w)
     weights = np.asarray(weights, dtype=float)
     if weights.sum() == 0.0:
@@ -322,7 +332,7 @@ def mutation_add_edge(mdp: 'MDPNetwork', rng: np.random.Generator, dist_fn: Dist
     weights /= weights.sum()
 
     sp_new = int(rng.choice(sp_candidates, p=weights))
-    d_new = _dist_from_cfg(mdp, s, sp_new, cfg)
+    d_new = dist_fn(mdp, s, sp_new)
     p_new = cfg.epsilon_new_prob
     if cfg.gamma_prob > 0.0:
         p_new = min(cfg.epsilon_new_prob, cfg.epsilon_new_prob * math.exp(-cfg.gamma_prob * d_new))
@@ -502,7 +512,7 @@ def _score_worker_multi(payload: Tuple[Dict[str, Any], List[str], Tuple[Any, ...
     portable, fn_names, args, kwargs, precomputed_portables = payload
     mdp = MDPNetwork.from_portable(portable)
 
-    # base kwargs
+    # Base kwargs
     if precomputed_portables is not None and "precomputed_portables" not in kwargs:
         base_kwargs = dict(kwargs); base_kwargs["precomputed_portables"] = precomputed_portables
     else:
@@ -513,7 +523,7 @@ def _score_worker_multi(payload: Tuple[Dict[str, Any], List[str], Tuple[Any, ...
         fn = get_registered_score_fn(name)
         const = get_registered_score_const(name)
         local_kwargs = dict(base_kwargs)
-        # inject per-fn constants under a fixed key
+        # Inject per-fn constants under a fixed key
         if "score_const" not in local_kwargs:
             local_kwargs["score_const"] = const
         val = fn(mdp, *args, **local_kwargs)
@@ -544,12 +554,26 @@ def evaluate_mdp_objectives(
 # Parallel offspring worker
 # -------------------------------
 
-def _apply_mutations(ind: 'MDPNetwork', rng: np.random.Generator, whitelist: Set[EdgeTriple], cfg: GAConfig):
+def _apply_mutations(ind: 'MDPNetwork',
+                     rng: np.random.Generator,
+                     whitelist: Set[EdgeTriple],
+                     cfg: GAConfig,
+                     dist_mdp_ref: 'MDPNetwork'):
+    """
+    Apply mutations to 'ind'. All distance/scope calculations use 'dist_mdp_ref' (the base MDP).
+    """
+    # Build closures that reference the base MDP
+    dist_fn = lambda _m, _s, _sp: _dist_from_cfg(dist_mdp_ref, _s, _sp, cfg)
+    scope_fn = lambda _s: _allowed_nodes_within_scope(dist_mdp_ref, _s, cfg)
+
     for _ in range(cfg.add_edge_attempts_per_child):
-        mutation_add_edge(ind, rng, lambda _m, _s, _sp: _dist_from_cfg(ind, _s, _sp, cfg), cfg)
+        mutation_add_edge(ind, rng, dist_fn, cfg, scope_fn=scope_fn)
+
     mutation_prob_pairwise(ind, rng, cfg)
+
     if cfg.reward_tweak_edges_per_child > 0:
         mutation_reward_smallstep(ind, rng, cfg)
+
     if cfg.prune_prob_threshold is not None:
         prune_low_prob_transitions(ind, cfg.prune_prob_threshold)
 
@@ -559,16 +583,19 @@ def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     rng = np.random.default_rng(payload["seed"])
     def _mk(p: Dict[str, Any]) -> MDPNetwork: return MDPNetwork.from_portable(p)
 
+    # Build base reference ONCE; all distances/scopes use this graph
+    base_ref = _mk(payload["base_portable"])
+
     if "pa_portable" in payload:
         pa = _mk(payload["pa_portable"])
         pb = _mk(payload["pb_portable"])
         do_crossover: bool = payload["do_crossover"]
         child = crossover_action_block(pa, pb, rng) if do_crossover else (pa if rng.random() < 0.5 else pb).clone()
-        _apply_mutations(child, rng, whitelist, cfg)
+        _apply_mutations(child, rng, whitelist, cfg, dist_mdp_ref=base_ref)
         return child.to_portable()
     else:
         ind = _mk(payload["base_portable"])
-        _apply_mutations(ind, rng, whitelist, cfg)
+        _apply_mutations(ind, rng, whitelist, cfg, dist_mdp_ref=base_ref)
         return ind.to_portable()
 
 # -------------------------------
@@ -576,7 +603,7 @@ def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------------
 
 class MDPEvolutionGA:
-    """NSGA-II on MDPNetwork with optional serial precompute; score fns may return multi-output."""
+    """NSGA-II on MDPNetwork with serial precompute; score fns may return multi-output."""
 
     def __init__(self, base_mdp: 'MDPNetwork', cfg: GAConfig):
         if not cfg.score_fn_names or len(cfg.score_fn_names) < 1:
@@ -622,6 +649,8 @@ class MDPEvolutionGA:
                 "pa_portable": pa.to_portable(),
                 "pb_portable": pb.to_portable(),
                 "do_crossover": bool(self.rng.random() < self.cfg.crossover_rate),
+                # Ensure base reference is available in child worker
+                "base_portable": self._base_portable,
             })
         with ProcessPoolExecutor(max_workers=self.cfg.mutation_n_workers) as ex:
             results = list(ex.map(_child_worker, payloads))
@@ -631,7 +660,7 @@ class MDPEvolutionGA:
         return children
 
     def _evaluate_population(self, pop: List['MDPNetwork']) -> List[List[float]]:
-        # default kwargs for score fns
+        # Default kwargs for score fns
         kw = dict(self.cfg.score_kwargs or {})
         kw.setdefault("vi_gamma", self.cfg.vi_gamma)
         kw.setdefault("vi_theta", self.cfg.vi_theta)
@@ -699,7 +728,7 @@ class MDPEvolutionGA:
 
         print(f"[Init] pop={len(pop)} | { _summ(objs) }")
 
-        # selection metrics
+        # Selection metrics
         fronts = fast_non_dominated_sort(objs)
         ranks = [0] * len(pop)
         for r, F in enumerate(fronts):

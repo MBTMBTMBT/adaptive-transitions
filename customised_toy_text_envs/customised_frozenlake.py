@@ -10,7 +10,7 @@ import matplotlib.colors as mcolors
 from mdp_network.mdp_network import MDPNetwork
 from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv
 from customisable_env_abs import CustomisableEnvAbs
-
+from mdp_network.mdp_tables import ValueTable
 
 ACTION_NAMES = ["Left", "Down", "Right", "Up"]
 
@@ -294,11 +294,11 @@ def plot_frozenlake_transition_overlays(
     annotate: bool = True,            # draw probability labels
     show_self_loops: bool = False,    # draw s->s arcs
     dpi: int = 200,
-    TARGET_CELL_PX: int = 240,        # target cell size in pixels for readability
-    ARROW_SCALE: float = 0.04,        # arrow linewidth as fraction of cell size
-    FONT_SCALE: float = 0.16,         # label font size as fraction of cell size
+    target_cell_px: int = 240,        # target cell size in pixels for readability
+    arrow_scale: float = 0.04,        # arrow linewidth as fraction of cell size
+    font_scale: float = 0.16,         # label font size as fraction of cell size
     cmap_name: str = "viridis",       # colormap for probability -> color
-    GAMMA: float = 1.0                # gamma correction for probability mapping
+    gamma: float = 1.0                # gamma correction for probability mapping
 ):
     """
     Draw per-action overlays of MDP transition probabilities on a FrozenLake board.
@@ -343,7 +343,7 @@ def plot_frozenlake_transition_overlays(
     cell_w, cell_h = W / ncol, H / nrow
 
     # -------- Auto upscale board for readability --------
-    upscale = int(np.ceil(TARGET_CELL_PX / min(cell_w, cell_h)))
+    upscale = int(np.ceil(target_cell_px / min(cell_w, cell_h)))
     upscale = max(1, min(upscale, 4))
     if upscale > 1:
         try:
@@ -371,10 +371,10 @@ def plot_frozenlake_transition_overlays(
     cell_min = min(cell_w, cell_h)
 
     # arrow and label style parameters
-    ARROW_LW_PT = px_to_pt(max(1.0, ARROW_SCALE * cell_min))
+    ARROW_LW_PT = px_to_pt(max(1.0, arrow_scale * cell_min))
     mutation_scale = px_to_pt(0.45 * cell_min)
     shrink_pt = px_to_pt(0.18 * cell_min)
-    font_pt = max(6.0, min(12.0, px_to_pt(FONT_SCALE * cell_min)))
+    font_pt = max(6.0, min(12.0, px_to_pt(font_scale * cell_min)))
     title_pt = max(9.0, min(14.0, px_to_pt(0.18 * cell_min)))
 
     # text style for labels
@@ -383,7 +383,7 @@ def plot_frozenlake_transition_overlays(
 
     # probability -> RGBA color using colormap
     cmap = cm.get_cmap(cmap_name)
-    norm = mcolors.PowerNorm(gamma=GAMMA, vmin=0.0, vmax=1.0)  # NEW: gamma-consistent normalization
+    norm = mcolors.PowerNorm(gamma=gamma, vmin=0.0, vmax=1.0)  # NEW: gamma-consistent normalization
     def prob_to_color(p: float):
         """Map probability to RGBA using cmap and gamma-corrected norm."""
         return cmap(norm(np.clip(p, 0, 1)))
@@ -475,3 +475,173 @@ def plot_frozenlake_transition_overlays(
         plt.close(fig)
 
     print(f"[OK] Saved overlays to: {os.path.abspath(output_dir)}")
+
+
+def plot_frozenlake_occupancy_overlays(
+    env: Union[FrozenLakeEnv, CustomisedFrozenLakeEnv],
+    occupancy_matrix: "ValueTable",        # supports .get_value(s); dict-like also works
+    output_dir: str,
+    filename_prefix: str = "frozenlake_occupancy",
+    alpha: float = 0.65,                    # overlay transparency for the heat layer
+    annotate: bool = True,                  # draw per-cell numeric labels
+    dpi: int = 200,
+    target_cell_px: int = 240,              # target cell size in pixels for readability
+    font_scale: float = 0.18,               # label font size as fraction of cell size
+    cmap_name: str = "magma",               # colormap for occupancy values
+    gamma: float = 1.0,                     # gamma for color normalization
+    min_label_value: float = 0.0,           # do not draw labels below this value
+    vmin: float | None = None,              # color scale min; defaults to 0
+    vmax: float | None = None               # color scale max; defaults to max occupancy
+) -> str:
+    """
+    Overlay occupancy measure (state visitation frequencies) as a semi-transparent heat layer
+    on top of the FrozenLake board, with optional numeric labels and a colorbar legend.
+
+    Assumptions:
+      - `occupancy_matrix` exposes `get_value(state)` -> float, or is dict-like {state: value}.
+      - State indices match the environment's encoding: s = row * ncol + col.
+
+    Returns:
+      The absolute path to the saved PNG file.
+    """
+    # -------- Basic checks --------
+    assert hasattr(env, "nrow") and hasattr(env, "ncol"), "Env must have nrow/ncol."
+    nrow, ncol = env.nrow, env.ncol
+    nS = nrow * ncol
+    os.makedirs(output_dir, exist_ok=True)
+
+    # -------- Board background (as in the transition overlay) --------
+    prev_mode = getattr(env, "render_mode", None)
+    env.render_mode = "rgb_array"
+    try:
+        env.reset()
+        if hasattr(env, "initial_state_distrib"):
+            env.s = int(np.argmax(env.initial_state_distrib))
+    except Exception:
+        pass
+
+    bg_img = env.render()
+    if bg_img is None:
+        try:
+            bg_img = env._render_gui("rgb_array")  # type: ignore
+        except Exception as e:
+            raise RuntimeError("Failed to render background.") from e
+    env.render_mode = prev_mode
+
+    H, W = bg_img.shape[:2]
+    cell_w, cell_h = W / ncol, H / nrow
+
+    # -------- Auto upscale board for readability --------
+    upscale = int(np.ceil(target_cell_px / min(cell_w, cell_h)))
+    upscale = max(1, min(upscale, 4))
+    if upscale > 1:
+        try:
+            from PIL import Image
+            bg_img = np.array(
+                Image.fromarray(bg_img).resize((int(W * upscale), int(H * upscale)), resample=Image.BICUBIC)
+            )
+        except Exception:
+            bg_img = np.kron(bg_img, np.ones((upscale, upscale, 1), dtype=bg_img.dtype))
+        H, W = bg_img.shape[:2]
+        cell_w *= upscale
+        cell_h *= upscale
+
+    # -------- Helpers (coords, sizing) --------
+    def state_to_center_xy(s: int) -> tuple[float, float]:
+        r, c = divmod(int(s), ncol)
+        return (c + 0.5) * cell_w, (r + 0.5) * cell_h
+
+    def px_to_pt(px: float) -> float:
+        return float(px) * 72.0 / float(dpi)
+
+    cell_min = min(cell_w, cell_h)
+    font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
+    title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
+
+    # Text style for labels
+    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
+    text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
+
+    # -------- Build occupancy grid (nrow x ncol) --------
+    def occ_get(s: int) -> float:
+        """Read occupancy value from ValueTable or dict-like."""
+        if hasattr(occupancy_matrix, "get_value"):
+            return float(occupancy_matrix.get_value(int(s)))
+        # dict-like fallback
+        try:
+            return float(occupancy_matrix.get(int(s), 0.0))  # type: ignore[attr-defined]
+        except Exception:
+            return 0.0
+
+    occ_grid = np.zeros((nrow, ncol), dtype=float)
+    for s in range(nS):
+        r, c = divmod(s, ncol)
+        occ_grid[r, c] = occ_get(s)
+
+    # Compute default vmin/vmax if not provided
+    data_min = float(np.nanmin(occ_grid)) if np.isfinite(occ_grid).any() else 0.0
+    data_max = float(np.nanmax(occ_grid)) if np.isfinite(occ_grid).any() else 1.0
+    vmin = 0.0 if vmin is None else float(vmin)
+    vmax = (data_max if vmax is None else float(vmax))
+    if vmax <= vmin:
+        vmax = vmin + 1e-9
+
+    # Colormap and normalization (gamma-aware)
+    cmap = cm.get_cmap(cmap_name)
+    norm = mcolors.PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax)
+
+    # -------- Plot --------
+    fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi)
+    ax = plt.gca()
+
+    # Base board
+    ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title("State Occupancy", fontsize=title_pt)
+
+    # Semi-transparent occupancy layer aligned to the board coordinates
+    ax.imshow(
+        occ_grid,
+        origin="upper",
+        cmap=cmap,
+        norm=norm,
+        extent=[0, W, H, 0],
+        alpha=alpha,
+        zorder=1,
+        interpolation="nearest",
+    )
+
+    # Colorbar legend
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
+    cbar.set_label("Occupancy measure", fontsize=max(8, int(title_pt * 0.7)))
+    cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
+
+    # Optional numeric labels at cell centers
+    if annotate:
+        for s in range(nS):
+            r, c = divmod(s, ncol)
+            val = occ_grid[r, c]
+            if val < min_label_value:
+                continue
+            x, y = state_to_center_xy(s)
+            ax.text(
+                x, y, f"{val:.2e}" if val < 0.01 else f"{val:.2f}",
+                ha="center", va="center", fontsize=font_pt,
+                bbox=text_bbox, alpha=0.95, zorder=2,
+                path_effects=text_effects,
+            )
+
+    # Save and close
+    out_name = f"{filename_prefix}.png"
+    out_path = os.path.join(output_dir, out_name)
+    plt.savefig(out_path, bbox_inches="tight", pad_inches=0.05, dpi=dpi)
+    plt.close(fig)
+
+    print(f"[OK] Saved occupancy overlay to: {os.path.abspath(out_path)}")
+    return os.path.abspath(out_path)
+
