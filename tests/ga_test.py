@@ -1,11 +1,10 @@
 # test_ga_frozenlake8x8.py
-# English comments only. Minimal, self-contained sanity test for NSGA-II GA.
-# - Builds an MDPNetwork from CustomisedFrozenLakeEnv (8x8, slippery)
-# - Precomputes baseline (policy + occupancy) on the base MDP (serial)
-# - Runs the GA (NSGA-II) with a single multi-output objective:
-#       obj_multi_kl_and_perf -> returns [ -KL, performance_integral ]
-# - Uses process pool parallel scoring to validate the path
-# - Prints Pareto front info and simple assertions
+# Minimal NSGA-II sanity test on FrozenLake 8x8 (slippery).
+# - Build MDPNetwork from CustomisedFrozenLakeEnv
+# - Precompute baseline (policy + occupancy)
+# - Run GA with a single multi-output objective: obj_multi_perf (two integrals)
+# - Parallel scoring sanity check
+# - Print Pareto front and simple assertions
 
 import os
 
@@ -15,7 +14,7 @@ from mdp_network.ga_mdp_search import (
     MDPEvolutionGA,
     register_score_fn,
     evaluate_mdp_objectives,
-    obj_multi_kl_and_perf,   # single multi-output objective
+    obj_multi_perf,           # single multi-output objective
 )
 
 from mdp_network.mdp_network import MDPNetwork
@@ -29,7 +28,7 @@ from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measu
 
 
 def build_frozenlake_mdp_via_env(map_name: str = "8x8", is_slippery: bool = True) -> MDPNetwork:
-    """Create an MDPNetwork by constructing CustomisedFrozenLakeEnv and calling get_mdp_network()."""
+    """Create an MDPNetwork via CustomisedFrozenLakeEnv.get_mdp_network()."""
     env = CustomisedFrozenLakeEnv(render_mode=None, map_name=map_name, is_slippery=is_slippery)
     env.reset(seed=0)
     mdp = env.get_mdp_network()
@@ -45,17 +44,21 @@ if __name__ == "__main__":
 
     workers = os.cpu_count()
 
-    # GA config (kept similar to your previous test; tweak down for faster runs if needed)
+    # Register the multi-output objective with per-function constants.
+    # You can tweak blend_weight here without touching the GAConfig.
+    register_score_fn("obj_multi_perf", obj_multi_perf, const={"blend_weight": 0.8})
+
+    # GA config (kept as requested; only added add_edge_allow_out_of_scope=False)
     cfg = GAConfig(
-        population_size=26,
-        generations=100,
+        population_size=100,
+        generations=200,
         tournament_k=2,
-        elitism_num=8,
+        elitism_num=10,
         crossover_rate=0.5,
 
         allow_self_loops=True,
         min_out_degree=1,
-        max_out_degree=6,
+        max_out_degree=4,
         prob_floor=1e-6,
         add_edge_attempts_per_child=10,
         epsilon_new_prob=0.1,
@@ -68,16 +71,19 @@ if __name__ == "__main__":
         reward_k_percent=0.05,
         reward_ref_floor=1e-3,
 
-        # Parallel scoring (multi-objective via single multi-output fn)
+        # forbid adding transitions to out-of-scope states
+        add_edge_allow_out_of_scope=False,
+
+        # Parallel scoring (single multi-output fn)
         n_workers=workers,
         score_fn_names=["obj_multi_perf"],
         score_args=None,
         score_kwargs=None,
 
-        # Parallel offspring (process-pool only)
+        # Parallel offspring
         mutation_n_workers=workers,
 
-        # Distance params (applied in main & workers)
+        # Distance / scope (used by add_edge_allow_out_of_scope)
         dist_max_hops=5,
         dist_node_cap=2048,
         dist_weight_eps=1e-6,
@@ -100,7 +106,7 @@ if __name__ == "__main__":
     # GA driver
     ga = MDPEvolutionGA(base_mdp=mdp, cfg=cfg)
 
-    # ----- Serial PRECOMPUTE on the BASE MDP (so KL has a proper baseline) -----
+    # ----- Serial PRECOMPUTE on the BASE MDP -----
     V, Q = optimal_value_iteration(
         mdp, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
     )
@@ -110,7 +116,7 @@ if __name__ == "__main__":
     base_occupancy = compute_occupancy_measure(
         mdp, base_policy, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
     )
-    # Provide artifacts to GA so workers can consume them via kwargs["precomputed_portables"]
+    # Broadcast artifacts to workers
     ga.precomputed_artifacts = [base_policy, base_occupancy]
 
     # ----- Optional: parallel evaluate_mdp_objectives sanity check -----
@@ -133,13 +139,12 @@ if __name__ == "__main__":
             "perf_theta": cfg.perf_theta if cfg.perf_theta is not None else cfg.vi_theta,
             "perf_max_iterations": cfg.perf_max_iterations if cfg.perf_max_iterations is not None else cfg.vi_max_iterations,
         },
-        # broadcast the same baseline artifacts the GA will broadcast at run()
+        # same baseline artifacts as GA.run()
         precomputed_portables=[base_policy.to_portable(), base_occupancy.to_portable()],
     )
     print("Batch objective vectors:", [[round(x, 6) for x in v] for v in obj_vecs])
     assert isinstance(obj_vecs, list) and len(obj_vecs) == len(batch)
-    # multi-output fn returns two objectives; assert via the observed dimension
-    expected_dim = len(obj_vecs[0])
+    expected_dim = len(obj_vecs[0])  # multi-output => 2
     assert expected_dim == 2
     assert all(isinstance(v, list) and len(v) == expected_dim for v in obj_vecs)
 
@@ -147,13 +152,13 @@ if __name__ == "__main__":
     print("\n=== Run NSGA-II GA for a few generations ===")
     pareto_mdps, pareto_objs, pop, pop_objs = ga.run()
 
-    # Print a brief summary
+    # Summary
     print(f"\nPareto front size = {len(pareto_mdps)}")
     for i, vec in enumerate(pareto_objs[:10]):
         print(f"  PF[{i}] objs = {[round(x, 6) for x in vec]}")
     print(f"Final population size = {len(pop)}")
 
-    # Simple sanity assertions
+    # Sanity assertions
     assert all(isinstance(m, MDPNetwork) for m in pareto_mdps)
     assert len(pareto_objs) == len(pareto_mdps)
     assert all(len(v) == expected_dim for v in pareto_objs)
@@ -161,7 +166,7 @@ if __name__ == "__main__":
 
     print("\nOK: NSGA-II GA ran successfully on FrozenLake 8x8 with parallel scoring & offspring.")
 
-    # Save the Pareto front MDPs as JSON (save top K or all)
+    # Save PF MDPs
     os.makedirs(out_dir, exist_ok=True)
     K = len(pareto_mdps)
     for i in range(K):

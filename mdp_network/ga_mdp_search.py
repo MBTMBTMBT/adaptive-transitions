@@ -2,13 +2,11 @@
 # Genetic search system for MDPNetwork (structure + probability + reward)
 # with optional parallel scoring and parallel offspring mutation using a process pool (Linux, Python 3.10).
 #
-# NSGA-II multi-objective version + multi-output score support:
-# - A score function may return either a single float OR a sequence of floats (objectives).
-# - evaluate_mdp_objectives concatenates outputs from one or more registered score functions.
-# - Precompute on the base MDP: Value Iteration -> Q -> softmax Policy (temperature) + Occupancy
-#   and broadcast them to workers via kwargs["precomputed_portables"].
-# - A combined score fn `obj_multi_kl_and_perf` computes (1) -KL(policy,occ) similarity
-#   to the baseline, and (2) performance integral, with a single VI on the current MDP.
+# NSGA-II multi-objective + multi-output score support + per-score constants:
+# - A score function may return either a float OR a sequence of floats.
+# - register_score_fn(..., const=dict) lets you pass per-function constant params at registration time.
+#   They are injected as kwargs["score_const"] in workers.
+# - Optional serial precompute on base MDP: VI -> Q -> softmax policy + occupancy, broadcast to workers.
 
 from __future__ import annotations
 
@@ -34,26 +32,36 @@ from mdp_network import MDPNetwork
 State = int
 Action = int
 EdgeTriple = Tuple[State, Action, State]
-# A score function may return a single float OR a sequence (list/tuple/ndarray) of floats.
-ScoreFn = Callable[['MDPNetwork', Any], Any]
+ScoreFn = Callable[['MDPNetwork', Any], Any]  # may return float or sequence
 DistanceFn = Callable[['MDPNetwork', State, State], float]
 
 # -------------------------------
-# Score function registry
+# Score function registry (+ per-fn constants)
 # -------------------------------
 
 SCORE_FN_REGISTRY: Dict[str, ScoreFn] = {}
+SCORE_CONST_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
-def register_score_fn(name: str, fn: ScoreFn) -> None:
+def register_score_fn(name: str, fn: ScoreFn, const: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Register a score function.
+    - name: registry key used in GAConfig.score_fn_names
+    - fn:   callable(mdp, *args, **kwargs) -> float | sequence[float]
+    - const: per-function constants available inside fn via kwargs["score_const"]
+    """
     SCORE_FN_REGISTRY[name] = fn
+    SCORE_CONST_REGISTRY[name] = dict(const or {})
 
 def get_registered_score_fn(name: str) -> ScoreFn:
     if name not in SCORE_FN_REGISTRY:
         raise KeyError(f"Score function '{name}' is not registered.")
     return SCORE_FN_REGISTRY[name]
 
+def get_registered_score_const(name: str) -> Dict[str, Any]:
+    return SCORE_CONST_REGISTRY.get(name, {})
+
 # -------------------------------
-# Single distance function
+# Distance
 # -------------------------------
 
 def directed_prob_distance(
@@ -70,6 +78,7 @@ def directed_prob_distance(
     if s == sp:
         return 0.0
     G = mdp.graph
+
     # BFS-reachable scope
     if max_hops is not None:
         hop_dist = nx.single_source_shortest_path_length(G, source=s, cutoff=max_hops)
@@ -83,7 +92,8 @@ def directed_prob_distance(
                 if v not in allowed:
                     allowed.add(v)
                     q.append(v)
-    # cap
+
+    # optional cap
     if node_cap is not None and len(allowed) > node_cap:
         if 'hop_dist' in locals():
             kept = sorted(allowed, key=lambda x: hop_dist.get(x, 10**9))[:node_cap]
@@ -120,6 +130,17 @@ def directed_prob_distance(
                 heapq.heappush(heap, (nd, v))
     return float(unreachable)
 
+def _allowed_nodes_within_scope(mdp: 'MDPNetwork', s: State, cfg: 'GAConfig') -> Set[int]:
+    """Nodes inside the search scope defined by dist_max_hops/node_cap. If dist_max_hops is None -> all states."""
+    if cfg.dist_max_hops is None:
+        return set(mdp.states)
+    hop_dist = nx.single_source_shortest_path_length(mdp.graph, source=s, cutoff=cfg.dist_max_hops)
+    allowed = set(hop_dist.keys())
+    if cfg.dist_node_cap is not None and len(allowed) > cfg.dist_node_cap:
+        kept = sorted(allowed, key=lambda x: hop_dist.get(x, 10**9))[:cfg.dist_node_cap]
+        allowed = set(kept)
+    return allowed
+
 # -------------------------------
 # GA config
 # -------------------------------
@@ -144,6 +165,8 @@ class GAConfig:
     epsilon_new_prob: float = 0.02
     gamma_sample: float = 1.0
     gamma_prob: float = 0.0
+    # forbid adding edges to out-of-scope nodes (as defined by dist_*). Default keeps old behavior.
+    add_edge_allow_out_of_scope: bool = True
 
     # Hard pruning by threshold
     prune_prob_threshold: Optional[float] = None
@@ -177,18 +200,14 @@ class GAConfig:
     # Randomness
     seed: Optional[int] = None
 
-    # --------- Algorithm/score parameters ---------
+    # Solver / score params
     vi_gamma: float = 0.99
     vi_theta: float = 1e-6
     vi_max_iterations: int = 1000
 
-    # Softmax temperature for q_table_to_policy
     policy_temperature: float = 1.0
-
-    # KL epsilon
     kl_delta: float = 1e-3
 
-    # Performance curve params
     perf_numpoints: int = 100
     perf_gamma: Optional[float] = None
     perf_theta: Optional[float] = None
@@ -208,10 +227,7 @@ def get_outgoing_for_action(mdp: 'MDPNetwork', s: State, a: Action) -> Dict[Stat
             out[int(sp)] = (p, r)
     return out
 
-def set_outgoing_for_action(mdp: 'MDPNetwork',
-                            s: State,
-                            a: Action,
-                            new_map: Dict[State, Tuple[float, float]]):
+def set_outgoing_for_action(mdp: 'MDPNetwork', s: State, a: Action, new_map: Dict[State, Tuple[float, float]]):
     for sp in list(mdp.graph.successors(s)):
         edata = mdp.graph[s][sp]
         if "transitions" in edata and a in edata["transitions"]:
@@ -274,21 +290,27 @@ def _dist_from_cfg(mdp: 'MDPNetwork', s: State, sp: State, cfg: GAConfig) -> flo
         unreachable=cfg.dist_unreachable,
     )
 
-def mutation_add_edge(mdp: 'MDPNetwork',
-                      rng: np.random.Generator,
-                      dist_fn: DistanceFn,
-                      cfg: GAConfig):
+def mutation_add_edge(mdp: 'MDPNetwork', rng: np.random.Generator, dist_fn: DistanceFn, cfg: GAConfig):
     candidates_sa = [(s, a) for (s, a) in list_all_action_pairs(mdp)
                      if action_out_degree(mdp, s, a) < cfg.max_out_degree]
     if not candidates_sa:
         return
+
     s, a = candidates_sa[rng.integers(0, len(candidates_sa))]
     existing = set(get_outgoing_for_action(mdp, s, a).keys())
+
     sp_candidates = [sp for sp in mdp.states
-                     if (cfg.allow_self_loops or sp != s)
-                     and sp not in existing]
+                     if (cfg.allow_self_loops or sp != s) and sp not in existing]
+
+    # NEW: strictly limit candidate sp to scope if requested
+    if not cfg.add_edge_allow_out_of_scope:
+        allowed = _allowed_nodes_within_scope(mdp, s, cfg)
+        sp_candidates = [sp for sp in sp_candidates if sp in allowed]
+
     if not sp_candidates:
         return
+
+    # distance-weighted sampling
     weights = []
     for sp in sp_candidates:
         d = _dist_from_cfg(mdp, s, sp, cfg)
@@ -298,6 +320,7 @@ def mutation_add_edge(mdp: 'MDPNetwork',
     if weights.sum() == 0.0:
         return
     weights /= weights.sum()
+
     sp_new = int(rng.choice(sp_candidates, p=weights))
     d_new = _dist_from_cfg(mdp, s, sp_new, cfg)
     p_new = cfg.epsilon_new_prob
@@ -313,7 +336,6 @@ def mutation_add_edge(mdp: 'MDPNetwork',
     set_outgoing_for_action(mdp, s, a, out_map)
 
 def prune_low_prob_transitions(mdp: 'MDPNetwork', threshold: float):
-    """Remove ALL transitions with prob < threshold; renormalize residuals."""
     thr = float(threshold)
     for s in mdp.states:
         if s in mdp.terminal_states:
@@ -326,9 +348,7 @@ def prune_low_prob_transitions(mdp: 'MDPNetwork', threshold: float):
             if len(kept) != len(out_map):
                 set_outgoing_for_action(mdp, s, a, kept)
 
-def mutation_prob_pairwise(mdp: 'MDPNetwork',
-                           rng: np.random.Generator,
-                           cfg: GAConfig):
+def mutation_prob_pairwise(mdp: 'MDPNetwork', rng: np.random.Generator, cfg: GAConfig):
     pairs_sa = list_all_action_pairs(mdp)
     if not pairs_sa:
         return
@@ -355,9 +375,7 @@ def mutation_prob_pairwise(mdp: 'MDPNetwork',
                 out_map[sp] = (max(cfg.prob_floor, p / total), r)
         set_outgoing_for_action(mdp, s, a, out_map)
 
-def mutation_reward_smallstep(mdp: 'MDPNetwork',
-                              rng: np.random.Generator,
-                              cfg: GAConfig):
+def mutation_reward_smallstep(mdp: 'MDPNetwork', rng: np.random.Generator, cfg: GAConfig):
     triples = list_all_triples(mdp)
     if not triples:
         return
@@ -377,9 +395,7 @@ def mutation_reward_smallstep(mdp: 'MDPNetwork',
 # Crossover
 # -------------------------------
 
-def crossover_action_block(parent_a: 'MDPNetwork',
-                           parent_b: 'MDPNetwork',
-                           rng: np.random.Generator) -> 'MDPNetwork':
+def crossover_action_block(parent_a: 'MDPNetwork', parent_b: 'MDPNetwork', rng: np.random.Generator) -> 'MDPNetwork':
     child = parent_a.clone()
     for s in child.states:
         if s in child.terminal_states:
@@ -455,11 +471,8 @@ def compute_crowding_distance(objs: List[List[float]], idxs: List[int]) -> Dict[
             distance[i_mid] += gap
     return distance
 
-def tournament_select_mo(pop: List['MDPNetwork'],
-                         rng: np.random.Generator,
-                         k: int,
-                         ranks: List[int],
-                         crowding: Dict[int, float]) -> 'MDPNetwork':
+def tournament_select_mo(pop: List['MDPNetwork'], rng: np.random.Generator, k: int,
+                         ranks: List[int], crowding: Dict[int, float]) -> 'MDPNetwork':
     idxs = rng.choice(len(pop), size=k, replace=False)
     best = int(idxs[0])
     for j in idxs[1:]:
@@ -471,33 +484,38 @@ def tournament_select_mo(pop: List['MDPNetwork'],
     return pop[best]
 
 # -------------------------------
-# Parallel scoring (multi-output aware)
+# Parallel scoring (multi-output aware + per-fn const)
 # -------------------------------
 
 def _flatten_objectives(val: Any) -> List[float]:
-    """Normalize a score fn return to a list[float]."""
     if isinstance(val, (list, tuple)):
         return [float(x) for x in val]
     if isinstance(val, np.ndarray):
         return [float(x) for x in val.ravel().tolist()]
-    # assume scalar
     return [float(val)]
 
 def _score_worker_multi(payload: Tuple[Dict[str, Any], List[str], Tuple[Any, ...], Dict[str, Any], Optional[List[Dict[str, Any]]]]) -> List[float]:
     """
     payload = (mdp_portable, score_fn_names, args, kwargs, precomputed_portables)
-    Returns a list of floats (objective vector). Each function may return a float or a sequence of floats.
+    Returns objective vector (each fn may return float or sequence).
     """
     portable, fn_names, args, kwargs, precomputed_portables = payload
     mdp = MDPNetwork.from_portable(portable)
+
+    # base kwargs
     if precomputed_portables is not None and "precomputed_portables" not in kwargs:
-        local_kwargs = dict(kwargs); local_kwargs["precomputed_portables"] = precomputed_portables
+        base_kwargs = dict(kwargs); base_kwargs["precomputed_portables"] = precomputed_portables
     else:
-        local_kwargs = kwargs
+        base_kwargs = dict(kwargs)
 
     out: List[float] = []
     for name in fn_names:
         fn = get_registered_score_fn(name)
+        const = get_registered_score_const(name)
+        local_kwargs = dict(base_kwargs)
+        # inject per-fn constants under a fixed key
+        if "score_const" not in local_kwargs:
+            local_kwargs["score_const"] = const
         val = fn(mdp, *args, **local_kwargs)
         out.extend(_flatten_objectives(val))
     return out
@@ -558,10 +576,7 @@ def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------------
 
 class MDPEvolutionGA:
-    """
-    NSGA-II on MDPNetwork with optional serial precompute (policy+occupancy) broadcast to workers.
-    Score functions may return a single float or a sequence of floats (multi-output).
-    """
+    """NSGA-II on MDPNetwork with optional serial precompute; score fns may return multi-output."""
 
     def __init__(self, base_mdp: 'MDPNetwork', cfg: GAConfig):
         if not cfg.score_fn_names or len(cfg.score_fn_names) < 1:
@@ -575,7 +590,6 @@ class MDPEvolutionGA:
         self.whitelist: Set[EdgeTriple] = build_original_whitelist(self.base_mdp)
         self._base_portable = self.base_mdp.to_portable()
 
-        # Precompute slots
         self.precomputed_artifacts: Optional[List[Serialisable]] = None
         self._precomputed_portables: Optional[List[Dict[str, Any]]] = None
 
@@ -617,7 +631,7 @@ class MDPEvolutionGA:
         return children
 
     def _evaluate_population(self, pop: List['MDPNetwork']) -> List[List[float]]:
-        # Inject default kwargs from config so users don't have to repeat them manually.
+        # default kwargs for score fns
         kw = dict(self.cfg.score_kwargs or {})
         kw.setdefault("vi_gamma", self.cfg.vi_gamma)
         kw.setdefault("vi_theta", self.cfg.vi_theta)
@@ -625,7 +639,6 @@ class MDPEvolutionGA:
         kw.setdefault("policy_temperature", self.cfg.policy_temperature)
         kw.setdefault("kl_delta", self.cfg.kl_delta)
         kw.setdefault("perf_numpoints", self.cfg.perf_numpoints)
-        # perf_* fall back to vi_* if not explicitly set
         kw.setdefault("perf_gamma", self.cfg.perf_gamma if self.cfg.perf_gamma is not None else self.cfg.vi_gamma)
         kw.setdefault("perf_theta", self.cfg.perf_theta if self.cfg.perf_theta is not None else self.cfg.vi_theta)
         kw.setdefault("perf_max_iterations", self.cfg.perf_max_iterations if self.cfg.perf_max_iterations is not None else self.cfg.vi_max_iterations)
@@ -642,12 +655,12 @@ class MDPEvolutionGA:
     def run(self) -> Tuple[List['MDPNetwork'], List[List[float]], List['MDPNetwork'], List[List[float]]]:
         """
         Returns:
-            pareto_mdps:  List[MDPNetwork]  -- final non-dominated front (F1)
-            pareto_objs:  List[List[float]] -- objective vectors aligned with pareto_mdps
-            pop:          List[MDPNetwork]  -- final whole population
-            pop_objs:     List[List[float]] -- objective vectors for the final population
+            pareto_mdps: final non-dominated front (F1)
+            pareto_objs: objective vectors for pareto_mdps
+            pop:         final population
+            pop_objs:    objective vectors for final population
         """
-        # ----- PRECOMPUTE (serial, once) -----
+        # Precompute (baseline)
         if self.precomputed_artifacts is not None:
             self._precomputed_portables = [obj.to_portable() for obj in self.precomputed_artifacts]
             print(f"[Precompute] Using provided artifacts: {len(self._precomputed_portables)} item(s).")
@@ -672,10 +685,9 @@ class MDPEvolutionGA:
             self._precomputed_portables = [base_policy.to_portable(), base_occupancy.to_portable()]
             print("[Precompute] Built baseline policy+occupancy and broadcast to workers.")
 
-        # ----- Init -----
+        # Init
         pop = self._init_population()
         objs = self._evaluate_population(pop)
-        M = len(objs[0]) if objs else 0
 
         def _summ(o: List[List[float]]) -> str:
             if not o: return "NA"
@@ -687,7 +699,7 @@ class MDPEvolutionGA:
 
         print(f"[Init] pop={len(pop)} | { _summ(objs) }")
 
-        # Prepare selection metrics
+        # selection metrics
         fronts = fast_non_dominated_sort(objs)
         ranks = [0] * len(pop)
         for r, F in enumerate(fronts):
@@ -697,7 +709,7 @@ class MDPEvolutionGA:
         for F in fronts:
             crowding.update(compute_crowding_distance(objs, F))
 
-        # ----- Generations -----
+        # Generations
         for gen in range(self.cfg.generations):
             target = self.cfg.population_size
             parents_pairs: List[Tuple[MDPNetwork, MDPNetwork]] = []
@@ -750,29 +762,26 @@ class MDPEvolutionGA:
         return pareto_mdps, pareto_objs, pop, objs
 
 # -------------------------------
-# Combined multi-output objective function
+# Example multi-output objectives
 # -------------------------------
 
 def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     """
-    Returns two objectives [ -KL, performance_integral ] for the CURRENT MDP.
-    Shared computation (single VI -> policy -> occupancy) to avoid duplicate work.
-    Uses baseline (policy, occupancy) from kwargs["precomputed_portables"] for KL.
+    Return [ -KL(baseline || current), performance_integral ].
+    Shared VI -> policy -> occupancy for current MDP.
     """
-    # VI / policy params
     gamma = float(kwargs.get("vi_gamma", 0.99))
     theta = float(kwargs.get("vi_theta", 1e-6))
     max_iter = int(kwargs.get("vi_max_iterations", 1000))
     temperature = float(kwargs.get("policy_temperature", 1.0))
     delta = float(kwargs.get("kl_delta", 1e-3))
 
-    # Perf params (fallback to VI params)
     pgamma = float(kwargs.get("perf_gamma", gamma))
     ptheta = float(kwargs.get("perf_theta", theta))
     pmax_iter = int(kwargs.get("perf_max_iterations", max_iter))
     numpoints = int(kwargs.get("perf_numpoints", 100))
 
-    # Baseline artifacts (from precompute)
+    # Baseline
     base_policy = None
     base_occupancy = None
     _pre = kwargs.get("precomputed_portables", None)
@@ -780,7 +789,7 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
         base_policy = PolicyTable.from_portable(_pre[0])
         base_occupancy = ValueTable.from_portable(_pre[1])
 
-    # Current MDP solve once
+    # Solve current
     _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
     policy2: PolicyTable = q_table_to_policy(Q2, states=list(mdp.states),
                                              num_actions=mdp.num_actions,
@@ -788,20 +797,15 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     occupancy2: ValueTable = compute_occupancy_measure(mdp, policy=policy2,
                                                        gamma=gamma, theta=theta, max_iterations=max_iter)
 
-    # Objective 1: -KL similarity to baseline (if baseline missing -> 0.0)
+    # Objective 1: -KL
     if base_policy is not None and base_occupancy is not None:
-        kl = kl_policies(
-            policy1=base_policy,
-            occupancy1=base_occupancy,
-            policy2=policy2,
-            occupancy2=occupancy2,
-            delta=delta,
-        )
+        kl = kl_policies(policy1=base_policy, occupancy1=base_occupancy,
+                         policy2=policy2, occupancy2=occupancy2, delta=delta)
         obj1 = -float(kl)
     else:
         obj1 = 0.0
 
-    # Objective 2: performance curve integral (random prior vs current target policy)
+    # Objective 2: performance integral (random prior -> current)
     prior_policy: PolicyTable = create_random_policy(mdp)
     _curve, integral = performance_curve_and_integral(
         prior_policy=prior_policy,
@@ -816,56 +820,53 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
 
     return [obj1, obj2]
 
-
 def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     """
-    Returns two objectives [ -KL, performance_integral ] for the CURRENT MDP.
-    Shared computation (single VI -> policy -> occupancy) to avoid duplicate work.
-    Uses baseline (policy, occupancy) from kwargs["precomputed_portables"] for KL.
+    Example that uses per-function constants via kwargs["score_const"].
+    Expects const like {"blend_weight": 0.8}.
+    Returns two integrals:
+      1) integral(prior = blend(policy2, random, w), target = baseline_policy)
+      2) integral(prior = random, target = policy2)
     """
-    # VI / policy params
+    const = kwargs.get("score_const", {}) or {}
+    blend_w = float(const.get("blend_weight", 0.8))
+
     gamma = float(kwargs.get("vi_gamma", 0.99))
     theta = float(kwargs.get("vi_theta", 1e-6))
     max_iter = int(kwargs.get("vi_max_iterations", 1000))
     temperature = float(kwargs.get("policy_temperature", 1.0))
-    delta = float(kwargs.get("kl_delta", 1e-3))
 
-    # Perf params (fallback to VI params)
     pgamma = float(kwargs.get("perf_gamma", gamma))
     ptheta = float(kwargs.get("perf_theta", theta))
     pmax_iter = int(kwargs.get("perf_max_iterations", max_iter))
     numpoints = int(kwargs.get("perf_numpoints", 100))
 
-    # Baseline artifacts (from precompute)
-    base_policy = None
-    base_occupancy = None
     _pre = kwargs.get("precomputed_portables", None)
-    if _pre and len(_pre) >= 2:
-        base_policy = PolicyTable.from_portable(_pre[0])
-        base_occupancy = ValueTable.from_portable(_pre[1])
+    base_policy = PolicyTable.from_portable(_pre[0]) if (_pre and len(_pre) >= 1) else None
 
-    # Current MDP solve once
     _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
     policy2: PolicyTable = q_table_to_policy(Q2, states=list(mdp.states),
                                              num_actions=mdp.num_actions,
                                              temperature=temperature)
-    blended_policy2 = blend_policies(policy2, create_random_policy(mdp), weight=0.8)
 
-    # Objective 1: performance curve integral (current target policy vs final target policy)
-    _curve, integral = performance_curve_and_integral(
-        prior_policy=blended_policy2,
-        target_policy=base_policy,
-        mdp_network=mdp,
-        numpoints=numpoints,
-        gamma=pgamma,
-        theta=ptheta,
-        max_iterations=pmax_iter,
-    )
-    obj1 = float(integral)
+    # Integral 1: blended prior -> baseline target
+    blended_policy2 = blend_policies(policy2, create_random_policy(mdp), weight=blend_w)
+    if base_policy is not None:
+        _curve, integral1 = performance_curve_and_integral(
+            prior_policy=blended_policy2,
+            target_policy=base_policy,
+            mdp_network=mdp,
+            numpoints=numpoints,
+            gamma=pgamma,
+            theta=ptheta,
+            max_iterations=pmax_iter,
+        )
+    else:
+        integral1 = 0.0
 
-    # Objective 2: performance curve integral (random prior vs current target policy)
+    # Integral 2: random prior -> current target
     prior_policy: PolicyTable = create_random_policy(mdp)
-    _curve, integral = performance_curve_and_integral(
+    _curve, integral2 = performance_curve_and_integral(
         prior_policy=prior_policy,
         target_policy=policy2,
         mdp_network=mdp,
@@ -874,78 +875,9 @@ def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
         theta=ptheta,
         max_iterations=pmax_iter,
     )
-    obj2 = float(integral)
+    return [float(integral1), float(integral2)]
 
-    return [obj1, obj2]
-
-# Register the combined multi-output objective
-register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
-register_score_fn("obj_multi_perf", obj_multi_perf)
-
-# -------------------------------
-# Tiny demo
-# -------------------------------
 
 if __name__ == "__main__":
-    # Mini MDP demo
-    nS, nA = 5, 2
-    cfg_demo: Dict[str, Any] = {
-        "num_actions": nA,
-        "states": list(range(nS)),
-        "start_states": [0],
-        "terminal_states": [4],
-        "default_reward": 0.0,
-        "transitions": {
-            "0": {"0": {"1": {"p": 0.8, "r": 0.0}, "0": {"p": 0.2, "r": 0.0}}, "1": {"2": {"p": 1.0, "r": 0.0}}},
-            "1": {"0": {"2": {"p": 0.7, "r": 0.0}, "3": {"p": 0.3, "r": 0.0}}, "1": {"1": {"p": 1.0, "r": 0.0}}},
-            "2": {"0": {"3": {"p": 1.0, "r": 0.0}}, "1": {"2": {"p": 1.0, "r": 0.0}}},
-            "3": {"0": {"4": {"p": 0.9, "r": 1.0}, "3": {"p": 0.1, "r": 0.0}}, "1": {"1": {"p": 1.0, "r": 0.0}}},
-        },
-    }
-    base_mdp = MDPNetwork(config_data=cfg_demo)
-
-    # NSGA-II with the combined objective
-    cfg = GAConfig(
-        population_size=64,
-        generations=8,
-        tournament_k=2,
-        crossover_rate=1.0,
-        allow_self_loops=True,
-        min_out_degree=1,
-        max_out_degree=6,
-        prob_floor=1e-6,
-        add_edge_attempts_per_child=1,
-        prune_prob_threshold=1e-3,
-        prob_tweak_actions_per_child=8,
-        prob_pairwise_step=0.02,
-        reward_tweak_edges_per_child=8,
-        reward_k_percent=0.02,
-        reward_ref_floor=1e-3,
-
-        # Parallel
-        n_workers=max(1, os.cpu_count() or 1),
-        score_fn_names=["obj_multi_kl_and_perf"],  # single fn; returns two objectives
-        mutation_n_workers=max(1, os.cpu_count() or 1),
-
-        # VI / policy / KL / perf params
-        vi_gamma=0.99,
-        vi_theta=1e-6,
-        vi_max_iterations=1000,
-        policy_temperature=1.0,
-        kl_delta=1e-3,
-        perf_numpoints=64,
-        perf_gamma=None,
-        perf_theta=None,
-        perf_max_iterations=None,
-
-        seed=123,
-    )
-
-    ga = MDPEvolutionGA(base_mdp=base_mdp, cfg=cfg)
-    pareto_mdps, pareto_objs, pop, pop_objs = ga.run()
-
-    print("\n=== NSGA-II finished ===")
-    print(f"Pareto front size = {len(pareto_mdps)}")
-    for i, o in enumerate(pareto_objs[:10]):
-        print(f"  PF[{i}] objs = {list(map(lambda x: round(x, 6), o))}")
-    print(f"Final population size = {len(pop)}")
+    register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
+    register_score_fn("obj_multi_perf", obj_multi_perf, const={"blend_weight": 0.8})

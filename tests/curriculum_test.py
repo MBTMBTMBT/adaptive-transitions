@@ -1,11 +1,15 @@
 # test_q_learning_frozenlake_json_envs_two_phase_cb.py
 # English comments only. Two-phase training using PeriodicEvalCallback with pairwise comparisons.
+# Parallelized across seeds via process pool (Linux / Python 3.10).
 
 import os
 from pathlib import Path
 from typing import List, Dict, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 
 from gymnasium.wrappers import TimeLimit
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -81,9 +85,9 @@ OUTPUT_DIR = "./outputs/ga_cl"
 JSON_DIR = "./outputs/ga_test"   # folder containing multiple *.json MDPs
 
 # Two-phase schedule (no cycles)
-STEPS_JSON_PHASE = 25_000       # Phase A: train on JSON-backed env
+STEPS_JSON_PHASE = 25_000        # Phase A: train on JSON-backed env
 STEPS_BASE_PHASE = 125_000       # Phase B: continue training on baseline env
-EVAL_EVERY = 1_000              # desired evaluation cadence (actual cadence may be coarser)
+EVAL_EVERY = 1_000               # desired evaluation cadence (actual cadence may be coarser)
 N_EVAL_EPISODES = 100            # episodes per evaluation point
 
 # Agent hyperparams
@@ -105,16 +109,14 @@ SEEDS = [0, 1, 2, 3, 4]
 # =========================
 # We call the baseline env the Target environment.
 TARGET_NAME = "Target"
-SOURCE_NAME_FMT = "Source-A ({label})"  # label is the JSON stem
-
-LINE_TARGET_BASELINE = f"{TARGET_NAME}-only training (baseline)"                  # train+eval on Target
-LINE_CURR_EVAL_TARGET = f"Curriculum → {TARGET_NAME} (primary)"                  # Phase A on Source, Phase B on Target, eval on Target
-LINE_CURR_EVAL_SOURCE = "Curriculum (eval on Source-A)"                          # same training, eval on Source-A
+LINE_TARGET_BASELINE   = f"{TARGET_NAME}-only training (baseline)"        # train+eval on Target
+LINE_CURR_EVAL_TARGET  = f"Curriculum → {TARGET_NAME} (primary)"          # Phase A on Source, Phase B on Target, eval on Target
+LINE_CURR_EVAL_SOURCE  = "Curriculum (eval on Source-A)"                  # same training, eval on Source-A
 
 # Plot style knobs (kept modest; no explicit colors)
 PHASE_LINE_LS = "--"
 PHASE_LINE_ALPHA = 0.7
-PRIMARY_LW = 2.2  # emphasize the primary line a bit
+PRIMARY_LW = 2.2
 OTHER_LW = 1.5
 
 
@@ -189,6 +191,128 @@ def mean_std(curves: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
 
 
 # =========================
+# One-seed worker (runs in subprocess)
+# =========================
+def _run_one_seed(seed: int, json_files: List[str]) -> Dict:
+    """
+    Runs the full two-phase schedule for a single seed inside a subprocess.
+    Returns numpy arrays and dicts only (pickle-safe).
+    """
+    json_info = [(Path(p).stem, p) for p in json_files]
+
+    # Each process builds its own eval env (no sharing across processes)
+    baseline_eval_env = make_baseline_env(seed=12345)
+
+    # ---- Target-only (baseline) ----
+    base_train_env = DummyVecEnv([lambda: make_baseline_env(seed=seed)])
+    base_agent = TabularQAgent(
+        env=base_train_env,
+        learning_rate=LEARNING_RATE,
+        gamma=GAMMA,
+        policy_mix=POLICY_MIX,
+        temperature=TEMPERATURE,
+        seed=seed,
+        verbose=0,
+    )
+
+    base_greedy_curve: List[float] = []
+    base_train_curve: List[float] = []
+    base_cb = PeriodicEvalCallback(
+        eval_env=baseline_eval_env,
+        eval_every=EVAL_EVERY,
+        n_eval_episodes=N_EVAL_EPISODES,
+        greedy_scores_list=base_greedy_curve,
+        train_scores_list=base_train_curve,
+        eval_seed_base=10_000 + seed,
+        verbose=0,
+    )
+
+    base_agent.learn(total_timesteps=STEPS_JSON_PHASE, reset_num_timesteps=False,
+                     progress_bar=False, callback=base_cb)
+    base_agent.learn(total_timesteps=STEPS_BASE_PHASE, reset_num_timesteps=False,
+                     progress_bar=False, callback=base_cb)
+
+    seed_checkpoints = build_checkpoints_from_curve_len(
+        STEPS_JSON_PHASE, STEPS_BASE_PHASE, len(base_greedy_curve)
+    )
+
+    # ---- Curriculum results per JSON ----
+    mixed_base: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    mixed_phase: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
+    for label, jp in json_info:
+        mdp = MDPNetwork(config_path=jp)
+        nx_train_env = DummyVecEnv([lambda: make_nx_env_from_mdp(mdp=mdp, seed=seed)])
+        base_train_env_for_mixed = DummyVecEnv([lambda: make_baseline_env(seed=seed)])
+
+        # Curriculum @ Target (primary eval)
+        agent = TabularQAgent(
+            env=base_train_env_for_mixed,
+            learning_rate=LEARNING_RATE,
+            gamma=GAMMA,
+            policy_mix=POLICY_MIX,
+            temperature=TEMPERATURE,
+            seed=seed,
+            verbose=0,
+        )
+        g1: List[float] = []; t1: List[float] = []
+        cb1 = PeriodicEvalCallback(
+            eval_env=baseline_eval_env,
+            eval_every=EVAL_EVERY,
+            n_eval_episodes=N_EVAL_EPISODES,
+            greedy_scores_list=g1,
+            train_scores_list=t1,
+            eval_seed_base=42 + 1000*seed + (hash(label) % 100),
+            verbose=0,
+        )
+        agent.set_env(nx_train_env)
+        agent.learn(total_timesteps=STEPS_JSON_PHASE, reset_num_timesteps=False,
+                    progress_bar=False, callback=cb1)
+        agent.set_env(base_train_env_for_mixed)
+        agent.learn(total_timesteps=STEPS_BASE_PHASE, reset_num_timesteps=False,
+                    progress_bar=False, callback=cb1)
+        mixed_base[label] = (np.asarray(g1, dtype=float), np.asarray(t1, dtype=float))
+
+        # Curriculum @ Source-A (aux eval)
+        agent2 = TabularQAgent(
+            env=base_train_env_for_mixed,
+            learning_rate=LEARNING_RATE,
+            gamma=GAMMA,
+            policy_mix=POLICY_MIX,
+            temperature=TEMPERATURE,
+            seed=seed,
+            verbose=0,
+        )
+        g2: List[float] = []; t2: List[float] = []
+        nx_eval_env = make_nx_env_from_mdp(mdp=mdp, seed=12345)
+        cb2 = PeriodicEvalCallback(
+            eval_env=nx_eval_env,
+            eval_every=EVAL_EVERY,
+            n_eval_episodes=N_EVAL_EPISODES,
+            greedy_scores_list=g2,
+            train_scores_list=t2,
+            eval_seed_base=84 + 1000*seed + (hash(label) % 100),
+            verbose=0,
+        )
+        agent2.set_env(nx_train_env)
+        agent2.learn(total_timesteps=STEPS_JSON_PHASE, reset_num_timesteps=False,
+                     progress_bar=False, callback=cb2)
+        agent2.set_env(base_train_env_for_mixed)
+        agent2.learn(total_timesteps=STEPS_BASE_PHASE, reset_num_timesteps=False,
+                     progress_bar=False, callback=cb2)
+        mixed_phase[label] = (np.asarray(g2, dtype=float), np.asarray(t2, dtype=float))
+
+    return {
+        "seed": seed,
+        "checkpoints": np.asarray(seed_checkpoints, dtype=int),
+        "base_greedy": np.asarray(base_greedy_curve, dtype=float),
+        "base_train": np.asarray(base_train_curve, dtype=float),
+        "mixed_base": mixed_base,   # {label: (greedy_arr, train_arr)}
+        "mixed_phase": mixed_phase, # {label: (greedy_arr, train_arr)}
+    }
+
+
+# =========================
 # Main
 # =========================
 if __name__ == "__main__":
@@ -203,159 +327,43 @@ if __name__ == "__main__":
     for p in json_paths:
         print(" -", p.name)
 
-    # Shared baseline evaluation env (Target)
-    baseline_eval_env = make_baseline_env(seed=12345)
+    # -------- Parallel loop over seeds --------
+    json_files = [str(p) for p in json_paths]
+    NUM_WORKERS = min(len(SEEDS), os.cpu_count() or 1)
 
-    # Storage (across seeds)
+    results = []
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS, mp_context=get_context("spawn")) as ex:
+        futures = {ex.submit(_run_one_seed, seed, json_files): seed for seed in SEEDS}
+        for fut in as_completed(futures):
+            res = fut.result()
+            results.append(res)
+            print(f"[Seed {res['seed']}] finished in subprocess.")
+
+    # Use the first seed’s checkpoints as the global x-axis; assert all match
+    checkpoints = results[0]["checkpoints"]
+    for res in results:
+        assert len(res["checkpoints"]) == len(checkpoints), \
+            f"Seed {res['seed']} produced different eval count."
+
+    # Prepare containers as before
     baseonly_greedy_all: List[np.ndarray] = []
     baseonly_train_all: List[np.ndarray] = []
+    mixed_base_greedy_by_json: Dict[str, List[np.ndarray]] = {Path(p).stem: [] for p in json_paths}
+    mixed_base_train_by_json:  Dict[str, List[np.ndarray]] = {Path(p).stem: [] for p in json_paths}
+    mixed_phase_greedy_by_json: Dict[str, List[np.ndarray]] = {Path(p).stem: [] for p in json_paths}
+    mixed_phase_train_by_json:  Dict[str, List[np.ndarray]] = {Path(p).stem: [] for p in json_paths}
 
-    mixed_base_greedy_by_json: Dict[str, List[np.ndarray]] = {p.stem: [] for p in json_paths}
-    mixed_base_train_by_json:  Dict[str, List[np.ndarray]] = {p.stem: [] for p in json_paths}
-    mixed_phase_greedy_by_json: Dict[str, List[np.ndarray]] = {p.stem: [] for p in json_paths}
-    mixed_phase_train_by_json:  Dict[str, List[np.ndarray]] = {p.stem: [] for p in json_paths}
-
-    # Global checkpoints (computed AFTER first baseline run)
-    checkpoints: np.ndarray | None = None
-
-    # =========================
-    # Loop over seeds
-    # =========================
-    for seed in SEEDS:
-        print(f"\n=== Seed {seed} ===")
-
-        # -------- Target-only (baseline) --------
-        base_train_env = DummyVecEnv([lambda: make_baseline_env(seed=seed)])
-        base_agent = TabularQAgent(
-            env=base_train_env,
-            learning_rate=LEARNING_RATE,
-            gamma=GAMMA,
-            policy_mix=POLICY_MIX,
-            temperature=TEMPERATURE,
-            seed=seed,
-            verbose=0,
-        )
-
-        base_greedy_curve: List[float] = []
-        base_train_curve: List[float] = []
-        base_cb = PeriodicEvalCallback(
-            eval_env=baseline_eval_env,
-            eval_every=EVAL_EVERY,     # desired cadence (actual may be coarser)
-            n_eval_episodes=N_EVAL_EPISODES,
-            greedy_scores_list=base_greedy_curve,
-            train_scores_list=base_train_curve,
-            eval_seed_base=10_000 + seed,
-            verbose=1,
-        )
-
-        # Train Phase A+B on Target (baseline)
-        base_agent.learn(total_timesteps=STEPS_JSON_PHASE, reset_num_timesteps=False,
-                         progress_bar=False, callback=base_cb)
-        base_agent.learn(total_timesteps=STEPS_BASE_PHASE, reset_num_timesteps=False,
-                         progress_bar=False, callback=base_cb)
-
-        # Checkpoints from actual eval count
-        seed_checkpoints = build_checkpoints_from_curve_len(
-            STEPS_JSON_PHASE, STEPS_BASE_PHASE, len(base_greedy_curve)
-        )
-        if checkpoints is None:
-            checkpoints = seed_checkpoints
-            print(f"Evaluation checkpoints (timesteps): {checkpoints.tolist()}")
-        else:
-            assert len(seed_checkpoints) == len(checkpoints), \
-                f"Seed produced a different number of eval points: {len(seed_checkpoints)} vs {len(checkpoints)}"
-
-        assert len(base_greedy_curve) == len(checkpoints), \
-            f"Baseline-only curve length mismatch: {len(base_greedy_curve)} vs {len(checkpoints)}"
-        baseonly_greedy_all.append(np.array(base_greedy_curve, dtype=float))
-        baseonly_train_all.append(np.array(base_train_curve, dtype=float))
-
-        # -------- Per-JSON: curriculum evaluated on TARGET (primary) --------
-        for jp in json_paths:
-            label = jp.stem
-            mdp = MDPNetwork(config_path=str(jp))
-            nx_train_env = DummyVecEnv([lambda: make_nx_env_from_mdp(mdp=mdp, seed=seed)])
-            base_train_env_for_mixed = DummyVecEnv([lambda: make_baseline_env(seed=seed)])
-
-            agent = TabularQAgent(
-                env=base_train_env_for_mixed,  # start on Target for space compatibility
-                learning_rate=LEARNING_RATE,
-                gamma=GAMMA,
-                policy_mix=POLICY_MIX,
-                temperature=TEMPERATURE,
-                seed=seed,
-                verbose=0,
-            )
-
-            greedy_curve: List[float] = []
-            train_curve: List[float] = []
-            cb = PeriodicEvalCallback(
-                eval_env=baseline_eval_env,     # evaluate on Target (primary)
-                eval_every=EVAL_EVERY,
-                n_eval_episodes=N_EVAL_EPISODES,
-                greedy_scores_list=greedy_curve,
-                train_scores_list=train_curve,
-                eval_seed_base=42 + 1000*seed + (hash(label) % 100),
-                verbose=1,
-            )
-
-            # Phase A: Source-A (JSON) env
-            agent.set_env(nx_train_env)
-            agent.learn(total_timesteps=STEPS_JSON_PHASE, reset_num_timesteps=False,
-                        progress_bar=False, callback=cb)
-            # Phase B: Target env
-            agent.set_env(base_train_env_for_mixed)
-            agent.learn(total_timesteps=STEPS_BASE_PHASE, reset_num_timesteps=False,
-                        progress_bar=False, callback=cb)
-
-            assert len(greedy_curve) == len(checkpoints), \
-                f"Curriculum@Target curve length mismatch for {label}: {len(greedy_curve)} vs {len(checkpoints)}"
-            mixed_base_greedy_by_json[label].append(np.array(greedy_curve, dtype=float))
-            mixed_base_train_by_json[label].append(np.array(train_curve, dtype=float))
-
-        # -------- Per-JSON: curriculum evaluated on SOURCE-A (aux baseline) --------
-        for jp in json_paths:
-            label = jp.stem
-            mdp = MDPNetwork(config_path=str(jp))
-            nx_train_env = DummyVecEnv([lambda: make_nx_env_from_mdp(mdp=mdp, seed=seed)])
-            base_train_env_for_mixed = DummyVecEnv([lambda: make_baseline_env(seed=seed)])
-
-            agent = TabularQAgent(
-                env=base_train_env_for_mixed,
-                learning_rate=LEARNING_RATE,
-                gamma=GAMMA,
-                policy_mix=POLICY_MIX,
-                temperature=TEMPERATURE,
-                seed=seed,
-                verbose=0,
-            )
-
-            greedy_curve: List[float] = []
-            train_curve: List[float] = []
-            nx_eval_env = make_nx_env_from_mdp(mdp=mdp, seed=12345)  # eval env on Source-A
-            cb = PeriodicEvalCallback(
-                eval_env=nx_eval_env,          # evaluate on Source-A (aux baseline)
-                eval_every=EVAL_EVERY,
-                n_eval_episodes=N_EVAL_EPISODES,
-                greedy_scores_list=greedy_curve,
-                train_scores_list=train_curve,
-                eval_seed_base=84 + 1000*seed + (hash(label) % 100),
-                verbose=1,
-            )
-
-            # Phase A: Source-A (JSON) env
-            agent.set_env(nx_train_env)
-            agent.learn(total_timesteps=STEPS_JSON_PHASE, reset_num_timesteps=False,
-                        progress_bar=False, callback=cb)
-            # Phase B: Target env
-            agent.set_env(base_train_env_for_mixed)
-            agent.learn(total_timesteps=STEPS_BASE_PHASE, reset_num_timesteps=False,
-                        progress_bar=False, callback=cb)
-
-            assert len(greedy_curve) == len(checkpoints), \
-                f"Curriculum@Source curve length mismatch for {label}: {len(greedy_curve)} vs {len(checkpoints)}"
-            mixed_phase_greedy_by_json[label].append(np.array(greedy_curve, dtype=float))
-            mixed_phase_train_by_json[label].append(np.array(train_curve, dtype=float))
+    # Aggregate per-seed outputs into the above containers
+    for res in results:
+        baseonly_greedy_all.append(res["base_greedy"])
+        baseonly_train_all.append(res["base_train"])
+        for label in mixed_base_greedy_by_json.keys():
+            g_b, t_b = res["mixed_base"][label]
+            g_p, t_p = res["mixed_phase"][label]
+            mixed_base_greedy_by_json[label].append(g_b)
+            mixed_base_train_by_json[label].append(t_b)
+            mixed_phase_greedy_by_json[label].append(g_p)
+            mixed_phase_train_by_json[label].append(t_p)
 
     # =========================
     # Aggregate across seeds
@@ -383,14 +391,14 @@ if __name__ == "__main__":
         checkpoints = np.delete(checkpoints, rm)
         # baseline aggregates
         base_greedy_mean = np.delete(base_greedy_mean, rm)
-        base_greedy_std = np.delete(base_greedy_std, rm)
-        base_train_mean = np.delete(base_train_mean, rm)
-        base_train_std = np.delete(base_train_std, rm)
+        base_greedy_std  = np.delete(base_greedy_std,  rm)
+        base_train_mean  = np.delete(base_train_mean,  rm)
+        base_train_std   = np.delete(base_train_std,   rm)
         # per-JSON aggregates (both eval contexts)
         for d in (mixed_base_g, mixed_base_t, mixed_phase_g, mixed_phase_t):
             for k in d:
                 d[k]["mean"] = np.delete(d[k]["mean"], rm)
-                d[k]["std"] = np.delete(d[k]["std"], rm)
+                d[k]["std"]  = np.delete(d[k]["std"],  rm)
 
     # =========================
     # Plot — pairwise per JSON (three lines each) + vertical phase marker
@@ -440,7 +448,6 @@ if __name__ == "__main__":
         # --- Phase boundary marker on BOTH subplots ---
         for ax in (ax1, ax2):
             ax.axvline(phase_boundary, linestyle=PHASE_LINE_LS, alpha=PHASE_LINE_ALPHA)
-            # lightweight annotations for phases (placed near bottom to avoid overlapping curves)
             ymin, ymax = ax.get_ylim()
             ytxt = ymin + 0.06 * (ymax - ymin)
             ax.text(phase_boundary * 0.5, ytxt, "Phase A (Source)", ha="center", va="bottom", fontsize=9, alpha=0.8)
