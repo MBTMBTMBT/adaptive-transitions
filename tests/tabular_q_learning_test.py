@@ -8,11 +8,11 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv
 from gymnasium.wrappers import TimeLimit
 
-from customised_minigrid_env.simple_agents.tabular_q_agent import TabularQAgent
+from simple_agents.tabular_q_agent import TabularQAgent
 from customised_toy_text_envs.customised_taxi import CustomisedTaxiEnv
 from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
 from networkx_env.networkx_env import NetworkXMDPEnvironment
-from customised_minigrid_env.simple_agents.apis import BaseCallback
+from simple_agents.tabular_q_agent import BaseCallback
 
 from mdp_network.mdp_tables import q_table_to_policy
 from tests.helpers import record_policy_gif

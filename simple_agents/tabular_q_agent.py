@@ -8,9 +8,9 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3.common.type_aliases import GymEnv
-from stable_baselines3.common.vec_env import VecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import VecEnv
 
-from customised_minigrid_env.simple_agents.apis import Agent, BaseCallback, FunctionCallback, CallbackList
+from simple_agents.apis import Agent, BaseCallback, FunctionCallback, CallbackList
 from mdp_network.mdp_tables import QTable
 
 

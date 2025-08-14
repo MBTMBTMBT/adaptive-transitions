@@ -21,7 +21,7 @@ import numpy as np
 import networkx as nx
 from concurrent.futures import ProcessPoolExecutor
 
-from mdp_network.mdp_tables import q_table_to_policy, PolicyTable, ValueTable, create_random_policy
+from mdp_network.mdp_tables import q_table_to_policy, PolicyTable, ValueTable, create_random_policy, blend_policies
 from mdp_network.metrics import kl_policies, performance_curve_and_integral
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 from serialisable import Serialisable
@@ -113,7 +113,7 @@ def directed_prob_distance(
             pmax = 0.0
             for _a, ar in edata["transitions"].items():
                 pmax = max(pmax, float(ar["p"]))
-            w = max(weight_eps, 1.0 - pmax)
+            w = max(weight_eps, 2.0 - pmax)
             nd = du + w
             if nd < dist.get(v, INF):
                 dist[v] = nd
@@ -816,8 +816,71 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
 
     return [obj1, obj2]
 
+
+def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
+    """
+    Returns two objectives [ -KL, performance_integral ] for the CURRENT MDP.
+    Shared computation (single VI -> policy -> occupancy) to avoid duplicate work.
+    Uses baseline (policy, occupancy) from kwargs["precomputed_portables"] for KL.
+    """
+    # VI / policy params
+    gamma = float(kwargs.get("vi_gamma", 0.99))
+    theta = float(kwargs.get("vi_theta", 1e-6))
+    max_iter = int(kwargs.get("vi_max_iterations", 1000))
+    temperature = float(kwargs.get("policy_temperature", 1.0))
+    delta = float(kwargs.get("kl_delta", 1e-3))
+
+    # Perf params (fallback to VI params)
+    pgamma = float(kwargs.get("perf_gamma", gamma))
+    ptheta = float(kwargs.get("perf_theta", theta))
+    pmax_iter = int(kwargs.get("perf_max_iterations", max_iter))
+    numpoints = int(kwargs.get("perf_numpoints", 100))
+
+    # Baseline artifacts (from precompute)
+    base_policy = None
+    base_occupancy = None
+    _pre = kwargs.get("precomputed_portables", None)
+    if _pre and len(_pre) >= 2:
+        base_policy = PolicyTable.from_portable(_pre[0])
+        base_occupancy = ValueTable.from_portable(_pre[1])
+
+    # Current MDP solve once
+    _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
+    policy2: PolicyTable = q_table_to_policy(Q2, states=list(mdp.states),
+                                             num_actions=mdp.num_actions,
+                                             temperature=temperature)
+    blended_policy2 = blend_policies(policy2, create_random_policy(mdp), weight=0.8)
+
+    # Objective 1: performance curve integral (current target policy vs final target policy)
+    _curve, integral = performance_curve_and_integral(
+        prior_policy=blended_policy2,
+        target_policy=base_policy,
+        mdp_network=mdp,
+        numpoints=numpoints,
+        gamma=pgamma,
+        theta=ptheta,
+        max_iterations=pmax_iter,
+    )
+    obj1 = float(integral)
+
+    # Objective 2: performance curve integral (random prior vs current target policy)
+    prior_policy: PolicyTable = create_random_policy(mdp)
+    _curve, integral = performance_curve_and_integral(
+        prior_policy=prior_policy,
+        target_policy=policy2,
+        mdp_network=mdp,
+        numpoints=numpoints,
+        gamma=pgamma,
+        theta=ptheta,
+        max_iterations=pmax_iter,
+    )
+    obj2 = float(integral)
+
+    return [obj1, obj2]
+
 # Register the combined multi-output objective
 register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
+register_score_fn("obj_multi_perf", obj_multi_perf)
 
 # -------------------------------
 # Tiny demo

@@ -43,17 +43,14 @@ if __name__ == "__main__":
     mdp = build_frozenlake_mdp_via_env(map_name="8x8", is_slippery=True)
     print(f"|S|={len(mdp.states)}  |A|={mdp.num_actions}  terminals={len(mdp.terminal_states)}")
 
-    # Register the single multi-output objective for parallel workers.
-    register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
-
     workers = os.cpu_count()
 
     # GA config (kept similar to your previous test; tweak down for faster runs if needed)
     cfg = GAConfig(
-        population_size=512,
-        generations=256,
+        population_size=26,
+        generations=100,
         tournament_k=2,
-        elitism_num=64,
+        elitism_num=8,
         crossover_rate=0.5,
 
         allow_self_loops=True,
@@ -73,7 +70,7 @@ if __name__ == "__main__":
 
         # Parallel scoring (multi-objective via single multi-output fn)
         n_workers=workers,
-        score_fn_names=["obj_multi_kl_and_perf"],
+        score_fn_names=["obj_multi_perf"],
         score_args=None,
         score_kwargs=None,
 
@@ -81,10 +78,10 @@ if __name__ == "__main__":
         mutation_n_workers=workers,
 
         # Distance params (applied in main & workers)
-        dist_max_hops=32,
+        dist_max_hops=5,
         dist_node_cap=2048,
         dist_weight_eps=1e-6,
-        dist_unreachable=1e6,
+        dist_unreachable=1e9,
 
         # VI / softmax / KL / perf defaults
         vi_gamma=0.99,
@@ -97,7 +94,7 @@ if __name__ == "__main__":
         perf_theta=None,          # None -> fallback to vi_theta
         perf_max_iterations=None, # None -> fallback to vi_max_iterations
 
-        seed=123,
+        seed=4444,
     )
 
     # GA driver
