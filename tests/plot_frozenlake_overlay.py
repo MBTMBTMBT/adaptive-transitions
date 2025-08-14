@@ -62,7 +62,7 @@ DPI: int = 200                                # Figure DPI
 OCC_GAMMA: float = 0.99
 OCC_THETA: float = 1e-6
 OCC_MAX_ITERS: int = 1000
-SOFTMAX_TEMPERATURE: float = 0.1              # <== adjustable float: Q* -> policy via softmax(T)
+SOFTMAX_TEMPERATURE: float = 0.01              # <== adjustable float: Q* -> policy via softmax(T)
 
 # Occupancy overlay style
 OCC_ALPHA: float = 0.65

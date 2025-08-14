@@ -93,8 +93,8 @@ N_EVAL_EPISODES = 100            # episodes per evaluation point
 # Agent hyperparams
 LEARNING_RATE = 0.1
 GAMMA = 0.99
-POLICY_MIX = (0.5, 0.4, 0.1)
-TEMPERATURE = 1.0
+POLICY_MIX = (0.0, 1.0, 0.0)
+TEMPERATURE = 0.01
 
 # Env specifics
 FROZENLAKE_MAP = "8x8"

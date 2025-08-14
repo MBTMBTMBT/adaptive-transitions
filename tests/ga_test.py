@@ -84,7 +84,7 @@ if __name__ == "__main__":
         mutation_n_workers=workers,
 
         # Distance / scope (used by add_edge_allow_out_of_scope)
-        dist_max_hops=6.0,
+        dist_max_hops=10.0,
         dist_node_cap=64,
         dist_weight_eps=1e-6,
         dist_unreachable=1e9,
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         vi_gamma=0.99,
         vi_theta=1e-3,
         vi_max_iterations=1000,
-        policy_temperature=0.1,
+        policy_temperature=0.01,
         kl_delta=1e-3,
         perf_numpoints=32,
         perf_gamma=None,          # None -> fallback to vi_gamma
