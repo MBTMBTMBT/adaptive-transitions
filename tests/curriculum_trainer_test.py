@@ -12,7 +12,7 @@ from expetiment_utils.tabular_curriculum_trainer import (
     PhaseSpec,
     EvalSpec,
     SourceFactorySpec,
-    GenericCurriculumTrainer,
+    TabularCurriculumTrainer,
 )
 
 # -----------------------------
@@ -206,7 +206,7 @@ def main():
     run = _maybe_init_wandb()
 
     # ---------- Run trainer ----------
-    trainer = GenericCurriculumTrainer(
+    trainer = TabularCurriculumTrainer(
         agent_ctor_path=AGENT_CTOR_PATH,
         agent_kwargs=AGENT_KW,
         eval_every=EVAL_EVERY,

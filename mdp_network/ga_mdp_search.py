@@ -225,9 +225,6 @@ class GAConfig:
     perf_theta: Optional[float] = None
     perf_max_iterations: Optional[int] = None
 
-    # -------------- Simplified W&B controls --------------
-    wandb_enabled: bool = True  # A wandb run MUST be passed into MDPEvolutionGA
-
 # -------------------------------
 # Utilities over MDPNetwork
 # -------------------------------
@@ -621,9 +618,12 @@ class MDPEvolutionGA:
       - At the end, a compact table of the final Pareto front is logged.
     """
 
-    def __init__(self, base_mdp: 'MDPNetwork', cfg: GAConfig,
-                 wb_run: Optional[Any] = None,
-                 logger: Optional[logging.Logger] = None):
+    def __init__(
+            self, base_mdp: 'MDPNetwork',
+            cfg: GAConfig,
+            wb_run,
+            logger: Optional[logging.Logger] = None
+    ):
         if not cfg.score_fn_names or len(cfg.score_fn_names) < 1:
             raise ValueError("NSGA-II requires score_fn_names (>=1).")
         if cfg.n_workers < 1 or cfg.mutation_n_workers < 1:
@@ -640,7 +640,7 @@ class MDPEvolutionGA:
         self._precomputed_portables: Optional[List[Dict[str, Any]]] = None
 
         # W&B & logging
-        self.wb_run = wb_run if (cfg.wandb_enabled and wb_run is not None) else None
+        self.wb_run = wb_run
         if self.wb_run is None:
             raise ValueError("W&B run is required. Pass wb_run=wandb.init(...).")
 
@@ -871,26 +871,34 @@ class MDPEvolutionGA:
                 bar = wandb.plot.bar(bar_table, "gen", "obj0_mean",
                                      title="Obj0 mean per generation (all steps)")
                 payload["plots/pop_all"] = bar
+
             elif M == 2:
                 # Vega-Lite scatter with color = gen and rich tooltips
                 vega_scatter_spec = {
                     "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                    "data": {"name": "table"},
                     "mark": {"type": "point", "filled": True, "opacity": 0.7},
                     "encoding": {
-                        "x": {"field": "obj0", "type": "quantitative", "title": "obj0"},
-                        "y": {"field": "obj1", "type": "quantitative", "title": "obj1"},
-                        # Color by generation so points from different gens are visually separated
-                        "color": {"field": "gen", "type": "ordinal", "title": "generation"},
+                        "x": {"field": "${x}", "type": "quantitative", "title": "${x}"},
+                        "y": {"field": "${y}", "type": "quantitative", "title": "${y}"},
+                        "color": {"field": "${color}", "type": "ordinal", "title": "${color}"},
                         "tooltip": [
-                            {"field": "gen", "type": "ordinal", "title": "gen"},
-                            {"field": "ind_idx", "type": "ordinal", "title": "idx"},
-                            {"field": "obj0", "type": "quantitative"},
-                            {"field": "obj1", "type": "quantitative"}
+                            {"field": "${color}", "type": "ordinal", "title": "${color}"},
+                            {"field": "${label}", "type": "ordinal", "title": "${label}"},
+                            {"field": "${x}", "type": "quantitative"},
+                            {"field": "${y}", "type": "quantitative"}
                         ]
                     }
                 }
-                scatter = wandb.plot_table(vega_scatter_spec, hist_table)
+                fields = {
+                    "x": "obj0",
+                    "y": "obj1",
+                    "color": "gen",
+                    "label": "ind_idx",
+                }
+                scatter = wandb.plot_table(vega_scatter_spec, hist_table, fields)
                 payload["plots/pop_all"] = scatter
+
             # M >= 3 -> table only
 
             self._wb_log(payload)

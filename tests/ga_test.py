@@ -122,9 +122,6 @@ if __name__ == "__main__":
         perf_max_iterations=None,
 
         seed=4444,
-
-        # ---- W&B logging parameters ----
-        wandb_enabled=True,
     )
 
     # Sync configuration with W&B

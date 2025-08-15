@@ -12,6 +12,71 @@ from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv
 from customisable_env_abs import CustomisableEnvAbs
 from mdp_network.mdp_tables import ValueTable
 
+
+MAPS = {
+    "4x4": ["SFFF", "FHFH", "FFFH", "HFFG"],
+    "8x8": [
+        "SFFFFFFF",
+        "FFFFFFFF",
+        "FFFHFFFF",
+        "FFFFFHFF",
+        "FFFHFFFF",
+        "FHHFFFHF",
+        "FHFFHFHF",
+        "FFFHFFFG",
+    ],
+    "env0": [
+        "SFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFGFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+    ],
+    "env1": [
+        "SFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFFFHFFF",
+        "FFFFHGFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+    ],
+    "env2": [
+        "SFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFFFHFFF",
+        "FFFFHGFF",
+        "FFFFHFFF",
+        "FFFFHFFF",
+    ],
+    "env3": [
+        "SFFFFFFF",
+        "FFFFFFFF",
+        "FFHFFFFF",
+        "FFFFFFFF",
+        "FFFFHHFF",
+        "FFFFHGFF",
+        "FFHFFFFF",
+        "FFFFHFFF",
+    ],
+    "env4": [
+        "SFFFFFFF",
+        "FFFFFFFF",
+        "FFHFFHHF",
+        "FFFFFFFF",
+        "FFFFHHFF",
+        "FFFFHGFF",
+        "FFHFFFFF",
+        "FFFFHFFF",
+    ],
+}
+
 ACTION_NAMES = ["Left", "Down", "Right", "Up"]
 
 

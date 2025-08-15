@@ -479,7 +479,7 @@ def _plot_pairwise(
 # =========================
 # Public Trainer API
 # =========================
-class GenericCurriculumTrainer:
+class TabularCurriculumTrainer:
     """
     Process-parallel generic curriculum trainer.
     - Env construction decoupled via factory specs.
