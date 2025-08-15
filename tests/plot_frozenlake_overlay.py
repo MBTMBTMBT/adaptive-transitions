@@ -2,29 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-Batch overlay plotter for FrozenLake MDPs + Occupancy overlays.
+Batch overlay plotter for FrozenLake MDPs + Occupancy & Value overlays.
 
-Add-ons:
-(A) Before processing external JSON MDPs, this script also:
-    - Builds the native FrozenLake MDP from the environment itself (via get_mdp_network()).
-    - Plots transition overlays for the native MDP.
-    - Computes occupancy measures for:
-        (a) a random (uniform) policy, and
-        (b) an optimal policy (Q*) mapped to a policy using a MIXING tuple.
-            * For the native MDP: greedy (mixing=(0,0,1))
-            * Temperature SOFTMAX_TEMPERATURE is kept as a tunable float (affects softmax part if used).
-    - Plots occupancy overlays for both policies.
+(A) Native (baseline) env first:
+    - Build native MDP via env.get_mdp_network().
+    - Plot transition overlays.
+    - Build policies:
+        * Random (uniform)
+        * Optimal policy for OCCUPANCY plots: by MIXING (default greedy for native).
+        * Optimal policy for VALUE plots: strictly greedy (mixing=(0,0,1)), independent of the occupancy policy.
+    - Plot OCCUPANCY overlays (random vs optimal-mixed).
+    - Plot VALUE overlays (random vs optimal-greedy).
 
-(B) For each JSON MDP, the script now:
-    - Plots transition overlays for that MDP.
-    - Computes occupancy for
-        (a) a random (uniform) policy, and
-        (b) an optimal policy (Q* -> policy via MIXING; default 0.1 uniform + 0.9 greedy).
-    - Plots occupancy overlays for both policies.
-    - Cross-evaluates the learned optimal mixed policy on the NATIVE MDP and plots its occupancy overlay as well.
-    - NEW: Also plots an occupancy *difference* (on the NATIVE MDP):
-        (learned policy on native) − (native random policy).
-        Naming rule: if mixing has zero softmax weight (mix[1] == 0), omit the temperature suffix “T...”.
+(B) For each JSON MDP:
+    - Same as above for its own env.
+    - Cross-eval occupancy on native (as before).
+    - VALUE difference plot: V_opt_greedy(loop) − V_opt_greedy(native).
+
+(C) Naming rule: if MIXING softmax weight == 0, omit temperature “T...” in filenames.
 """
 
 import os
@@ -35,73 +30,81 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from gymnasium.envs.toy_text import FrozenLakeEnv
 
-# Project modules (adjust if your paths differ)
+# Project modules (adjust paths if needed)
 from customised_toy_text_envs.customised_frozenlake import (
-    CustomisedFrozenLakeEnv,               # used to get native MDP from env
+    CustomisedFrozenLakeEnv,                 # used to get native MDP from env
     plot_frozenlake_transition_overlays,
-    plot_frozenlake_occupancy_overlays,   # occupancy overlay renderer
-    plot_frozenlake_occupancy_diff_overlay,  # NEW: occupancy difference renderer
+    plot_frozenlake_scalar_overlay,          # generic scalar overlay (for occupancy or V(s))
+    plot_frozenlake_scalar_diff_overlay,     # generic scalar diff overlay
 )
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import create_random_policy, q_table_to_policy
-from mdp_network.solvers import compute_occupancy_measure, optimal_value_iteration
-
+from mdp_network.solvers import (
+    compute_occupancy_measure,
+    optimal_value_iteration,
+    policy_evaluation,                       # evaluate V^π
+)
 
 # -----------------------------
 # Hard-coded constants
 # -----------------------------
-JSON_DIR: Path = Path("./outputs/ga_test")   # Directory containing MDP JSON files
-OUTPUT_DIR: Path = Path("./outputs/ga_vis")  # Output directory for images
-MAP_NAME: str = "8x8"                        # "4x4" or "8x8"
-IS_SLIPPERY: bool = True                     # Background env dynamics flag
-RECURSIVE: bool = True                       # Whether to search subdirectories for JSONs
+JSON_DIR: Path = Path("./outputs/ga_test")
+OUTPUT_DIR: Path = Path("./outputs/ga_vis")
+MAP_NAME: str = "8x8"
+IS_SLIPPERY: bool = True
+RECURSIVE: bool = True
 
 # Transition overlay style
-MIN_PROB: float = 0.05                        # Min probability threshold to draw arrows
-ALPHA: float = 0.65                           # Transparency for arrows and labels
-SHOW_SELF_LOOPS: bool = False                 # Draw self-loop arcs for s->s
-DPI: int = 200                                # Figure DPI
+MIN_PROB: float = 0.05
+ALPHA: float = 0.65
+SHOW_SELF_LOOPS: bool = False
+DPI: int = 200
 
-# Occupancy computation params (for both policies)
+# Occupancy computation params
 OCC_GAMMA: float = 0.99
 OCC_THETA: float = 1e-6
 OCC_MAX_ITERS: int = 1000
 
-# Temperature for softmax component in mixing (used only if mixing[1] > 0)
+# Temperature for softmax component in mixing (only used if mixing[1] > 0)
 SOFTMAX_TEMPERATURE: float = 1.0
 
-# Policy mapping (Q* -> Policy) mixing weights: (uniform, softmax, greedy)
-# Native MDP optimal policy: pure greedy
-NATIVE_OPT_POLICY_MIXING: Tuple[float, float, float] = (0.0, 0.0, 1.0)
-# JSON MDP optimal policy: epsilon-greedy with epsilon=0.1 (parameterized)
-LOOP_OPT_POLICY_MIXING: Tuple[float, float, float] = (0.1, 0.0, 0.9)
-# Tolerance for tie-breaking in greedy/softmax
+# Policy mapping (Q* -> Policy) mixing weights: (greedy，softmax, uniform,)
+NATIVE_OPT_POLICY_MIXING: Tuple[float, float, float] = (1.0, 0.0, 0.0)  # pure greedy for native occupancy plots
+LOOP_OPT_POLICY_MIXING:   Tuple[float, float, float] = (0.9, 0.0, 0.1) # default eps-greedy for JSON MDP occupancy
 OPT_TIE_TOL: float = 1e-2
 
-# Occupancy overlay style
+# Overlays (occupancy)
 OCC_ALPHA: float = 0.65
 OCC_TARGET_CELL_PX: int = 240
 OCC_FONT_SCALE: float = 0.16
 OCC_CMAP: str = "magma"
 OCC_COLOR_GAMMA: float = 1.0
-OCC_MIN_LABEL: float = 0.0                    # Do not draw labels below this value
-OCC_VMIN = 0.0                                # Color scale min (0 default)
-OCC_VMAX = None                               # Color scale max (None -> auto)
+OCC_MIN_LABEL: float = 0.0
+OCC_VMIN = 0.0
+OCC_VMAX = None
 
-# Native (environment-derived) output subfolder and file prefix
+# Overlays (value) — reuse sizes; different colormap
+VAL_ALPHA: float = OCC_ALPHA
+VAL_TARGET_CELL_PX: int = OCC_TARGET_CELL_PX
+VAL_FONT_SCALE: float = OCC_FONT_SCALE
+VAL_CMAP: str = "viridis"
+VAL_COLOR_GAMMA: float = 1.0
+VAL_MIN_ABS_LABEL: float = 0.0
+VAL_VMIN = None
+VAL_VMAX = None
+
+# Native output subfolder/prefix
 NATIVE_SUBDIR_NAME: str = "__native_frozenlake__"
 NATIVE_PREFIX: str = "native_frozenlake"
 
 
 def find_json_files(root: Path, recursive: bool) -> List[Path]:
-    """Collect JSON files under a directory."""
     if recursive:
         return sorted([p for p in root.rglob("*.json") if p.is_file()])
     return sorted([p for p in root.glob("*.json") if p.is_file()])
 
 
 def load_json(p: Path) -> Dict[str, Any]:
-    """Load JSON config with a clear error if it fails."""
     try:
         with p.open("r") as f:
             return json.load(f)
@@ -110,10 +113,6 @@ def load_json(p: Path) -> Dict[str, Any]:
 
 
 def ensure_env(map_name: str, is_slippery: bool) -> CustomisedFrozenLakeEnv:
-    """
-    Build a CustomisedFrozenLakeEnv with rgb_array capability for background rendering
-    and access to get_mdp_network().
-    """
     env = CustomisedFrozenLakeEnv(render_mode="rgb_array", map_name=map_name, is_slippery=is_slippery)
     try:
         env.reset()
@@ -125,24 +124,68 @@ def ensure_env(map_name: str, is_slippery: bool) -> CustomisedFrozenLakeEnv:
 
 
 def states_aligned(env: FrozenLakeEnv, mdp: MDPNetwork) -> bool:
-    """Check whether mdp.states equals {0..nS-1}."""
     nS = env.nrow * env.ncol
     return set(mdp.states) == set(range(nS))
 
 
 def _mix_tag(mix: Tuple[float, float, float]) -> str:
-    """Create a short tag for filenames from a mixing tuple (u,s,g)."""
-    u, s, g = mix
-    return f"mix_u{u:.2f}_s{s:.2f}_g{g:.2f}"
-
+    """Filename tag using (greedy, softmax, uniform)."""
+    g, s, u = mix
+    return f"mix_g{g:.2f}_s{s:.2f}_u{u:.2f}"
 
 def _mix_suffix(mix: Tuple[float, float, float], temperature: float) -> str:
-    """
-    Filename suffix for a mixing config.
-    If softmax weight == 0, omit temperature from the suffix.
-    """
+    """If softmax weight==0, omit temperature."""
     tag = _mix_tag(mix)
     return f"{tag}_T{temperature:g}" if mix[1] > 0.0 else tag
+
+
+def _build_policy_and_values(
+    mdp: MDPNetwork,
+    mixing: Tuple[float, float, float],
+    temperature: float,
+    tie_tol: float,
+    gamma: float,
+    theta: float,
+    max_iterations: int,
+):
+    """
+    Return:
+      policy_rand, occ_rand,
+      policy_opt_mixed, occ_opt_mixed,
+      policy_opt_greedy, V_opt_greedy
+    """
+    policy_rand = create_random_policy(mdp)
+    occ_rand = compute_occupancy_measure(
+        mdp_network=mdp, policy=policy_rand, gamma=gamma, theta=theta,
+        max_iterations=max_iterations, verbose=False,
+    )
+
+    V_star, Q_star = optimal_value_iteration(
+        mdp_network=mdp, gamma=gamma, theta=theta,
+        max_iterations=max_iterations, verbose=False,
+    )
+
+    policy_opt_mixed = q_table_to_policy(
+        q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
+        mixing=mixing, temperature=temperature, tie_tol=tie_tol,
+    )
+    occ_opt_mixed = compute_occupancy_measure(
+        mdp_network=mdp, policy=policy_opt_mixed, gamma=gamma, theta=theta,
+        max_iterations=max_iterations, verbose=False,
+    )
+
+    policy_opt_greedy = q_table_to_policy(
+        q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
+        mixing=(1.0, 0.0, 0.0), temperature=1.0, tie_tol=tie_tol,
+    )
+    V_opt_greedy = policy_evaluation(
+        mdp_network=mdp, policy=policy_opt_greedy,
+        gamma=gamma, theta=theta, max_iterations=max_iterations, verbose=False,
+    )
+
+    return (policy_rand, occ_rand,
+            policy_opt_mixed, occ_opt_mixed,
+            policy_opt_greedy, V_opt_greedy)
 
 
 def process_one_mdp_bundle(
@@ -150,196 +193,184 @@ def process_one_mdp_bundle(
     env: FrozenLakeEnv,
     mdp: MDPNetwork,
     out_dir: Path,
-    native_mdp: Optional[MDPNetwork] = None,       # for cross-evaluation on the native environment
-    native_occ_random: Optional["ValueTable"] = None,  # baseline random occupancy on native (for diff plots)
-    opt_policy_mixing: Tuple[float, float, float] = LOOP_OPT_POLICY_MIXING,  # mapping Q*->policy on THIS mdp
+    native_mdp: Optional[MDPNetwork] = None,           # for occupancy cross-eval
+    native_occ_random: Optional["ValueTable"] = None,  # baseline random occupancy on native (for diff)
+    native_V_opt_greedy: Optional["ValueTable"] = None,# baseline optimal-greedy V (for diff)
+    opt_policy_mixing: Tuple[float, float, float] = LOOP_OPT_POLICY_MIXING,
     softmax_temperature: float = SOFTMAX_TEMPERATURE,
     tie_tol: float = OPT_TIE_TOL,
 ):
     """
-    For a single MDP:
-      - Plot per-action transition overlays.
-      - Compute occupancy for random policy and optimal mixed policy (on this MDP).
-      - Plot both occupancy overlays.
-      - If native_mdp is provided: cross-evaluate the learned optimal mixed policy on the native MDP and plot.
-      - NEW: If native_occ_random is provided, also plot the difference
-             (occ_opt_on_native − native_random) on the native MDP.
+    - Transition overlays
+    - Occupancy: random vs optimal-mixed (generic scalar overlay)
+    - Value: random vs optimal-greedy (generic scalar overlay)
+    - Cross-eval occupancy on native, and diff vs native random
+    - Value diff vs native (opt-greedy(loop) − opt-greedy(native))
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Per-action transition overlays
+    # (1) Transition overlays
     plot_frozenlake_transition_overlays(
-        env=env,
-        mdp=mdp,
-        output_dir=str(out_dir),
-        filename_prefix=label,
-        min_prob=MIN_PROB,
-        alpha=ALPHA,
-        annotate=True,
-        show_self_loops=SHOW_SELF_LOOPS,
-        dpi=DPI,
+        env=env, mdp=mdp, output_dir=str(out_dir), filename_prefix=label,
+        min_prob=MIN_PROB, alpha=ALPHA, annotate=True,
+        show_self_loops=SHOW_SELF_LOOPS, dpi=DPI,
     )
     print(f"[OK] Saved transition overlays for '{label}'")
 
-    # 2) Policies and occupancy measures on THIS mdp
-    # 2a) Random (uniform) policy
-    policy_rand = create_random_policy(mdp)
-    occ_rand = compute_occupancy_measure(
-        mdp_network=mdp,
-        policy=policy_rand,
-        gamma=OCC_GAMMA,
-        theta=OCC_THETA,
-        max_iterations=OCC_MAX_ITERS,
-        verbose=False,
+    # (2) Policies / occupancy / values
+    (policy_rand, occ_rand,
+     policy_opt_mixed, occ_opt_mixed,
+     policy_opt_greedy, V_opt_greedy) = _build_policy_and_values(
+        mdp=mdp, mixing=opt_policy_mixing, temperature=softmax_temperature,
+        tie_tol=tie_tol, gamma=OCC_GAMMA, theta=OCC_THETA, max_iterations=OCC_MAX_ITERS,
     )
 
-    # 2b) Optimal policy via DP (value iteration → Q*; then map with MIXING)
-    V_star, Q_star = optimal_value_iteration(
-        mdp_network=mdp,
-        gamma=OCC_GAMMA,
-        theta=OCC_THETA,
-        max_iterations=OCC_MAX_ITERS,
-        verbose=False,
-    )
-    policy_opt = q_table_to_policy(
-        q_table=Q_star,
-        states=mdp.states,
-        num_actions=mdp.num_actions,
-        mixing=opt_policy_mixing,         # mixing controls uniform/softmax/greedy weights
-        temperature=softmax_temperature,  # used only if mixing softmax weight > 0
-        tie_tol=tie_tol,
-    )
-    occ_opt = compute_occupancy_measure(
-        mdp_network=mdp,
-        policy=policy_opt,
-        gamma=OCC_GAMMA,
-        theta=OCC_THETA,
-        max_iterations=OCC_MAX_ITERS,
-        verbose=False,
-    )
-
-    # 3) Occupancy overlays (random vs optimal) ON THIS mdp
-    plot_frozenlake_occupancy_overlays(
-        env=env,
-        occupancy_matrix=occ_rand,
-        output_dir=str(out_dir),
+    # (3) OCCUPANCY overlays (generic scalar overlay)
+    plot_frozenlake_scalar_overlay(
+        env=env, value_map=occ_rand, output_dir=str(out_dir),
         filename_prefix=f"{label}_occupancy_random",
-        alpha=OCC_ALPHA,
-        annotate=True,
-        dpi=DPI,
-        target_cell_px=OCC_TARGET_CELL_PX,
-        font_scale=OCC_FONT_SCALE,
-        cmap_name=OCC_CMAP,
-        gamma=OCC_COLOR_GAMMA,
-        min_label_value=OCC_MIN_LABEL,
-        vmin=OCC_VMIN,
-        vmax=OCC_VMAX,
+        alpha=OCC_ALPHA, annotate=True, dpi=DPI,
+        target_cell_px=OCC_TARGET_CELL_PX, font_scale=OCC_FONT_SCALE,
+        cmap_name=OCC_CMAP, gamma=OCC_COLOR_GAMMA,
+        min_abs_label=OCC_MIN_LABEL, vmin=OCC_VMIN, vmax=OCC_VMAX,
+        title="State Occupancy", cbar_label="Occupancy measure",
+        value_format=None,
     )
 
     mix_suffix = _mix_suffix(opt_policy_mixing, softmax_temperature)
-    plot_frozenlake_occupancy_overlays(
-        env=env,
-        occupancy_matrix=occ_opt,
-        output_dir=str(out_dir),
+    plot_frozenlake_scalar_overlay(
+        env=env, value_map=occ_opt_mixed, output_dir=str(out_dir),
         filename_prefix=f"{label}_occupancy_optimal_{mix_suffix}",
-        alpha=OCC_ALPHA,
-        annotate=True,
-        dpi=DPI,
-        target_cell_px=OCC_TARGET_CELL_PX,
-        font_scale=OCC_FONT_SCALE,
-        cmap_name=OCC_CMAP,
-        gamma=OCC_COLOR_GAMMA,
-        min_label_value=OCC_MIN_LABEL,
-        vmin=OCC_VMIN,
-        vmax=OCC_VMAX,
+        alpha=OCC_ALPHA, annotate=True, dpi=DPI,
+        target_cell_px=OCC_TARGET_CELL_PX, font_scale=OCC_FONT_SCALE,
+        cmap_name=OCC_CMAP, gamma=OCC_COLOR_GAMMA,
+        min_abs_label=OCC_MIN_LABEL, vmin=OCC_VMIN, vmax=OCC_VMAX,
+        title="State Occupancy — Optimal (mixed)", cbar_label="Occupancy measure",
+        value_format=None,
     )
 
-    # 4) Cross-evaluate the learned optimal mixed policy on the NATIVE MDP (if provided)
+    # (4) VALUE overlays (generic scalar overlay)
+    V_rand = policy_evaluation(
+        mdp_network=mdp, policy=policy_rand,
+        gamma=OCC_GAMMA, theta=OCC_THETA, max_iterations=OCC_MAX_ITERS, verbose=False,
+    )
+    plot_frozenlake_scalar_overlay(
+        env=env, value_map=V_rand, output_dir=str(out_dir),
+        filename_prefix=f"{label}_VALUE_random",
+        alpha=VAL_ALPHA, annotate=True, dpi=DPI,
+        target_cell_px=VAL_TARGET_CELL_PX, font_scale=VAL_FONT_SCALE,
+        cmap_name=VAL_CMAP, gamma=VAL_COLOR_GAMMA,
+        min_abs_label=VAL_MIN_ABS_LABEL, vmin=VAL_VMIN, vmax=VAL_VMAX,
+        title="State Value V(s) — Random policy", cbar_label="V(s)",
+        value_format=None,
+    )
+    plot_frozenlake_scalar_overlay(
+        env=env, value_map=V_opt_greedy, output_dir=str(out_dir),
+        filename_prefix=f"{label}_VALUE_optimal_greedy",
+        alpha=VAL_ALPHA, annotate=True, dpi=DPI,
+        target_cell_px=VAL_TARGET_CELL_PX, font_scale=VAL_FONT_SCALE,
+        cmap_name=VAL_CMAP, gamma=VAL_COLOR_GAMMA,
+        min_abs_label=VAL_MIN_ABS_LABEL, vmin=VAL_VMIN, vmax=VAL_VMAX,
+        title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
+        value_format=None,
+    )
+
+    # (5) Cross-eval occupancy on native + diff vs native random
     if native_mdp is not None:
         occ_cross_native = compute_occupancy_measure(
-            mdp_network=native_mdp,
-            policy=policy_opt,          # learned on 'mdp', evaluated on 'native_mdp'
-            gamma=OCC_GAMMA,
-            theta=OCC_THETA,
-            max_iterations=OCC_MAX_ITERS,
-            verbose=False,
+            mdp_network=native_mdp, policy=policy_opt_mixed,
+            gamma=OCC_GAMMA, theta=OCC_THETA, max_iterations=OCC_MAX_ITERS, verbose=False,
         )
-        plot_frozenlake_occupancy_overlays(
-            env=env,
-            occupancy_matrix=occ_cross_native,
-            output_dir=str(out_dir),
+        plot_frozenlake_scalar_overlay(
+            env=env, value_map=occ_cross_native, output_dir=str(out_dir),
             filename_prefix=f"{label}_occupancy_optPolicy_on_NATIVE_{mix_suffix}",
-            alpha=OCC_ALPHA,
-            annotate=True,
-            dpi=DPI,
-            target_cell_px=OCC_TARGET_CELL_PX,
-            font_scale=OCC_FONT_SCALE,
-            cmap_name=OCC_CMAP,
-            gamma=OCC_COLOR_GAMMA,
-            min_label_value=OCC_MIN_LABEL,
-            vmin=OCC_VMIN,
-            vmax=OCC_VMAX,
+            alpha=OCC_ALPHA, annotate=True, dpi=DPI,
+            target_cell_px=OCC_TARGET_CELL_PX, font_scale=OCC_FONT_SCALE,
+            cmap_name=OCC_CMAP, gamma=OCC_COLOR_GAMMA,
+            min_abs_label=OCC_MIN_LABEL, vmin=OCC_VMIN, vmax=OCC_VMAX,
+            title="State Occupancy — Policy (learned) on NATIVE", cbar_label="Occupancy measure",
+            value_format=None,
         )
 
-        # 5) NEW: Difference plot on native: (learned policy on native) - (native random policy)
         if native_occ_random is not None:
-            plot_frozenlake_occupancy_diff_overlay(
+            plot_frozenlake_scalar_diff_overlay(
                 env=env,
-                occupancy_a=occ_cross_native,
-                occupancy_b=native_occ_random,
+                values_a=occ_cross_native,
+                values_b=native_occ_random,
                 output_dir=str(out_dir),
                 filename_prefix=f"{label}_occupancy_DIFF_optPolicyMINUS_nativeRandom_{mix_suffix}",
-                alpha=OCC_ALPHA,
-                annotate=True,
-                dpi=DPI,
-                target_cell_px=OCC_TARGET_CELL_PX,
-                font_scale=OCC_FONT_SCALE,
-                cmap_name="coolwarm",            # diverging colormap for signed differences
-                min_abs_label=0.0,               # label threshold for |Δ|
-                vmin=None,                       # auto symmetric range
-                vmax=None,
+                alpha=OCC_ALPHA, annotate=True, dpi=DPI,
+                target_cell_px=OCC_TARGET_CELL_PX, font_scale=OCC_FONT_SCALE,
+                cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
+                title="Δ State Occupancy (A − B)", cbar_label="Δ occupancy (A − B)",
+                value_format="+.2e",
             )
 
-    print(f"[OK] Saved occupancy overlays for '{label}' -> {out_dir}")
+    # (6) VALUE diff vs native: V_opt_greedy(this) − V_opt_greedy(native)
+    if native_V_opt_greedy is not None:
+        plot_frozenlake_scalar_diff_overlay(
+            env=env,
+            values_a=V_opt_greedy,
+            values_b=native_V_opt_greedy,
+            output_dir=str(out_dir),
+            filename_prefix=f"{label}_VALUE_DIFF_optGreedyMINUS_nativeOptGreedy",
+            alpha=VAL_ALPHA, annotate=True, dpi=DPI,
+            target_cell_px=VAL_TARGET_CELL_PX, font_scale=VAL_FONT_SCALE,
+            cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
+            title="Δ State Value: optGreedy(loop) − optGreedy(native)",
+            cbar_label="Δ V(s) (loop − native)",
+            value_format="+.2f",
+        )
+
+    print(f"[OK] Saved overlays for '{label}' -> {out_dir}")
 
 
 def main():
-    # Resolve and prepare paths
     json_dir = JSON_DIR.expanduser().resolve()
     output_dir = OUTPUT_DIR.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create the env once; all MDPs must match this grid size.
     env = ensure_env(MAP_NAME, IS_SLIPPERY)
     nS = env.nrow * env.ncol
     print(f"[INFO] Env grid: {env.nrow}x{env.ncol} ({nS} states).")
 
-    # === (A) Native FrozenLake MDP first ===
+    # (A) Native baseline
     native_mdp = None
     native_occ_random = None
+    native_V_opt_greedy = None
     try:
-        native_mdp = env.get_mdp_network()  # provided by CustomisedFrozenLakeEnv
-        # Pre-compute native random baseline occupancy for later diffs
+        native_mdp = env.get_mdp_network()
+
+        # Native baselines
         native_policy_rand = create_random_policy(native_mdp)
         native_occ_random = compute_occupancy_measure(
-            mdp_network=native_mdp,
-            policy=native_policy_rand,
-            gamma=OCC_GAMMA,
-            theta=OCC_THETA,
-            max_iterations=OCC_MAX_ITERS,
-            verbose=False,
+            mdp_network=native_mdp, policy=native_policy_rand,
+            gamma=OCC_GAMMA, theta=OCC_THETA, max_iterations=OCC_MAX_ITERS, verbose=False,
+        )
+
+        V_star_native, Q_star_native = optimal_value_iteration(
+            mdp_network=native_mdp, gamma=OCC_GAMMA, theta=OCC_THETA,
+            max_iterations=OCC_MAX_ITERS, verbose=False,
+        )
+        native_policy_opt_greedy = q_table_to_policy(
+            q_table=Q_star_native, states=native_mdp.states, num_actions=native_mdp.num_actions,
+            mixing=(0.0, 0.0, 1.0), temperature=1.0, tie_tol=OPT_TIE_TOL,
+        )
+        native_V_opt_greedy = policy_evaluation(
+            mdp_network=native_mdp, policy=native_policy_opt_greedy,
+            gamma=OCC_GAMMA, theta=OCC_THETA, max_iterations=OCC_MAX_ITERS, verbose=False,
         )
 
         native_out = output_dir / NATIVE_SUBDIR_NAME
 
-        # Native: optimal policy is GREEDY by default (mix=(0,0,1))
         process_one_mdp_bundle(
             label=NATIVE_PREFIX,
             env=env,
             mdp=native_mdp,
             out_dir=native_out,
-            native_mdp=None,               # no cross-eval for native-on-native
-            native_occ_random=None,        # diff not required for native bundle
+            native_mdp=None,
+            native_occ_random=None,
+            native_V_opt_greedy=None,
             opt_policy_mixing=NATIVE_OPT_POLICY_MIXING,
             softmax_temperature=SOFTMAX_TEMPERATURE,
             tie_tol=OPT_TIE_TOL,
@@ -347,7 +378,7 @@ def main():
     except Exception as e:
         print(f"[WARN] Failed to build or plot native FrozenLake MDP: {e}")
 
-    # === (B) Then process JSON-defined MDPs ===
+    # (B) JSON MDPs
     json_files = find_json_files(json_dir, RECURSIVE)
     if not json_files:
         print(f"[WARN] No JSON files found under: {json_dir}")
@@ -360,7 +391,6 @@ def main():
             cfg = load_json(jf)
             mdp = MDPNetwork(config_data=cfg)
 
-            # Sanity checks
             if getattr(mdp, "num_actions", None) != 4:
                 print(f"[WARN] Skip (num_actions != 4): {jf}")
                 continue
@@ -368,18 +398,17 @@ def main():
                 print(f"[WARN] Skip (states not aligned to 0..{nS-1}): {jf}")
                 continue
 
-            # Dedicated output folder per JSON
             stem = jf.stem
             out_subdir = output_dir / stem
 
-            # JSON MDP: default to epsilon-greedy 0.1/0.9 (parameterized)
             process_one_mdp_bundle(
                 label=stem,
                 env=env,
                 mdp=mdp,
                 out_dir=out_subdir,
-                native_mdp=native_mdp,               # cross-evaluate learned policy on the native MDP
-                native_occ_random=native_occ_random, # provide baseline random occupancy for diff
+                native_mdp=native_mdp,                   # cross-eval occupancy on native
+                native_occ_random=native_occ_random,     # for occupancy diff
+                native_V_opt_greedy=native_V_opt_greedy, # for value diff
                 opt_policy_mixing=LOOP_OPT_POLICY_MIXING,
                 softmax_temperature=SOFTMAX_TEMPERATURE,
                 tie_tol=OPT_TIE_TOL,
@@ -390,7 +419,6 @@ def main():
 
     print(f"[DONE] All finished. Outputs in: {output_dir}")
 
-    # Optional: close env
     try:
         env.close()
     except Exception:

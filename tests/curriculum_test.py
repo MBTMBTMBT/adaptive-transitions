@@ -85,8 +85,8 @@ OUTPUT_DIR = "./outputs/ga_cl"
 JSON_DIR = "./outputs/ga_test"   # folder containing multiple *.json MDPs
 
 # Two-phase schedule (no cycles)
-STEPS_JSON_PHASE = 25_000        # Phase A: train on JSON-backed env
-STEPS_BASE_PHASE = 125_000       # Phase B: continue training on baseline env
+STEPS_JSON_PHASE = 10_000        # Phase A: train on JSON-backed env
+STEPS_BASE_PHASE = 140_000       # Phase B: continue training on baseline env
 EVAL_EVERY = 2_500               # desired evaluation cadence (actual cadence may be coarser)
 N_EVAL_EPISODES = 100            # episodes per evaluation point
 

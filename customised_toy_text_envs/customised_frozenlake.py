@@ -477,29 +477,32 @@ def plot_frozenlake_transition_overlays(
     print(f"[OK] Saved overlays to: {os.path.abspath(output_dir)}")
 
 
-def plot_frozenlake_occupancy_overlays(
+def plot_frozenlake_scalar_overlay(
     env: Union[FrozenLakeEnv, CustomisedFrozenLakeEnv],
-    occupancy_matrix: "ValueTable",        # supports .get_value(s); dict-like also works
+    value_map: "ValueTable",                # supports .get_value(s); dict-like also works
     output_dir: str,
-    filename_prefix: str = "frozenlake_occupancy",
+    filename_prefix: str = "frozenlake_scalar",
     alpha: float = 0.65,                    # overlay transparency for the heat layer
     annotate: bool = True,                  # draw per-cell numeric labels
     dpi: int = 200,
     target_cell_px: int = 240,              # target cell size in pixels for readability
     font_scale: float = 0.18,               # label font size as fraction of cell size
-    cmap_name: str = "magma",               # colormap for occupancy values
-    gamma: float = 1.0,                     # gamma for color normalization
-    min_label_value: float = 0.0,           # do not draw labels below this value
-    vmin: float | None = None,              # color scale min; defaults to 0
-    vmax: float | None = None               # color scale max; defaults to max occupancy
+    cmap_name: str = "magma",               # colormap for scalar values
+    gamma: float = 1.0,                     # gamma for color normalization (PowerNorm)
+    min_abs_label: float = 0.0,             # do not draw labels if |value| < threshold
+    vmin: float | None = None,              # color scale min; defaults to data min
+    vmax: float | None = None,              # color scale max; defaults to data max
+    title: str = "State Value",             # title text
+    cbar_label: str = "Value",              # colorbar label
+    value_format: str | None = None,        # e.g. ".2f" or ".2e"; None -> auto (2f / 2e)
 ) -> str:
     """
-    Overlay occupancy measure (state visitation frequencies) as a semi-transparent heat layer
+    Overlay an arbitrary per-state scalar (e.g., V(s) or occupancy) as a semi-transparent heat layer
     on top of the FrozenLake board, with optional numeric labels and a colorbar legend.
 
     Assumptions:
-      - `occupancy_matrix` exposes `get_value(state)` -> float, or is dict-like {state: value}.
-      - State indices match the environment's encoding: s = row * ncol + col.
+      - `value_map` exposes `get_value(state)` -> float, or is dict-like {state: value}.
+      - State indices match the environment encoding: s = row * ncol + col.
 
     Returns:
       The absolute path to the saved PNG file.
@@ -510,7 +513,7 @@ def plot_frozenlake_occupancy_overlays(
     nS = nrow * ncol
     os.makedirs(output_dir, exist_ok=True)
 
-    # -------- Board background (as in the transition overlay) --------
+    # -------- Board background --------
     prev_mode = getattr(env, "render_mode", None)
     env.render_mode = "rgb_array"
     try:
@@ -554,35 +557,39 @@ def plot_frozenlake_occupancy_overlays(
     def px_to_pt(px: float) -> float:
         return float(px) * 72.0 / float(dpi)
 
+    def fmt_val(v: float) -> str:
+        if value_format is not None:
+            return format(v, value_format)
+        # auto: tiny -> scientific; else fixed 2 decimals
+        return (f"{v:.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:.2f}")
+
     cell_min = min(cell_w, cell_h)
     font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
     title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
 
-    # Text style for labels
+    # Text style
     text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
     text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
 
-    # -------- Build occupancy grid (nrow x ncol) --------
-    def occ_get(s: int) -> float:
-        """Read occupancy value from ValueTable or dict-like."""
-        if hasattr(occupancy_matrix, "get_value"):
-            return float(occupancy_matrix.get_value(int(s)))
-        # dict-like fallback
+    # -------- Build value grid --------
+    def val_get(s: int) -> float:
+        if hasattr(value_map, "get_value"):
+            return float(value_map.get_value(int(s)))
         try:
-            return float(occupancy_matrix.get(int(s), 0.0))  # type: ignore[attr-defined]
+            return float(value_map.get(int(s), 0.0))  # type: ignore[attr-defined]
         except Exception:
             return 0.0
 
-    occ_grid = np.zeros((nrow, ncol), dtype=float)
+    val_grid = np.zeros((nrow, ncol), dtype=float)
     for s in range(nS):
         r, c = divmod(s, ncol)
-        occ_grid[r, c] = occ_get(s)
+        val_grid[r, c] = val_get(s)
 
-    # Compute default vmin/vmax if not provided
-    data_min = float(np.nanmin(occ_grid)) if np.isfinite(occ_grid).any() else 0.0
-    data_max = float(np.nanmax(occ_grid)) if np.isfinite(occ_grid).any() else 1.0
-    vmin = 0.0 if vmin is None else float(vmin)
-    vmax = (data_max if vmax is None else float(vmax))
+    # Defaults for vmin/vmax: data-driven (generic for value / occupancy)
+    data_min = float(np.nanmin(val_grid)) if np.isfinite(val_grid).any() else 0.0
+    data_max = float(np.nanmax(val_grid)) if np.isfinite(val_grid).any() else 1.0
+    vmin = data_min if vmin is None else float(vmin)
+    vmax = data_max if vmax is None else float(vmax)
     if vmax <= vmin:
         vmax = vmin + 1e-9
 
@@ -594,17 +601,15 @@ def plot_frozenlake_occupancy_overlays(
     fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi)
     ax = plt.gca()
 
-    # Base board
     ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_title("State Occupancy", fontsize=title_pt)
+    ax.set_title(title, fontsize=title_pt)
 
-    # Semi-transparent occupancy layer aligned to the board coordinates
     ax.imshow(
-        occ_grid,
+        val_grid,
         origin="upper",
         cmap=cmap,
         norm=norm,
@@ -614,60 +619,59 @@ def plot_frozenlake_occupancy_overlays(
         interpolation="nearest",
     )
 
-    # Colorbar legend
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
-    cbar.set_label("Occupancy measure", fontsize=max(8, int(title_pt * 0.7)))
+    cbar.set_label(cbar_label, fontsize=max(8, int(title_pt * 0.7)))
     cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
 
-    # Optional numeric labels at cell centers
     if annotate:
         for s in range(nS):
             r, c = divmod(s, ncol)
-            val = occ_grid[r, c]
-            if val < min_label_value:
+            val = val_grid[r, c]
+            if abs(val) < min_abs_label:
                 continue
             x, y = state_to_center_xy(s)
             ax.text(
-                x, y, f"{val:.2e}" if val < 0.01 else f"{val:.2f}",
+                x, y, fmt_val(val),
                 ha="center", va="center", fontsize=font_pt,
-                bbox=text_bbox, alpha=0.95, zorder=2,
-                path_effects=text_effects,
+                bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects,
             )
 
-    # Save and close
     out_name = f"{filename_prefix}.png"
     out_path = os.path.join(output_dir, out_name)
     plt.savefig(out_path, bbox_inches="tight", pad_inches=0.05, dpi=dpi)
     plt.close(fig)
 
-    print(f"[OK] Saved occupancy overlay to: {os.path.abspath(out_path)}")
+    print(f"[OK] Saved scalar overlay to: {os.path.abspath(out_path)}")
     return os.path.abspath(out_path)
 
 
-def plot_frozenlake_occupancy_diff_overlay(
+def plot_frozenlake_scalar_diff_overlay(
     env: Union[FrozenLakeEnv, CustomisedFrozenLakeEnv],
-    occupancy_a: "ValueTable",               # supports .get_value(s); dict-like also works
-    occupancy_b: "ValueTable",               # supports .get_value(s); dict-like also works
+    values_a: "ValueTable",                 # supports .get_value(s); dict-like also works
+    values_b: "ValueTable",                 # supports .get_value(s); dict-like also works
     output_dir: str,
-    filename_prefix: str = "frozenlake_occupancy_diff",
-    alpha: float = 0.65,                     # overlay transparency for the heat layer
-    annotate: bool = True,                   # draw per-cell numeric labels
+    filename_prefix: str = "frozenlake_scalar_diff",
+    alpha: float = 0.65,                    # overlay transparency for the heat layer
+    annotate: bool = True,                  # draw per-cell numeric labels
     dpi: int = 200,
-    target_cell_px: int = 240,               # target cell size in pixels for readability
-    font_scale: float = 0.18,                # label font size as fraction of cell size
-    cmap_name: str = "coolwarm",             # diverging colormap for signed differences
-    min_abs_label: float = 0.0,              # do not draw labels if |Δ| < threshold
-    vmin: float | None = None,               # color scale min; defaults to symmetric about 0
-    vmax: float | None = None                # color scale max; defaults to symmetric about 0
+    target_cell_px: int = 240,              # target cell size in pixels for readability
+    font_scale: float = 0.18,               # label font size as fraction of cell size
+    cmap_name: str = "coolwarm",            # diverging colormap for signed differences
+    min_abs_label: float = 0.0,             # do not draw labels if |Δ| < threshold
+    vmin: float | None = None,              # color scale min; defaults to symmetric about 0
+    vmax: float | None = None,              # color scale max; defaults to symmetric about 0
+    title: str = "Δ State Value (A − B)",   # title text
+    cbar_label: str = "Δ value (A − B)",    # colorbar label
+    value_format: str | None = "+.2f",      # default signed fixed 2 decimals; None -> auto with sign
 ) -> str:
     """
-    Overlay the difference between two occupancy measures (A − B) as a semi-transparent
+    Overlay the difference between two per-state scalars (A − B) as a semi-transparent
     diverging heat layer on the FrozenLake board, with optional numeric labels and a colorbar.
 
     Assumptions:
-      - `occupancy_a` and `occupancy_b` expose `get_value(state)` -> float, or are dict-like {state: value}.
+      - `values_a` and `values_b` expose `get_value(state)` -> float, or are dict-like {state: value}.
       - State indices match the environment encoding: s = row * ncol + col.
 
     Returns:
@@ -679,7 +683,7 @@ def plot_frozenlake_occupancy_diff_overlay(
     nS = nrow * ncol
     os.makedirs(output_dir, exist_ok=True)
 
-    # -------- Board background (same as other overlays) --------
+    # -------- Board background --------
     prev_mode = getattr(env, "render_mode", None)
     env.render_mode = "rgb_array"
     try:
@@ -711,7 +715,6 @@ def plot_frozenlake_occupancy_diff_overlay(
                                                resample=Image.BICUBIC)
             )
         except Exception:
-            # Fallback: nearest-neighbor upscale
             bg_img = np.kron(bg_img, np.ones((upscale, upscale, 1), dtype=bg_img.dtype))
         H, W = bg_img.shape[:2]
         cell_w *= upscale
@@ -725,17 +728,22 @@ def plot_frozenlake_occupancy_diff_overlay(
     def px_to_pt(px: float) -> float:
         return float(px) * 72.0 / float(dpi)
 
+    def fmt_val(v: float) -> str:
+        if value_format is not None:
+            return format(v, value_format)
+        # auto with explicit sign
+        return (f"{v:+.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:+.2f}")
+
     cell_min = min(cell_w, cell_h)
     font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
     title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
 
-    # Text style for labels
+    # Text style
     text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
     text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
 
-    # -------- Build occupancy grids and difference (nrow x ncol) --------
-    def occ_get(tbl, s: int) -> float:
-        """Read occupancy value from ValueTable or dict-like."""
+    # -------- Build grids and difference --------
+    def val_get(tbl, s: int) -> float:
         if hasattr(tbl, "get_value"):
             return float(tbl.get_value(int(s)))
         try:
@@ -747,49 +755,42 @@ def plot_frozenlake_occupancy_diff_overlay(
     grid_b = np.zeros((nrow, ncol), dtype=float)
     for s in range(nS):
         r, c = divmod(s, ncol)
-        grid_a[r, c] = occ_get(occupancy_a, s)
-        grid_b[r, c] = occ_get(occupancy_b, s)
+        grid_a[r, c] = val_get(values_a, s)
+        grid_b[r, c] = val_get(values_b, s)
 
-    diff_grid = grid_a - grid_b  # signed difference
+    diff_grid = grid_a - grid_b
 
-    # Compute default symmetric vmin/vmax around zero if not provided
+    # Default symmetric vmin/vmax around zero
     finite_mask = np.isfinite(diff_grid)
     max_abs = float(np.nanmax(np.abs(diff_grid[finite_mask]))) if finite_mask.any() else 1.0
     if vmin is None or vmax is None:
         vmin = -max_abs
         vmax = max_abs
-    # Ensure vmin < 0 < vmax (required for a proper diverging norm)
     if not (vmin < 0.0 < vmax):
         if vmax <= 0.0 and vmin < 0.0:
             vmax = abs(vmin)
         elif vmin >= 0.0 and vmax > 0.0:
             vmin = -vmax
         else:
-            # fallback if both are zero or inconsistent
             vmin, vmax = -1e-9, 1e-9
 
-    # Diverging colormap and zero-centered normalization
     cmap = cm.get_cmap(cmap_name)
     try:
-        # TwoSlopeNorm ensures mid-point (0.0) is mapped to the center of the colormap
         norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
     except Exception:
-        # Fallback: symmetric Normalize (less accurate for imbalance, but safe)
         norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     # -------- Plot --------
     fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi)
     ax = plt.gca()
 
-    # Base board
     ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_title("Δ State Occupancy (A − B)", fontsize=title_pt)
+    ax.set_title(title, fontsize=title_pt)
 
-    # Semi-transparent diff layer aligned to the board coordinates
     ax.imshow(
         diff_grid,
         origin="upper",
@@ -801,14 +802,12 @@ def plot_frozenlake_occupancy_diff_overlay(
         interpolation="nearest",
     )
 
-    # Colorbar legend (shows negative/zero/positive ranges)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
-    cbar.set_label("Δ occupancy (A − B)", fontsize=max(8, int(title_pt * 0.7)))
+    cbar.set_label(cbar_label, fontsize=max(8, int(title_pt * 0.7)))
     cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
 
-    # Optional numeric labels at cell centers (with sign)
     if annotate:
         for s in range(nS):
             r, c = divmod(s, ncol)
@@ -817,18 +816,15 @@ def plot_frozenlake_occupancy_diff_overlay(
                 continue
             x, y = state_to_center_xy(s)
             ax.text(
-                x, y,
-                (f"{val:+.2e}" if abs(val) < 0.01 and val != 0.0 else f"{val:+.2f}"),
+                x, y, fmt_val(val),
                 ha="center", va="center", fontsize=font_pt,
-                bbox=text_bbox, alpha=0.95, zorder=2,
-                path_effects=text_effects,
+                bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects,
             )
 
-    # Save and close
     out_name = f"{filename_prefix}.png"
     out_path = os.path.join(output_dir, out_name)
     plt.savefig(out_path, bbox_inches="tight", pad_inches=0.05, dpi=dpi)
     plt.close(fig)
 
-    print(f"[OK] Saved occupancy diff overlay to: {os.path.abspath(out_path)}")
+    print(f"[OK] Saved scalar diff overlay to: {os.path.abspath(out_path)}")
     return os.path.abspath(out_path)

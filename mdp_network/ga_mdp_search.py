@@ -868,13 +868,31 @@ class MDPEvolutionGA:
 
             if M == 1 and bar_rows is not None:
                 bar_table = wandb.Table(columns=["gen", "obj0_mean"], data=bar_rows)
-                bar = wandb.plot.bar(bar_table, "gen", "obj0_mean", title="Obj0 mean per generation (all steps)")
+                bar = wandb.plot.bar(bar_table, "gen", "obj0_mean",
+                                     title="Obj0 mean per generation (all steps)")
                 payload["plots/pop_all"] = bar
             elif M == 2:
-                scatter = wandb.plot.scatter(hist_table, "obj0", "obj1",
-                                             title="Population scatter across generations (all steps)")
+                # Vega-Lite scatter with color = gen and rich tooltips
+                vega_scatter_spec = {
+                    "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                    "mark": {"type": "point", "filled": True, "opacity": 0.7},
+                    "encoding": {
+                        "x": {"field": "obj0", "type": "quantitative", "title": "obj0"},
+                        "y": {"field": "obj1", "type": "quantitative", "title": "obj1"},
+                        # Color by generation so points from different gens are visually separated
+                        "color": {"field": "gen", "type": "ordinal", "title": "generation"},
+                        "tooltip": [
+                            {"field": "gen", "type": "ordinal", "title": "gen"},
+                            {"field": "ind_idx", "type": "ordinal", "title": "idx"},
+                            {"field": "obj0", "type": "quantitative"},
+                            {"field": "obj1", "type": "quantitative"}
+                        ]
+                    }
+                }
+                scatter = wandb.plot_table(vega_scatter_spec, hist_table)
                 payload["plots/pop_all"] = scatter
             # M >= 3 -> table only
+
             self._wb_log(payload)
 
         # Seed with generation 0 and draw the single figure once
