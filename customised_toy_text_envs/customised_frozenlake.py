@@ -1,5 +1,7 @@
 import os
 from typing import Tuple, Dict, Any, List, Union
+
+from gymnasium import spaces
 from gymnasium.core import ObsType
 import numpy as np
 from matplotlib import pyplot as plt, cm
@@ -8,7 +10,7 @@ from matplotlib import patheffects as pe
 import matplotlib.colors as mcolors
 
 from mdp_network.mdp_network import MDPNetwork
-from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv
+from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv, generate_random_map, LEFT, DOWN, RIGHT, UP
 from customisable_env_abs import CustomisableEnvAbs
 from mdp_network.mdp_tables import ValueTable
 
@@ -97,7 +99,80 @@ class CustomisedFrozenLakeEnv(FrozenLakeEnv, CustomisableEnvAbs):
         is_slippery: bool = True,
         networkx_env=None,
     ):
-        FrozenLakeEnv.__init__(self, render_mode=render_mode, desc=desc, map_name=map_name, is_slippery=is_slippery)
+        if desc is None and map_name is None:
+            desc = generate_random_map()
+        elif desc is None:
+            desc = MAPS[map_name]
+        self.desc = desc = np.asarray(desc, dtype="c")
+        self.nrow, self.ncol = nrow, ncol = desc.shape
+        self.reward_range = (0, 1)
+
+        nA = 4
+        nS = nrow * ncol
+
+        self.initial_state_distrib = np.array(desc == b"S").astype("float64").ravel()
+        self.initial_state_distrib /= self.initial_state_distrib.sum()
+
+        self.P = {s: {a: [] for a in range(nA)} for s in range(nS)}
+
+        def to_s(row, col):
+            return row * ncol + col
+
+        def inc(row, col, a):
+            if a == LEFT:
+                col = max(col - 1, 0)
+            elif a == DOWN:
+                row = min(row + 1, nrow - 1)
+            elif a == RIGHT:
+                col = min(col + 1, ncol - 1)
+            elif a == UP:
+                row = max(row - 1, 0)
+            return (row, col)
+
+        def update_probability_matrix(row, col, action):
+            new_row, new_col = inc(row, col, action)
+            new_state = to_s(new_row, new_col)
+            new_letter = desc[new_row, new_col]
+            terminated = bytes(new_letter) in b"GH"
+            reward = float(new_letter == b"G")
+            return new_state, reward, terminated
+
+        for row in range(nrow):
+            for col in range(ncol):
+                s = to_s(row, col)
+                for a in range(4):
+                    li = self.P[s][a]
+                    letter = desc[row, col]
+                    if letter in b"GH":
+                        li.append((1.0, s, 0, True))
+                    else:
+                        if is_slippery:
+                            for b in [(a - 1) % 4, a, (a + 1) % 4]:
+                                li.append(
+                                    (1.0 / 3.0, *update_probability_matrix(row, col, b))
+                                )
+                        else:
+                            li.append((1.0, *update_probability_matrix(row, col, a)))
+
+        self.observation_space = spaces.Discrete(nS)
+        self.action_space = spaces.Discrete(nA)
+
+        self.render_mode = render_mode
+
+        # pygame utils
+        self.window_size = (min(64 * ncol, 512), min(64 * nrow, 512))
+        self.cell_size = (
+            self.window_size[0] // self.ncol,
+            self.window_size[1] // self.nrow,
+        )
+        self.window_surface = None
+        self.clock = None
+        self.hole_img = None
+        self.cracked_hole_img = None
+        self.ice_img = None
+        self.elf_images = None
+        self.goal_img = None
+        self.start_img = None
         CustomisableEnvAbs.__init__(self, networkx_env=networkx_env)
 
     # -------------------------

@@ -139,10 +139,10 @@ def stage_ga(args, run) -> List[Path]:
 
     print("[GA] Building native MDP…")
     mdp = _build_native_mdp(args.map, args.slippery)
-    workers = args.ga_workers or (os.cpu_count() or 1)
 
     register_score_fn("obj_multi_perf", obj_multi_perf)
 
+    workers = args.ga_workers or (os.cpu_count() or 1)
     cfg = GAConfig(
         population_size=args.ga_pop_size,
         generations=args.ga_generations,
@@ -150,21 +150,21 @@ def stage_ga(args, run) -> List[Path]:
         elitism_num=args.ga_elitism,
         crossover_rate=args.ga_crossover,
 
-        allow_self_loops=True,
-        min_out_degree=1,
-        max_out_degree=4,
-        prob_floor=1e-6,
-        add_edge_attempts_per_child=10,
-        epsilon_new_prob=0.1,
-        gamma_sample=1.0,
-        gamma_prob=0.0,
-        prune_prob_threshold=1e-3,
-        prob_tweak_actions_per_child=50,
-        prob_pairwise_step=0.05,
+        allow_self_loops=args.ga_allow_self_loops,
+        min_out_degree=args.ga_min_out_degree,
+        max_out_degree=args.ga_max_out_degree,
+        prob_floor=args.ga_prob_floor,
+        add_edge_attempts_per_child=args.ga_add_edge_attempts_per_child,
+        epsilon_new_prob=args.ga_epsilon_new_prob,
+        gamma_sample=args.ga_gamma_sample,
+        gamma_prob=args.ga_gamma_prob,
+        prune_prob_threshold=args.ga_prune_prob_threshold,
+        prob_tweak_actions_per_child=args.ga_prob_tweak_actions_per_child,
+        prob_pairwise_step=args.ga_prob_pairwise_step,
         reward_tweak_edges_per_child=args.ga_reward_tweak_edges_per_child,
         reward_k_percent=args.ga_reward_k_percent,
-        reward_ref_floor=1e-3,
-        add_edge_allow_out_of_scope=False,
+        reward_ref_floor=args.ga_reward_ref_floor,
+        add_edge_allow_out_of_scope=args.ga_add_edge_allow_out_of_scope,
 
         n_workers=workers,
         score_fn_names=["obj_multi_perf"],
@@ -177,19 +177,19 @@ def stage_ga(args, run) -> List[Path]:
 
         mutation_n_workers=workers,
 
-        dist_max_hops=10,
-        dist_node_cap=64,
-        dist_weight_eps=1e-6,
-        dist_unreachable=1e9,
+        dist_max_hops=args.ga_dist_max_hops,
+        dist_node_cap=args.ga_dist_node_cap,
+        dist_weight_eps=args.ga_dist_weight_eps,
+        dist_unreachable=args.ga_dist_unreachable,
 
         vi_gamma=args.ga_vi_gamma,
         vi_theta=args.ga_vi_theta,
         vi_max_iterations=args.ga_vi_max_iters,
         policy_temperature=args.ga_policy_temperature,
         perf_numpoints=args.ga_perf_numpoints,
-        perf_gamma=args.ga_perf_gamma if args.ga_perf_gamma is not None else args.ga_vi_gamma,
-        perf_theta=args.ga_perf_theta if args.ga_perf_theta is not None else args.ga_vi_theta,
-        perf_max_iterations=args.ga_perf_max_iters if args.ga_perf_max_iters is not None else args.ga_vi_max_iters,
+        perf_gamma=args.ga_perf_gamma,
+        perf_theta=args.ga_perf_theta,
+        perf_max_iterations=args.ga_perf_max_iters,
 
         seed=args.ga_seed,
     )
@@ -291,7 +291,7 @@ def stage_train(args, run, json_files: List[Path]) -> Dict[str, Any]:
         ]
 
     trainer = TrainerClass(
-        agent_ctor_path=args.agent_ctor,
+        agent_ctor_path="simple_agents.tabular_q_agent:TabularQAgent",  # fixed
         agent_kwargs=args.agent_kwargs,
         eval_every=args.eval_every,
         n_eval_episodes=args.n_eval_episodes,
@@ -574,39 +574,70 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Env
     p.add_argument("--map", type=str, default="8x8")
     p.add_argument("--slippery", type=_str2bool, default=True)
-    p.add_argument("--max-steps", type=int, default=500)
+    p.add_argument("--max-steps", type=int, default=1000)
 
-    # GA
+    # GA (complete)
     p.add_argument("--ga-pop-size", type=int, default=25)
-    p.add_argument("--ga-generations", type=int, default=25)
+    p.add_argument("--ga-generations", type=int, default=10)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
-    p.add_argument("--ga-workers", type=int, default=0)
+
+    p.add_argument("--ga-allow-self-loops", type=_str2bool, default=True)
+    p.add_argument("--ga-min-out-degree", type=int, default=1)
+    p.add_argument("--ga-max-out-degree", type=int, default=4)
+    p.add_argument("--ga-prob-floor", type=float, default=1e-6)
+    p.add_argument("--ga-add-edge-attempts-per-child", type=int, default=10)
+    p.add_argument("--ga-epsilon-new-prob", type=float, default=0.1)
+    p.add_argument("--ga-gamma-sample", type=float, default=1.0)
+    p.add_argument("--ga-gamma-prob", type=float, default=0.0)
+    p.add_argument("--ga-prune-prob-threshold", type=float, default=1e-3)
+    p.add_argument("--ga-prob-tweak-actions-per-child", type=int, default=50)
+    p.add_argument("--ga-prob-pairwise-step", type=float, default=0.05)
+    p.add_argument("--ga-reward-tweak-edges-per-child", type=int, default=0)
+    p.add_argument("--ga-reward-k-percent", type=float, default=0.05)
+    p.add_argument("--ga-reward-ref-floor", type=float, default=1e-3)
+    p.add_argument("--ga-add-edge-allow-out-of-scope", type=_str2bool, default=False)
+
+    p.add_argument("--ga-workers", type=int, default=0, help="0=auto(cpu_count)")
+    p.add_argument("--ga-sanity-batch", type=int, default=0)
+
+    p.add_argument("--ga-dist-max-hops", type=int, default=10)
+    p.add_argument("--ga-dist-node-cap", type=int, default=64)
+    p.add_argument("--ga-dist-weight-eps", type=float, default=1e-6)
+    p.add_argument("--ga-dist-unreachable", type=float, default=1e9)
+
+    p.add_argument("--ga-vi-gamma", type=float, default=0.99)
+    p.add_argument("--ga-vi-theta", type=float, default=1e-3)
+    p.add_argument("--ga-vi-max-iters", type=int, default=1000)
     p.add_argument("--ga-policy-mix", type=_parse_tuple3, default=(0.9, 0.0, 0.1))
     p.add_argument("--ga-policy-temperature", type=float, default=0.01)
     p.add_argument("--ga-tie-tol", type=float, default=1e-2)
     p.add_argument("--ga-blend-weight", type=float, default=0.8)
-    p.add_argument("--ga-vi-gamma", type=float, default=0.99)
-    p.add_argument("--ga-vi-theta", type=float, default=1e-3)
-    p.add_argument("--ga-vi-max-iters", type=int, default=1000)
     p.add_argument("--ga-perf-numpoints", type=int, default=32)
-    p.add_argument("--ga-perf-gamma", type=float, default=None)
-    p.add_argument("--ga-perf-theta", type=float, default=None)
-    p.add_argument("--ga-perf-max-iters", type=int, default=None)
-    p.add_argument("--ga-reward-tweak-edges-per-child", type=int, default=0)
-    p.add_argument("--ga-reward-k-percent", type=float, default=0.05)
-    p.add_argument("--ga-sanity-batch", type=int, default=3)
-    p.add_argument("--ga-seed", type=int, default=4444)
+    p.add_argument("--ga-perf-gamma", type=float, default=0.99)
+    p.add_argument("--ga-perf-theta", type=float, default=1e-3)
+    p.add_argument("--ga-perf-max-iters", type=int, default=1000)
+    p.add_argument("--ga-seed", type=int, default=0)
 
-    # Training
-    p.add_argument("--agent-ctor", type=str, default="simple_agents.tabular_q_agent:TabularQAgent")
-    p.add_argument("--agent-kwargs", type=str, default="")
+    # Training (flattened agent kwargs)
+    p.add_argument("--agent-learning-rate", type=float, default=0.1)
+    p.add_argument("--agent-gamma", type=float, default=0.99)
+    p.add_argument("--agent-policy-mix", type=_parse_tuple3, default=(0.9, 0.0, 0.1),
+                   help="Tuple 'g,s,u' for (greedy, softmax, uniform), e.g. 0.9,0.0,0.1")
+    p.add_argument("--agent-temperature", type=float, default=0.01,
+                   help="Used only if softmax weight > 0")
+    p.add_argument("--agent-tie-tol", type=float, default=1e-2)
+    p.add_argument("--agent-verbose", type=int, default=0)
+
     p.add_argument("--phase-steps", type=str, default="10000,140000")
     p.add_argument("--eval-every", type=int, default=2500)
     p.add_argument("--n-eval-episodes", type=int, default=100)
-    p.add_argument("--train-seeds", type=str, default="0,1,2,3,4,5,6,7")
+
+    # Here: train-seeds is COUNT -> seeds [0..N-1]
+    p.add_argument("--train-seeds", type=int, default=8, help="Use N to get seeds [0..N-1].")
     p.add_argument("--train-workers", type=int, default=0)
+
     p.add_argument("--eval-seed-base-target", type=int, default=10000)
     p.add_argument("--eval-seed-base-source", type=int, default=20000)
     p.add_argument("--json-dir", type=str, default="")
@@ -641,19 +672,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def _resolve_args(p: argparse.ArgumentParser) -> argparse.Namespace:
     args = p.parse_args()
 
-    if args.agent_kwargs:
-        args.agent_kwargs = json.loads(args.agent_kwargs)
-    else:
-        args.agent_kwargs = dict(
-            learning_rate=0.1,
-            gamma=0.99,
-            policy_mix=(0.9, 0.0, 0.1),
-            temperature=0.01,
-            tie_tol=1e-2,
-            verbose=0,
-        )
+    # agent kwargs: assembled from flattened CLI flags
+    args.agent_kwargs = dict(
+        learning_rate=args.agent_learning_rate,
+        gamma=args.agent_gamma,
+        policy_mix=tuple(args.agent_policy_mix),
+        temperature=args.agent_temperature,
+        tie_tol=args.agent_tie_tol,
+        verbose=args.agent_verbose,
+    )
 
-    args.train_seeds = [int(x) for x in _parse_csv_numbers(args.train_seeds, int)]
+    # train-seeds: COUNT N -> [0..N-1]
+    if isinstance(args.train_seeds, int):
+        args.train_seeds = list(range(args.train_seeds))
+    else:
+        # fallback if someone passes CSV by mistake
+        ts = str(args.train_seeds).strip()
+        args.train_seeds = [int(x) for x in _parse_csv_numbers(ts, int)]
+
+    # phase steps: CSV -> list[int], need >= 2
     args.phase_steps = [int(x) for x in _parse_csv_numbers(args.phase_steps, int)]
     if len(args.phase_steps) < 2:
         raise SystemExit("--phase-steps requires at least 2 phases (Source then Target).")
