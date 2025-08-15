@@ -659,6 +659,9 @@ class MDPEvolutionGA:
         for prefix in ["pop", "init", "final", "time"]:
             self.wb_run.define_metric(f"{prefix}/*", step_metric="gen")
 
+        self.wb_run.define_metric("plots/*", step_metric="gen")
+        self.wb_run.define_metric("tables/*", step_metric="gen")
+
     # ------------- helpers --------------
 
     def _wb_log(self, data: Dict[str, Any]) -> None:
@@ -758,6 +761,14 @@ class MDPEvolutionGA:
     def run(self) -> Tuple[List['MDPNetwork'], List[List[float]], List['MDPNetwork'], List[List[float]]]:
         """
         Execute NSGA-II search.
+
+        Single-figure policy:
+          - We maintain one global history table with columns: [gen, ind_idx, obj*].
+          - Each generation we append rows for the entire population to this table.
+          - We then log ONE figure under a fixed key so the dashboard shows a single panel:
+              * 1 objective -> bar chart of per-gen mean(obj0)
+              * 2 objectives -> scatter of all (obj0, obj1) points accumulated across gens
+              * >=3 objectives -> no plot, table only
         Returns:
             pareto_mdps: final non-dominated front (F1)
             pareto_objs: objective vectors for pareto_mdps
@@ -802,7 +813,7 @@ class MDPEvolutionGA:
         pop = self._init_population()
         objs = self._evaluate_population(pop)
 
-        # Initial summary for console + W&B
+        # Initial summary (console + scalars)
         init_stats = self._summ_stats(objs)
         msg_stats = " | ".join([f"obj{m}: min={init_stats.get(f'min_{m}', float('nan')):.4f} "
                                 f"mean={init_stats.get(f'mean_{m}', float('nan')):.4f} "
@@ -830,19 +841,45 @@ class MDPEvolutionGA:
         for F in fronts:
             crowding.update(compute_crowding_distance(objs, F))
 
-        # ---------- Per-gen viz at gen 0 (ALWAYS save table; plot depends on M) ----------
+        # ---------------- Set up global history (do NOT mutate logged tables) ----------------
         M = len(objs[0]) if objs else 0
-        pop_tbl = self._build_pop_table(objs)
-        self._wb_log({"gen": 0, "tables/pop": pop_tbl})  # always log table
-        if M == 1:
-            # Bar chart: index vs obj0
-            bar = wandb.plot.bar(pop_tbl, "ind_idx", "obj0", title="Gen 0: obj0 (bar)")
-            self._wb_log({"gen": 0, "plots/pop_bar": bar})
-        elif M == 2:
-            # Scatter: obj0 vs obj1
-            scatter = wandb.plot.scatter(pop_tbl, "obj0", "obj1", title="Gen 0: obj0 vs obj1")
-            self._wb_log({"gen": 0, "plots/pop_scatter": scatter})
-        # M >= 3 -> table only
+        hist_columns = ["gen", "ind_idx"] + [f"obj{m}" for m in range(M)]
+
+        # Keep raw rows in Python lists; we will rebuild wandb.Table each time we log.
+        hist_rows: List[List[float]] = []  # rows: [gen, ind_idx, obj0, obj1, ...]
+        bar_rows: Optional[List[List[float]]] = [] if M == 1 else None  # rows: [gen, obj0_mean]
+
+        def append_history(gen_num: int, pop_objs: List[List[float]]) -> None:
+            """Append rows of this generation into local Python lists (not into a logged Table)."""
+            for i, vec in enumerate(pop_objs):
+                hist_rows.append([int(gen_num), int(i), *[float(x) for x in vec]])
+            if M == 1 and bar_rows is not None:
+                mean0 = float(np.mean([v[0] for v in pop_objs])) if pop_objs else float("nan")
+                bar_rows.append([int(gen_num), mean0])
+
+        def log_single_figure(current_gen: int) -> None:
+            """
+            Log exactly ONE figure for all steps so far.
+            We rebuild a fresh wandb.Table from hist_rows to avoid mutating a logged table.
+            """
+            # Rebuild a fresh table snapshot from accumulated rows
+            hist_table = wandb.Table(columns=hist_columns, data=hist_rows)
+            payload = {"gen": current_gen, "tables/pop_history": hist_table}
+
+            if M == 1 and bar_rows is not None:
+                bar_table = wandb.Table(columns=["gen", "obj0_mean"], data=bar_rows)
+                bar = wandb.plot.bar(bar_table, "gen", "obj0_mean", title="Obj0 mean per generation (all steps)")
+                payload["plots/pop_all"] = bar
+            elif M == 2:
+                scatter = wandb.plot.scatter(hist_table, "obj0", "obj1",
+                                             title="Population scatter across generations (all steps)")
+                payload["plots/pop_all"] = scatter
+            # M >= 3 -> table only
+            self._wb_log(payload)
+
+        # Seed with generation 0 and draw the single figure once
+        append_history(0, objs)
+        log_single_figure(0)
 
         # ---------------- Generations loop ----------------
         for gen in range(self.cfg.generations):
@@ -856,22 +893,20 @@ class MDPEvolutionGA:
                 parents_pairs.append((p1, p2))
             t_sel = time.perf_counter()
 
-            # Offspring generation
+            # Offspring
             children = self._make_children_parallel(parents_pairs)
             t_child = time.perf_counter()
 
-            # Evaluate children
+            # Evaluate
             child_objs = self._evaluate_population(children)
             t_eval = time.perf_counter()
 
-            # Environmental selection (union -> next population)
+            # Environmental selection
             union_pop = pop + children
             union_objs = objs + child_objs
-
             union_fronts = fast_non_dominated_sort(union_objs)
             new_pop: List[MDPNetwork] = []
             new_objs: List[List[float]] = []
-
             for F in union_fronts:
                 if len(new_pop) + len(F) <= self.cfg.population_size:
                     new_pop.extend([union_pop[i] for i in F])
@@ -884,10 +919,9 @@ class MDPEvolutionGA:
                     new_pop.extend([union_pop[i] for i in chosen])
                     new_objs.extend([union_objs[i] for i in chosen])
                     break
-
             pop, objs = new_pop, new_objs
 
-            # Recompute ranks & crowding for current population
+            # Refresh ranks & crowding
             fronts = fast_non_dominated_sort(objs)
             ranks = [0] * len(pop)
             for r, F in enumerate(fronts):
@@ -904,9 +938,10 @@ class MDPEvolutionGA:
                                     f"max={gen_stats.get(f'max_{m}', float('nan')):.4f}"
                                     for m in range(len(objs[0]) if objs else 0)])
             self.logger.info(
-                f"[Gen {gen + 1}/{self.cfg.generations}] pop={len(pop)} | {msg_stats if msg_stats else 'NA'} | F1={len(fronts[0]) if fronts else 0}")
+                f"[Gen {gen + 1}/{self.cfg.generations}] pop={len(pop)} | {msg_stats if msg_stats else 'NA'} | F1={len(fronts[0]) if fronts else 0}"
+            )
 
-            # W&B scalars (use 'gen' as the step axis)
+            # Scalars for curves (real-time)
             gend = time.perf_counter()
             self._wb_log({
                 "gen": gen + 1,
@@ -924,17 +959,9 @@ class MDPEvolutionGA:
                 "time/total_gen_sec": float(gend - gstart),
             })
 
-            # ---------- Per-gen viz at gen+1 (ALWAYS save table; plot depends on M) ----------
-            M = len(objs[0]) if objs else 0
-            pop_tbl = self._build_pop_table(objs)
-            self._wb_log({"gen": gen + 1, "tables/pop": pop_tbl})  # always log table
-            if M == 1:
-                bar = wandb.plot.bar(pop_tbl, "ind_idx", "obj0", title=f"Gen {gen + 1}: obj0 (bar)")
-                self._wb_log({"gen": gen + 1, "plots/pop_bar": bar})
-            elif M == 2:
-                scatter = wandb.plot.scatter(pop_tbl, "obj0", "obj1", title=f"Gen {gen + 1}: obj0 vs obj1")
-                self._wb_log({"gen": gen + 1, "plots/pop_scatter": scatter})
-            # M >= 3 -> table only
+            # Append this generation to the global history and update the ONE figure
+            append_history(gen + 1, objs)
+            log_single_figure(gen + 1)
 
         # ---------------- Final Pareto front ----------------
         final_fronts = fast_non_dominated_sort(objs)
@@ -942,7 +969,7 @@ class MDPEvolutionGA:
         pareto_mdps = [pop[i].clone() for i in F1]
         pareto_objs = [objs[i][:] for i in F1]
 
-        # Final summary logging
+        # Final summary scalars
         final_stats = self._summ_stats([objs[i] for i in F1] if F1 else objs)
         self._wb_log({
             "gen": self.cfg.generations,
@@ -955,7 +982,7 @@ class MDPEvolutionGA:
                range(len(objs[0]) if objs else 0)},
         })
 
-        # Final compact table of F1 (no figures)
+        # Final compact table of F1
         if F1:
             M = len(objs[0])
             columns = ["idx"] + [f"obj{m}" for m in range(M)]
