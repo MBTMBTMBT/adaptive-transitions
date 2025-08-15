@@ -7,6 +7,10 @@
 # - Print Pareto front and simple assertions
 
 import os
+from dataclasses import asdict
+
+# ---- W&B (enabled for logging/visualization) ----
+import wandb
 
 # ---- GA system (NSGA-II version) ----
 from mdp_network.ga_mdp_search import (
@@ -14,21 +18,21 @@ from mdp_network.ga_mdp_search import (
     MDPEvolutionGA,
     register_score_fn,
     evaluate_mdp_objectives,
-    obj_multi_perf,           # single multi-output objective
+    obj_multi_perf,  # single multi-output objective
 )
 
 from mdp_network.mdp_network import MDPNetwork
 
-# ---- Tables (Serialisable) ----
+# ---- Tables (serialisable) ----
 from mdp_network.mdp_tables import PolicyTable, ValueTable, QTable, q_table_to_policy  # noqa: F401
 
-# ---- Custom env that exposes an MDPNetwork ----
+# ---- Custom FrozenLake environment exposing MDPNetwork ----
 from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 
 
 def build_frozenlake_mdp_via_env(map_name: str = "8x8", is_slippery: bool = True) -> MDPNetwork:
-    """Create an MDPNetwork via CustomisedFrozenLakeEnv.get_mdp_network()."""
+    """Construct an MDPNetwork using the CustomisedFrozenLakeEnv helper."""
     env = CustomisedFrozenLakeEnv(render_mode=None, map_name=map_name, is_slippery=is_slippery)
     env.reset(seed=0)
     mdp = env.get_mdp_network()
@@ -37,27 +41,38 @@ def build_frozenlake_mdp_via_env(map_name: str = "8x8", is_slippery: bool = True
 
 if __name__ == "__main__":
     out_dir = "./outputs/ga_test"
+    os.makedirs(out_dir, exist_ok=True)
 
-    print("\n=== Build FrozenLake 8x8 (slippery) MDPNetwork via CustomisedFrozenLakeEnv ===")
+    # ---------------- W&B initialization (minimal & HPC-friendly) ----------------
+    # Tip: On clusters without internet access, set WANDB_MODE=offline and later run `wandb sync`.
+    run = wandb.init(
+        project=os.getenv("WANDB_PROJECT", "ga-mdp"),
+        name=os.getenv("WANDB_NAME", "frozenlake8x8-nsga2"),
+        group=os.getenv("WANDB_RUN_GROUP", os.getenv("SLURM_JOB_ID", "local")),
+        tags=["frozenlake", "nsga2", "toy"],
+        config={},  # will be updated with GAConfig
+        reinit=False,
+    )
+
+    print("\n=== Build FrozenLake 8x8 (slippery) MDPNetwork ===")
     mdp = build_frozenlake_mdp_via_env(map_name="8x8", is_slippery=True)
     print(f"|S|={len(mdp.states)}  |A|={mdp.num_actions}  terminals={len(mdp.terminal_states)}")
 
-    workers = os.cpu_count()
+    workers = os.cpu_count() or 1
 
-    # Use the new policy mixing triple everywhere
+    # Policy mixing triple for consistent policy generation
     POLICY_MIXING = (1.0, 0.0, 0.0)
-    POLICY_TIE_TOL = 1e-2  # keep default unless you want to tweak
+    POLICY_TIE_TOL = 1e-2
 
-    # Register the multi-output objective with per-function constants.
-    # You can tweak blend_weight here without touching GAConfig/score_kwargs.
+    # Register multi-output objective function
     register_score_fn("obj_multi_perf", obj_multi_perf)
 
-    # GA config (kept as requested; we pass policy_mixing via score_kwargs so GA uses it)
+    # ---------------- GA configuration ----------------
     cfg = GAConfig(
-        population_size=100,
+        population_size=25,
         generations=250,
         tournament_k=2,
-        elitism_num=20,
+        elitism_num=5,
         crossover_rate=0.5,
 
         allow_self_loops=True,
@@ -71,50 +86,54 @@ if __name__ == "__main__":
         prune_prob_threshold=1e-3,
         prob_tweak_actions_per_child=50,
         prob_pairwise_step=0.05,
-        reward_tweak_edges_per_child=0,  # don't change the reward
+        reward_tweak_edges_per_child=0,  # keep rewards unchanged
         reward_k_percent=0.05,
         reward_ref_floor=1e-3,
 
-        # forbid adding transitions to out-of-scope states
-        add_edge_allow_out_of_scope=False,
+        add_edge_allow_out_of_scope=False,  # restrict new edges to in-scope states
 
-        # Parallel scoring (single multi-output fn)
+        # Parallel scoring configuration
         n_workers=workers,
         score_fn_names=["obj_multi_perf"],
         score_args=None,
-        # IMPORTANT: pass policy_mixing (and optional tie_tol) so objectives use the new policy form
         score_kwargs={
             "policy_mixing": POLICY_MIXING,
             "policy_tie_tol": POLICY_TIE_TOL,
             "blend_weight": 0.8,
         },
 
-        # Parallel offspring
+        # Parallel mutation
         mutation_n_workers=workers,
 
-        # Distance / scope (used by add_edge_allow_out_of_scope)
-        dist_max_hops=10,        # keep integer to avoid surprises in networkx cutoff
+        # Graph distance/scope constraints
+        dist_max_hops=10,
         dist_node_cap=64,
         dist_weight_eps=1e-6,
         dist_unreachable=1e9,
 
-        # VI / policy / perf defaults
+        # VI / policy / performance defaults
         vi_gamma=0.99,
         vi_theta=1e-3,
         vi_max_iterations=1000,
-        policy_temperature=0.01,   # temperature is still passed to q_table_to_policy
+        policy_temperature=0.01,
         perf_numpoints=32,
-        perf_gamma=None,           # None -> fallback to vi_gamma
-        perf_theta=None,           # None -> fallback to vi_theta
-        perf_max_iterations=None,  # None -> fallback to vi_max_iterations
+        perf_gamma=None,
+        perf_theta=None,
+        perf_max_iterations=None,
 
         seed=4444,
+
+        # ---- W&B logging parameters ----
+        wandb_enabled=True,
     )
 
-    # GA driver
-    ga = MDPEvolutionGA(base_mdp=mdp, cfg=cfg)
+    # Sync configuration with W&B
+    run.config.update({"policy_mixing": POLICY_MIXING, "policy_tie_tol": POLICY_TIE_TOL, **asdict(cfg)}, allow_val_change=True)
 
-    # ----- Serial PRECOMPUTE on the BASE MDP -----
+    # ---------------- GA driver ----------------
+    ga = MDPEvolutionGA(base_mdp=mdp, cfg=cfg, wb_run=run)
+
+    # ----- Precompute baseline policy and occupancy -----
     V, Q = optimal_value_iteration(
         mdp, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
     )
@@ -122,17 +141,16 @@ if __name__ == "__main__":
         Q,
         states=list(mdp.states),
         num_actions=mdp.num_actions,
-        mixing=POLICY_MIXING,                 # NEW: use (0.9, 0.0, 0.1)
+        mixing=POLICY_MIXING,
         temperature=cfg.policy_temperature,
-        tie_tol=POLICY_TIE_TOL,               # optional: keep default or tweak
+        tie_tol=POLICY_TIE_TOL,
     )
     base_occupancy = compute_occupancy_measure(
         mdp, base_policy, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
     )
-    # Broadcast artifacts to workers
     ga.precomputed_artifacts = [base_policy, base_occupancy]
 
-    # ----- Optional: parallel evaluate_mdp_objectives sanity check -----
+    # ----- Sanity check for parallel evaluation -----
     print("\n=== Parallel evaluate_mdp_objectives sanity check ===")
     batch = [mdp, mdp.clone(), mdp.clone()]
     obj_vecs = evaluate_mdp_objectives(
@@ -141,24 +159,23 @@ if __name__ == "__main__":
         n_workers=cfg.n_workers,
         score_args=cfg.score_args,
         score_kwargs={
-            # mirror what GA will auto-inject + include policy_mixing
             "vi_gamma": cfg.vi_gamma,
             "vi_theta": cfg.vi_theta,
             "vi_max_iterations": cfg.vi_max_iterations,
             "policy_temperature": cfg.policy_temperature,
-            "policy_mixing": POLICY_MIXING,    # NEW
-            "policy_tie_tol": POLICY_TIE_TOL,  # NEW
+            "policy_mixing": POLICY_MIXING,
+            "policy_tie_tol": POLICY_TIE_TOL,
             "perf_numpoints": cfg.perf_numpoints,
             "perf_gamma": cfg.perf_gamma if cfg.perf_gamma is not None else cfg.vi_gamma,
             "perf_theta": cfg.perf_theta if cfg.perf_theta is not None else cfg.vi_theta,
             "perf_max_iterations": cfg.perf_max_iterations if cfg.perf_max_iterations is not None else cfg.vi_max_iterations,
         },
-        # same baseline artifacts as GA.run()
         precomputed_portables=[base_policy.to_portable(), base_occupancy.to_portable()],
     )
     print("Batch objective vectors:", [[round(x, 6) for x in v] for v in obj_vecs])
+
     assert isinstance(obj_vecs, list) and len(obj_vecs) == len(batch)
-    expected_dim = len(obj_vecs[0])  # multi-output => 2
+    expected_dim = len(obj_vecs[0])
     assert expected_dim == 2
     assert all(isinstance(v, list) and len(v) == expected_dim for v in obj_vecs)
 
@@ -166,24 +183,45 @@ if __name__ == "__main__":
     print("\n=== Run NSGA-II GA for a few generations ===")
     pareto_mdps, pareto_objs, pop, pop_objs = ga.run()
 
-    # Summary
+    # Output summary of Pareto front
     print(f"\nPareto front size = {len(pareto_mdps)}")
     for i, vec in enumerate(pareto_objs[:10]):
         print(f"  PF[{i}] objs = {[round(x, 6) for x in vec]}")
     print(f"Final population size = {len(pop)}")
 
-    # Sanity assertions
+    # Validate results
     assert all(isinstance(m, MDPNetwork) for m in pareto_mdps)
     assert len(pareto_objs) == len(pareto_mdps)
     assert all(len(v) == expected_dim for v in pareto_objs)
     assert len(pareto_mdps) >= 1
 
+    # Log final Pareto objectives as a table
+    try:
+        pf_tbl = wandb.Table(columns=["idx", "obj0", "obj1"])
+        for i, vec in enumerate(pareto_objs):
+            pf_tbl.add_data(i, float(vec[0]), float(vec[1]))
+        run.log({"tables/final_pareto_simple": pf_tbl})
+    except Exception:
+        pass
+
     print("\nOK: NSGA-II GA ran successfully on FrozenLake 8x8 with parallel scoring & offspring.")
 
-    # Save PF MDPs
-    os.makedirs(out_dir, exist_ok=True)
+    # Save Pareto front MDPs to disk
     K = len(pareto_mdps)
+    saved_files = []
     for i in range(K):
         out_path = os.path.join(out_dir, f"pareto_{i}_objs_{'_'.join(f'{v:.4f}' for v in pareto_objs[i])}.json")
         pareto_mdps[i].export_to_json(out_path)
+        saved_files.append(out_path)
         print(f"Saved PF[{i}] -> {out_path}")
+
+    # Optionally log final PF as an artifact
+    try:
+        art = wandb.Artifact(name=f"frozenlake8x8_pf-{run.id}", type="mdp")
+        for p in saved_files:
+            art.add_file(p)
+        run.log_artifact(art)
+    except Exception:
+        pass
+
+    run.finish()

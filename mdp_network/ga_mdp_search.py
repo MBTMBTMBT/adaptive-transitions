@@ -2,6 +2,17 @@
 # Genetic search system for MDPNetwork (structure + probability + reward)
 # with optional parallel scoring and parallel offspring mutation using a process pool (Linux, Python 3.10).
 #
+# W&B integration (simplified):
+# - This module DOES NOT call wandb.init(); pass an external run via MDPEvolutionGA(..., wb_run=run).
+# - We only log obvious running status (scalars) and real-time curves:
+#   * Per-generation scalar stats: min/mean/max for each objective, population size, F1 size, timings.
+#   * Per-generation scatter of current population if num_objectives < 3:
+#       - 1D -> scatter(ind_idx, obj0)
+#       - 2D -> scatter(obj0, obj1)
+#   * If num_objectives >= 3 -> no plots; we log a compact per-gen table (ind_idx + obj*).
+# - One-off outputs (e.g., final Pareto front) are saved as compact tables; no figures.
+# - No artifacts, no frequent large tables, no silent try/except around logging.
+#
 # NSGA-II multi-objective + multi-output score support + per-score constants:
 # - A score function may return either a float OR a sequence of floats.
 # - register_score_fn(..., const=dict) lets you pass per-function constant params at registration time.
@@ -15,10 +26,15 @@ from typing import Callable, Dict, Tuple, List, Optional, Set, Any
 from dataclasses import dataclass
 import math
 import os
+import sys
+import time
+import logging
 
 import numpy as np
 import networkx as nx
 from concurrent.futures import ProcessPoolExecutor
+
+import wandb  # required by request; we don't init here
 
 from mdp_network.mdp_tables import q_table_to_policy, PolicyTable, ValueTable, create_random_policy, blend_policies
 from mdp_network.metrics import kl_policies, performance_curve_and_integral
@@ -201,13 +217,16 @@ class GAConfig:
     vi_max_iterations: int = 1000
 
     policy_temperature: float = 1.0
-    policy_mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0)  # NEW
+    policy_mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0)
     policy_tie_tol: float = 1e-6
 
     perf_numpoints: int = 100
     perf_gamma: Optional[float] = None
     perf_theta: Optional[float] = None
     perf_max_iterations: Optional[int] = None
+
+    # -------------- Simplified W&B controls --------------
+    wandb_enabled: bool = True  # A wandb run MUST be passed into MDPEvolutionGA
 
 # -------------------------------
 # Utilities over MDPNetwork
@@ -593,13 +612,23 @@ def _child_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------------
 
 class MDPEvolutionGA:
-    """NSGA-II on MDPNetwork with serial precompute; score fns may return multi-output."""
+    """NSGA-II on MDPNetwork with serial precompute; score fns may return multi-output.
 
-    def __init__(self, base_mdp: 'MDPNetwork', cfg: GAConfig):
+    W&B usage (simplified):
+      - You MUST pass `wb_run` from an external script; otherwise a ValueError will be raised.
+      - We log only essential per-gen scalars and, if feasible, a per-gen scatter of the population.
+      - For >=3 objectives, we log a compact per-gen table instead of plots.
+      - At the end, a compact table of the final Pareto front is logged.
+    """
+
+    def __init__(self, base_mdp: 'MDPNetwork', cfg: GAConfig,
+                 wb_run: Optional[Any] = None,
+                 logger: Optional[logging.Logger] = None):
         if not cfg.score_fn_names or len(cfg.score_fn_names) < 1:
             raise ValueError("NSGA-II requires score_fn_names (>=1).")
         if cfg.n_workers < 1 or cfg.mutation_n_workers < 1:
             raise ValueError("n_workers and mutation_n_workers must be >= 1.")
+
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg.seed)
 
@@ -609,6 +638,61 @@ class MDPEvolutionGA:
 
         self.precomputed_artifacts: Optional[List[Serialisable]] = None
         self._precomputed_portables: Optional[List[Dict[str, Any]]] = None
+
+        # W&B & logging
+        self.wb_run = wb_run if (cfg.wandb_enabled and wb_run is not None) else None
+        if self.wb_run is None:
+            raise ValueError("W&B run is required. Pass wb_run=wandb.init(...).")
+
+        if logger is not None:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger(__name__)
+            if not self.logger.handlers:
+                _h = logging.StreamHandler(sys.stdout)
+                _h.setFormatter(logging.Formatter(fmt="%(asctime)s | %(levelname)s | %(message)s"))
+                self.logger.addHandler(_h)
+            self.logger.setLevel(logging.INFO)
+
+        # Define gen as the step metric for our logged series
+        self.wb_run.define_metric("gen", summary="max")
+        for prefix in ["pop", "init", "final", "time"]:
+            self.wb_run.define_metric(f"{prefix}/*", step_metric="gen")
+
+    # ------------- helpers --------------
+
+    def _wb_log(self, data: Dict[str, Any]) -> None:
+        """Direct W&B logging; relies on 'gen' field in data for step alignment."""
+        self.wb_run.log(data)
+
+    @staticmethod
+    def _summ_stats(objs: List[List[float]]) -> Dict[str, float]:
+        """Return flattened min/mean/max per objective as a dict."""
+        out: Dict[str, float] = {}
+        if not objs:
+            return out
+        arr = np.asarray(objs, dtype=float)
+        M = arr.shape[1]
+        for m in range(M):
+            out[f"min_{m}"] = float(np.min(arr[:, m]))
+            out[f"mean_{m}"] = float(np.mean(arr[:, m]))
+            out[f"max_{m}"] = float(np.max(arr[:, m]))
+        return out
+
+    @staticmethod
+    def _build_pop_table(pop_objs: List[List[float]]) -> "wandb.Table":
+        """Build a minimal table for the current population: [ind_idx, obj*]."""
+        if not pop_objs:
+            return wandb.Table(columns=["ind_idx"])
+        M = len(pop_objs[0])
+        columns = ["ind_idx"] + [f"obj{m}" for m in range(M)]
+        table = wandb.Table(columns=columns)
+        for i, vec in enumerate(pop_objs):
+            row = [i] + [float(x) for x in vec]
+            table.add_data(*row)
+        return table
+
+    # ------------- core GA -------------
 
     def _init_population(self) -> List['MDPNetwork']:
         pop: List[MDPNetwork] = [self.base_mdp.clone()]
@@ -639,7 +723,6 @@ class MDPEvolutionGA:
                 "pa_portable": pa.to_portable(),
                 "pb_portable": pb.to_portable(),
                 "do_crossover": bool(self.rng.random() < self.cfg.crossover_rate),
-                # Ensure base reference is available in child worker
                 "base_portable": self._base_portable,
             })
         with ProcessPoolExecutor(max_workers=self.cfg.mutation_n_workers) as ex:
@@ -656,8 +739,8 @@ class MDPEvolutionGA:
         kw.setdefault("vi_theta", self.cfg.vi_theta)
         kw.setdefault("vi_max_iterations", self.cfg.vi_max_iterations)
         kw.setdefault("policy_temperature", self.cfg.policy_temperature)
-        kw.setdefault("policy_mixing", self.cfg.policy_mixing)  # NEW
-        kw.setdefault("policy_tie_tol", self.cfg.policy_tie_tol)  # NEW
+        kw.setdefault("policy_mixing", self.cfg.policy_mixing)
+        kw.setdefault("policy_tie_tol", self.cfg.policy_tie_tol)
         kw.setdefault("perf_numpoints", self.cfg.perf_numpoints)
         kw.setdefault("perf_gamma", self.cfg.perf_gamma if self.cfg.perf_gamma is not None else self.cfg.vi_gamma)
         kw.setdefault("perf_theta", self.cfg.perf_theta if self.cfg.perf_theta is not None else self.cfg.vi_theta)
@@ -674,16 +757,19 @@ class MDPEvolutionGA:
 
     def run(self) -> Tuple[List['MDPNetwork'], List[List[float]], List['MDPNetwork'], List[List[float]]]:
         """
+        Execute NSGA-II search.
         Returns:
             pareto_mdps: final non-dominated front (F1)
             pareto_objs: objective vectors for pareto_mdps
             pop:         final population
             pop_objs:    objective vectors for final population
         """
-        # Precompute (baseline)
+        # ---------------- Precompute baseline ----------------
+        t0 = time.perf_counter()
         if self.precomputed_artifacts is not None:
             self._precomputed_portables = [obj.to_portable() for obj in self.precomputed_artifacts]
-            print(f"[Precompute] Using provided artifacts: {len(self._precomputed_portables)} item(s).")
+            self.logger.info(f"[Precompute] Using provided artifacts: {len(self._precomputed_portables)} item(s).")
+            self._wb_log({"gen": -1, "precompute/ok": 1})
         else:
             V, Q = optimal_value_iteration(
                 self.base_mdp,
@@ -695,9 +781,9 @@ class MDPEvolutionGA:
                 Q,
                 states=list(self.base_mdp.states),
                 num_actions=self.base_mdp.num_actions,
-                mixing=self.cfg.policy_mixing,  # NEW
+                mixing=self.cfg.policy_mixing,
                 temperature=self.cfg.policy_temperature,
-                tie_tol=self.cfg.policy_tie_tol,  # NEW
+                tie_tol=self.cfg.policy_tie_tol,
             )
             base_occupancy: ValueTable = compute_occupancy_measure(
                 self.base_mdp, base_policy,
@@ -706,23 +792,35 @@ class MDPEvolutionGA:
                 max_iterations=self.cfg.vi_max_iterations
             )
             self._precomputed_portables = [base_policy.to_portable(), base_occupancy.to_portable()]
-            print("[Precompute] Built baseline policy+occupancy and broadcast to workers.")
+            self.logger.info("[Precompute] Built baseline policy+occupancy and broadcast to workers.")
+            self._wb_log({"gen": -1, "precompute/ok": 1})
 
-        # Init
+        t1 = time.perf_counter()
+        self._wb_log({"gen": -1, "precompute/time_sec": float(t1 - t0)})
+
+        # ---------------- Init population ----------------
         pop = self._init_population()
         objs = self._evaluate_population(pop)
 
-        def _summ(o: List[List[float]]) -> str:
-            if not o: return "NA"
-            arr = np.array(o, dtype=float)
-            stats = []
-            for m in range(arr.shape[1]):
-                stats.append(f"obj{m}: min={arr[:,m].min():.4f} mean={arr[:,m].mean():.4f} max={arr[:,m].max():.4f}")
-            return " | ".join(stats)
+        # Initial summary for console + W&B
+        init_stats = self._summ_stats(objs)
+        msg_stats = " | ".join([f"obj{m}: min={init_stats.get(f'min_{m}', float('nan')):.4f} "
+                                f"mean={init_stats.get(f'mean_{m}', float('nan')):.4f} "
+                                f"max={init_stats.get(f'max_{m}', float('nan')):.4f}"
+                                for m in range(len(objs[0]) if objs else 0)])
+        self.logger.info(f"[Init] pop={len(pop)} | {msg_stats if msg_stats else 'NA'}")
+        self._wb_log({
+            "gen": 0,
+            "init/pop_size": int(len(pop)),
+            **{f"init/obj{m}_min": init_stats.get(f"min_{m}", float("nan")) for m in
+               range(len(objs[0]) if objs else 0)},
+            **{f"init/obj{m}_mean": init_stats.get(f"mean_{m}", float("nan")) for m in
+               range(len(objs[0]) if objs else 0)},
+            **{f"init/obj{m}_max": init_stats.get(f"max_{m}", float("nan")) for m in
+               range(len(objs[0]) if objs else 0)},
+        })
 
-        print(f"[Init] pop={len(pop)} | { _summ(objs) }")
-
-        # Selection metrics
+        # Ranks/crowding for init
         fronts = fast_non_dominated_sort(objs)
         ranks = [0] * len(pop)
         for r, F in enumerate(fronts):
@@ -732,18 +830,41 @@ class MDPEvolutionGA:
         for F in fronts:
             crowding.update(compute_crowding_distance(objs, F))
 
-        # Generations
+        # ---------- Per-gen viz at gen 0 (ALWAYS save table; plot depends on M) ----------
+        M = len(objs[0]) if objs else 0
+        pop_tbl = self._build_pop_table(objs)
+        self._wb_log({"gen": 0, "tables/pop": pop_tbl})  # always log table
+        if M == 1:
+            # Bar chart: index vs obj0
+            bar = wandb.plot.bar(pop_tbl, "ind_idx", "obj0", title="Gen 0: obj0 (bar)")
+            self._wb_log({"gen": 0, "plots/pop_bar": bar})
+        elif M == 2:
+            # Scatter: obj0 vs obj1
+            scatter = wandb.plot.scatter(pop_tbl, "obj0", "obj1", title="Gen 0: obj0 vs obj1")
+            self._wb_log({"gen": 0, "plots/pop_scatter": scatter})
+        # M >= 3 -> table only
+
+        # ---------------- Generations loop ----------------
         for gen in range(self.cfg.generations):
-            target = self.cfg.population_size
+            gstart = time.perf_counter()
+
+            # Parent selection
             parents_pairs: List[Tuple[MDPNetwork, MDPNetwork]] = []
-            for _ in range(target):
+            for _ in range(self.cfg.population_size):
                 p1 = tournament_select_mo(pop, self.rng, self.cfg.tournament_k, ranks, crowding)
                 p2 = tournament_select_mo(pop, self.rng, self.cfg.tournament_k, ranks, crowding)
                 parents_pairs.append((p1, p2))
+            t_sel = time.perf_counter()
 
+            # Offspring generation
             children = self._make_children_parallel(parents_pairs)
-            child_objs = self._evaluate_population(children)
+            t_child = time.perf_counter()
 
+            # Evaluate children
+            child_objs = self._evaluate_population(children)
+            t_eval = time.perf_counter()
+
+            # Environmental selection (union -> next population)
             union_pop = pop + children
             union_objs = objs + child_objs
 
@@ -766,6 +887,7 @@ class MDPEvolutionGA:
 
             pop, objs = new_pop, new_objs
 
+            # Recompute ranks & crowding for current population
             fronts = fast_non_dominated_sort(objs)
             ranks = [0] * len(pop)
             for r, F in enumerate(fronts):
@@ -775,13 +897,73 @@ class MDPEvolutionGA:
             for F in fronts:
                 crowding.update(compute_crowding_distance(objs, F))
 
-            print(f"[Gen {gen + 1}/{self.cfg.generations}] pop={len(pop)} | { _summ(objs) } | F1={len(fronts[0])}")
+            # Console logging
+            gen_stats = self._summ_stats(objs)
+            msg_stats = " | ".join([f"obj{m}: min={gen_stats.get(f'min_{m}', float('nan')):.4f} "
+                                    f"mean={gen_stats.get(f'mean_{m}', float('nan')):.4f} "
+                                    f"max={gen_stats.get(f'max_{m}', float('nan')):.4f}"
+                                    for m in range(len(objs[0]) if objs else 0)])
+            self.logger.info(
+                f"[Gen {gen + 1}/{self.cfg.generations}] pop={len(pop)} | {msg_stats if msg_stats else 'NA'} | F1={len(fronts[0]) if fronts else 0}")
 
-        # Final Pareto front
+            # W&B scalars (use 'gen' as the step axis)
+            gend = time.perf_counter()
+            self._wb_log({
+                "gen": gen + 1,
+                "pop/size": int(len(pop)),
+                "pop/F1_size": int(len(fronts[0]) if fronts else 0),
+                **{f"pop/obj{m}_min": gen_stats.get(f"min_{m}", float("nan")) for m in
+                   range(len(objs[0]) if objs else 0)},
+                **{f"pop/obj{m}_mean": gen_stats.get(f"mean_{m}", float("nan")) for m in
+                   range(len(objs[0]) if objs else 0)},
+                **{f"pop/obj{m}_max": gen_stats.get(f"max_{m}", float("nan")) for m in
+                   range(len(objs[0]) if objs else 0)},
+                "time/selection_sec": float(t_child - t_sel),
+                "time/offspring_sec": float(t_eval - t_child),
+                "time/eval_sec": float(gend - t_eval),
+                "time/total_gen_sec": float(gend - gstart),
+            })
+
+            # ---------- Per-gen viz at gen+1 (ALWAYS save table; plot depends on M) ----------
+            M = len(objs[0]) if objs else 0
+            pop_tbl = self._build_pop_table(objs)
+            self._wb_log({"gen": gen + 1, "tables/pop": pop_tbl})  # always log table
+            if M == 1:
+                bar = wandb.plot.bar(pop_tbl, "ind_idx", "obj0", title=f"Gen {gen + 1}: obj0 (bar)")
+                self._wb_log({"gen": gen + 1, "plots/pop_bar": bar})
+            elif M == 2:
+                scatter = wandb.plot.scatter(pop_tbl, "obj0", "obj1", title=f"Gen {gen + 1}: obj0 vs obj1")
+                self._wb_log({"gen": gen + 1, "plots/pop_scatter": scatter})
+            # M >= 3 -> table only
+
+        # ---------------- Final Pareto front ----------------
         final_fronts = fast_non_dominated_sort(objs)
         F1 = final_fronts[0] if final_fronts else list(range(len(pop)))
         pareto_mdps = [pop[i].clone() for i in F1]
         pareto_objs = [objs[i][:] for i in F1]
+
+        # Final summary logging
+        final_stats = self._summ_stats([objs[i] for i in F1] if F1 else objs)
+        self._wb_log({
+            "gen": self.cfg.generations,
+            "final/F1_size": int(len(F1)),
+            **{f"final/obj{m}_min": final_stats.get(f"min_{m}", float("nan")) for m in
+               range(len(objs[0]) if objs else 0)},
+            **{f"final/obj{m}_mean": final_stats.get(f"mean_{m}", float("nan")) for m in
+               range(len(objs[0]) if objs else 0)},
+            **{f"final/obj{m}_max": final_stats.get(f"max_{m}", float("nan")) for m in
+               range(len(objs[0]) if objs else 0)},
+        })
+
+        # Final compact table of F1 (no figures)
+        if F1:
+            M = len(objs[0])
+            columns = ["idx"] + [f"obj{m}" for m in range(M)]
+            f1_tbl = wandb.Table(columns=columns)
+            for i in F1:
+                f1_tbl.add_data(int(i), *[float(x) for x in objs[i]])
+            self._wb_log({"gen": self.cfg.generations, "tables/final_pareto": f1_tbl})
+
         return pareto_mdps, pareto_objs, pop, objs
 
 # -------------------------------
@@ -798,9 +980,9 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
     theta = float(kwargs.get("vi_theta", 1e-6))
     max_iter = int(kwargs.get("vi_max_iterations", 1000))
     temperature = float(kwargs.get("policy_temperature", 1.0))
-    mixing = tuple(const.get("policy_mixing", kwargs.get("policy_mixing", (0.0, 1.0, 0.0))))  # NEW
-    tie_tol = float(const.get("policy_tie_tol", kwargs.get("policy_tie_tol", 1e-6)))  # NEW
-    delta = float(const.get("kl_delta", kwargs.get("kl_delta", 1e-3)))  # NEW
+    mixing = tuple(const.get("policy_mixing", kwargs.get("policy_mixing", (0.0, 1.0, 0.0))))
+    tie_tol = float(const.get("policy_tie_tol", kwargs.get("policy_tie_tol", 1e-6)))
+    delta = float(const.get("kl_delta", kwargs.get("kl_delta", 1e-3)))
 
     pgamma = float(kwargs.get("perf_gamma", gamma))
     ptheta = float(kwargs.get("perf_theta", theta))
@@ -821,9 +1003,9 @@ def obj_multi_kl_and_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
         Q2,
         states=list(mdp.states),
         num_actions=mdp.num_actions,
-        mixing=mixing,  # NEW
+        mixing=mixing,
         temperature=temperature,
-        tie_tol=tie_tol,  # NEW
+        tie_tol=tie_tol,
     )
     occupancy2: ValueTable = compute_occupancy_measure(mdp, policy=policy2,
                                                        gamma=gamma, theta=theta, max_iterations=max_iter)
@@ -860,14 +1042,14 @@ def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
       2) integral(prior = random, target = policy2)
     """
     const = kwargs.get("score_const", {}) or {}
-    blend_w = float(const.get("blend_weight", kwargs.get("blend_weight", 0.8)))  # NEW
+    blend_w = float(const.get("blend_weight", kwargs.get("blend_weight", 0.8)))
 
     gamma = float(kwargs.get("vi_gamma", 0.99))
     theta = float(kwargs.get("vi_theta", 1e-6))
     max_iter = int(kwargs.get("vi_max_iterations", 1000))
     temperature = float(kwargs.get("policy_temperature", 1.0))
-    mixing = tuple(const.get("policy_mixing", kwargs.get("policy_mixing", (0.0, 1.0, 0.0))))  # NEW
-    tie_tol = float(const.get("policy_tie_tol", kwargs.get("policy_tie_tol", 1e-6)))  # NEW
+    mixing = tuple(const.get("policy_mixing", kwargs.get("policy_mixing", (0.0, 1.0, 0.0))))
+    tie_tol = float(const.get("policy_tie_tol", kwargs.get("policy_tie_tol", 1e-6)))
 
     pgamma = float(kwargs.get("perf_gamma", gamma))
     ptheta = float(kwargs.get("perf_theta", theta))
@@ -882,9 +1064,9 @@ def obj_multi_perf(mdp: 'MDPNetwork', *args, **kwargs) -> List[float]:
         Q2,
         states=list(mdp.states),
         num_actions=mdp.num_actions,
-        mixing=mixing,  # NEW
+        mixing=mixing,
         temperature=temperature,
-        tie_tol=tie_tol,  # NEW
+        tie_tol=tie_tol,
     )
 
     # Integral 1: blended prior -> baseline target
