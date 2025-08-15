@@ -22,11 +22,11 @@ def kl_policies(
 
     For each state s in the union of states (from policies/occupancies):
       KL12(s) = KL(pi1(.|s) || pi2(.|s)), KL21(s) = KL(pi2(.|s) || pi1(.|s)).
-    Use the union action set and additive smoothing (delta) so all probs > 0.
+    Use the union action set and additive smoothing (tie_tol) so all probs > 0.
     Aggregate: sum1 = Σ_s occ1[s]*KL12(s), sum2 = Σ_s occ2[s]*KL21(s).
     Return 0.5 * (sum1 + sum2) as a single float.
 
-    Args: policy1, occupancy1, policy2, occupancy2, delta.
+    Args: policy1, occupancy1, policy2, occupancy2, tie_tol.
     """
 
     # Build the union of all states that appear anywhere.

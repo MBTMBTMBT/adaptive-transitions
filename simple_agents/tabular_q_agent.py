@@ -38,6 +38,7 @@ class TabularQAgent(Agent):
         gamma: float = 0.99,
         policy_mix: Tuple[float, float, float] = (0.7, 0.2, 0.1),  # (greedy, softmax, random)
         temperature: float = 1.0,
+        tie_tol: float = 1e-3,
         seed: Optional[int] = None,
         verbose: int = 1,
     ):
@@ -54,6 +55,7 @@ class TabularQAgent(Agent):
 
         self.policy_mix = self._normalize_mix(policy_mix)
         self.temperature = float(temperature) if temperature > 0 else 1e-6
+        self.tie_tol = float(tie_tol)
 
         self.rng = np.random.default_rng(seed)
         self.verbose = verbose
@@ -219,6 +221,7 @@ class TabularQAgent(Agent):
             "gamma": self.gamma,
             "policy_mix": list(self.policy_mix),
             "temperature": self.temperature,
+            "tie_tol": self.tie_tol,
             "observation_space_n": int(self.observation_space.n),
             "action_space_n": int(self.action_space.n),
             "num_timesteps": int(self.num_timesteps),
@@ -270,9 +273,11 @@ class TabularQAgent(Agent):
             gamma=float(meta["gamma"]),
             policy_mix=tuple(meta["policy_mix"]),
             temperature=float(meta["temperature"]),
+            tie_tol=float(meta.get("tie_tol", 1e-3)),  # <<--- NEW (fallback)
             seed=None,
             verbose=1,
         )
+
         # Sanity check spaces
         if agent.observation_space.n != int(meta["observation_space_n"]) or \
            agent.action_space.n != int(meta["action_space_n"]):
@@ -307,9 +312,14 @@ class TabularQAgent(Agent):
     def _greedy_action(self, s: int) -> int:
         nA = self.action_space.n
         qvals = np.array([self.q.get_q_value(s, a) for a in range(nA)], dtype=float)
-        max_q = qvals.max()
-        best_as = np.flatnonzero(np.isclose(qvals, max_q))
-        return int(self.rng.choice(best_as))
+        max_q = float(np.max(qvals)) if nA > 0 else 0.0
+
+        # Actions whose Q is within tie_tol of the maximum share the greedy mass equally
+        near_max = np.flatnonzero(qvals >= (max_q - self.tie_tol))
+        if near_max.size == 0:
+            # Fallback (shouldn't happen): uniform over all actions
+            return int(self.rng.integers(nA))
+        return int(self.rng.choice(near_max))
 
     def _softmax_action(self, s: int, temperature: float) -> int:
         nA = self.action_space.n

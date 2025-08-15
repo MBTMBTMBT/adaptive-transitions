@@ -659,7 +659,7 @@ class RewardDistributionTable:
     """
     Reward distribution table representation for MDP reward analysis.
     Supports both count-based and probability-based distributions.
-    Handles float reward values with configurable precision delta.
+    Handles float reward values with configurable precision tie_tol.
     """
 
     def __init__(self, values: Optional[Dict[float, Union[int, float]]] = None, delta: float = 0.01):
@@ -668,14 +668,14 @@ class RewardDistributionTable:
 
         Args:
             values: Dictionary mapping reward -> count/probability
-            delta: Precision delta for grouping similar reward values
+            delta: Precision tie_tol for grouping similar reward values
         """
         self.values = values if values is not None else {}
         self.delta = delta
 
     def _round_reward(self, reward: float) -> float:
         """
-        Round reward value to the nearest multiple of delta for grouping.
+        Round reward value to the nearest multiple of tie_tol for grouping.
 
         Args:
             reward: Raw reward value
@@ -759,7 +759,7 @@ class RewardDistributionTable:
 
         Returns:
             New RewardDistributionTable with reward keys normalized to [0, 1] range.
-            Values and delta precision remain unchanged.
+            Values and tie_tol precision remain unchanged.
 
         Example:
             Original: {-5.0: 10, 0.0: 50, 10.0: 30}  # rewards -> counts
@@ -790,7 +790,7 @@ class RewardDistributionTable:
 
             for reward, value in self.values.items():
                 normalized_reward = (reward - min_reward) / reward_range
-                # Round to delta precision
+                # Round to tie_tol precision
                 normalized_reward = self._round_reward(normalized_reward)
 
                 # Handle potential collisions from rounding
@@ -802,7 +802,7 @@ class RewardDistributionTable:
             print(f"REWARDS 0-1 Normalization: [{min_reward:.6f}, {max_reward:.6f}] -> [0.0, 1.0]")
             print("Values (counts/probabilities) unchanged, only reward keys normalized")
 
-        # Create new table with same delta and normalized reward keys
+        # Create new table with same tie_tol and normalized reward keys
         return RewardDistributionTable(normalized_values, delta=self.delta)
 
     def normalize_to_probabilities(self) -> 'RewardDistributionTable':

@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
     # Use the new policy mixing triple everywhere
     POLICY_MIXING = (1.0, 0.0, 0.0)
-    POLICY_TIE_TOL = 1e-3  # keep default unless you want to tweak
+    POLICY_TIE_TOL = 1e-2  # keep default unless you want to tweak
 
     # Register the multi-output objective with per-function constants.
     # You can tweak blend_weight here without touching GAConfig/score_kwargs.

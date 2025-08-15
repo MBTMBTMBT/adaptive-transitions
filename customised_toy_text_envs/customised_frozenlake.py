@@ -645,3 +645,190 @@ def plot_frozenlake_occupancy_overlays(
     print(f"[OK] Saved occupancy overlay to: {os.path.abspath(out_path)}")
     return os.path.abspath(out_path)
 
+
+def plot_frozenlake_occupancy_diff_overlay(
+    env: Union[FrozenLakeEnv, CustomisedFrozenLakeEnv],
+    occupancy_a: "ValueTable",               # supports .get_value(s); dict-like also works
+    occupancy_b: "ValueTable",               # supports .get_value(s); dict-like also works
+    output_dir: str,
+    filename_prefix: str = "frozenlake_occupancy_diff",
+    alpha: float = 0.65,                     # overlay transparency for the heat layer
+    annotate: bool = True,                   # draw per-cell numeric labels
+    dpi: int = 200,
+    target_cell_px: int = 240,               # target cell size in pixels for readability
+    font_scale: float = 0.18,                # label font size as fraction of cell size
+    cmap_name: str = "coolwarm",             # diverging colormap for signed differences
+    min_abs_label: float = 0.0,              # do not draw labels if |Δ| < threshold
+    vmin: float | None = None,               # color scale min; defaults to symmetric about 0
+    vmax: float | None = None                # color scale max; defaults to symmetric about 0
+) -> str:
+    """
+    Overlay the difference between two occupancy measures (A − B) as a semi-transparent
+    diverging heat layer on the FrozenLake board, with optional numeric labels and a colorbar.
+
+    Assumptions:
+      - `occupancy_a` and `occupancy_b` expose `get_value(state)` -> float, or are dict-like {state: value}.
+      - State indices match the environment encoding: s = row * ncol + col.
+
+    Returns:
+      The absolute path to the saved PNG file.
+    """
+    # -------- Basic checks --------
+    assert hasattr(env, "nrow") and hasattr(env, "ncol"), "Env must have nrow/ncol."
+    nrow, ncol = env.nrow, env.ncol
+    nS = nrow * ncol
+    os.makedirs(output_dir, exist_ok=True)
+
+    # -------- Board background (same as other overlays) --------
+    prev_mode = getattr(env, "render_mode", None)
+    env.render_mode = "rgb_array"
+    try:
+        env.reset()
+        if hasattr(env, "initial_state_distrib"):
+            env.s = int(np.argmax(env.initial_state_distrib))
+    except Exception:
+        pass
+
+    bg_img = env.render()
+    if bg_img is None:
+        try:
+            bg_img = env._render_gui("rgb_array")  # type: ignore
+        except Exception as e:
+            raise RuntimeError("Failed to render background.") from e
+    env.render_mode = prev_mode
+
+    H, W = bg_img.shape[:2]
+    cell_w, cell_h = W / ncol, H / nrow
+
+    # -------- Auto upscale board for readability --------
+    upscale = int(np.ceil(target_cell_px / min(cell_w, cell_h)))
+    upscale = max(1, min(upscale, 4))
+    if upscale > 1:
+        try:
+            from PIL import Image
+            bg_img = np.array(
+                Image.fromarray(bg_img).resize((int(W * upscale), int(H * upscale)),
+                                               resample=Image.BICUBIC)
+            )
+        except Exception:
+            # Fallback: nearest-neighbor upscale
+            bg_img = np.kron(bg_img, np.ones((upscale, upscale, 1), dtype=bg_img.dtype))
+        H, W = bg_img.shape[:2]
+        cell_w *= upscale
+        cell_h *= upscale
+
+    # -------- Helpers (coords, sizing) --------
+    def state_to_center_xy(s: int) -> tuple[float, float]:
+        r, c = divmod(int(s), ncol)
+        return (c + 0.5) * cell_w, (r + 0.5) * cell_h
+
+    def px_to_pt(px: float) -> float:
+        return float(px) * 72.0 / float(dpi)
+
+    cell_min = min(cell_w, cell_h)
+    font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
+    title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
+
+    # Text style for labels
+    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
+    text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
+
+    # -------- Build occupancy grids and difference (nrow x ncol) --------
+    def occ_get(tbl, s: int) -> float:
+        """Read occupancy value from ValueTable or dict-like."""
+        if hasattr(tbl, "get_value"):
+            return float(tbl.get_value(int(s)))
+        try:
+            return float(tbl.get(int(s), 0.0))  # type: ignore[attr-defined]
+        except Exception:
+            return 0.0
+
+    grid_a = np.zeros((nrow, ncol), dtype=float)
+    grid_b = np.zeros((nrow, ncol), dtype=float)
+    for s in range(nS):
+        r, c = divmod(s, ncol)
+        grid_a[r, c] = occ_get(occupancy_a, s)
+        grid_b[r, c] = occ_get(occupancy_b, s)
+
+    diff_grid = grid_a - grid_b  # signed difference
+
+    # Compute default symmetric vmin/vmax around zero if not provided
+    finite_mask = np.isfinite(diff_grid)
+    max_abs = float(np.nanmax(np.abs(diff_grid[finite_mask]))) if finite_mask.any() else 1.0
+    if vmin is None or vmax is None:
+        vmin = -max_abs
+        vmax = max_abs
+    # Ensure vmin < 0 < vmax (required for a proper diverging norm)
+    if not (vmin < 0.0 < vmax):
+        if vmax <= 0.0 and vmin < 0.0:
+            vmax = abs(vmin)
+        elif vmin >= 0.0 and vmax > 0.0:
+            vmin = -vmax
+        else:
+            # fallback if both are zero or inconsistent
+            vmin, vmax = -1e-9, 1e-9
+
+    # Diverging colormap and zero-centered normalization
+    cmap = cm.get_cmap(cmap_name)
+    try:
+        # TwoSlopeNorm ensures mid-point (0.0) is mapped to the center of the colormap
+        norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    except Exception:
+        # Fallback: symmetric Normalize (less accurate for imbalance, but safe)
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+    # -------- Plot --------
+    fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi)
+    ax = plt.gca()
+
+    # Base board
+    ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title("Δ State Occupancy (A − B)", fontsize=title_pt)
+
+    # Semi-transparent diff layer aligned to the board coordinates
+    ax.imshow(
+        diff_grid,
+        origin="upper",
+        cmap=cmap,
+        norm=norm,
+        extent=[0, W, H, 0],
+        alpha=alpha,
+        zorder=1,
+        interpolation="nearest",
+    )
+
+    # Colorbar legend (shows negative/zero/positive ranges)
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
+    cbar.set_label("Δ occupancy (A − B)", fontsize=max(8, int(title_pt * 0.7)))
+    cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
+
+    # Optional numeric labels at cell centers (with sign)
+    if annotate:
+        for s in range(nS):
+            r, c = divmod(s, ncol)
+            val = diff_grid[r, c]
+            if not np.isfinite(val) or abs(val) < min_abs_label:
+                continue
+            x, y = state_to_center_xy(s)
+            ax.text(
+                x, y,
+                (f"{val:+.2e}" if abs(val) < 0.01 and val != 0.0 else f"{val:+.2f}"),
+                ha="center", va="center", fontsize=font_pt,
+                bbox=text_bbox, alpha=0.95, zorder=2,
+                path_effects=text_effects,
+            )
+
+    # Save and close
+    out_name = f"{filename_prefix}.png"
+    out_path = os.path.join(output_dir, out_name)
+    plt.savefig(out_path, bbox_inches="tight", pad_inches=0.05, dpi=dpi)
+    plt.close(fig)
+
+    print(f"[OK] Saved occupancy diff overlay to: {os.path.abspath(out_path)}")
+    return os.path.abspath(out_path)

@@ -95,6 +95,7 @@ LEARNING_RATE = 0.1
 GAMMA = 0.99
 POLICY_MIX = (0.9, 0.0, 0.1)
 TEMPERATURE = 0.01
+ITE_TOL = 1e-2
 
 # Env specifics
 FROZENLAKE_MAP = "8x8"
@@ -252,6 +253,7 @@ def _run_one_seed(seed: int, json_files: List[str]) -> Dict:
             gamma=GAMMA,
             policy_mix=POLICY_MIX,
             temperature=TEMPERATURE,
+            tie_tol=ITE_TOL,
             seed=seed,
             verbose=0,
         )
@@ -280,6 +282,7 @@ def _run_one_seed(seed: int, json_files: List[str]) -> Dict:
             gamma=GAMMA,
             policy_mix=POLICY_MIX,
             temperature=TEMPERATURE,
+            tie_tol=ITE_TOL,
             seed=seed,
             verbose=0,
         )

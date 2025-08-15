@@ -22,6 +22,9 @@ Add-ons:
         (b) an optimal policy (Q* -> policy via MIXING; default 0.1 uniform + 0.9 greedy).
     - Plots occupancy overlays for both policies.
     - Cross-evaluates the learned optimal mixed policy on the NATIVE MDP and plots its occupancy overlay as well.
+    - NEW: Also plots an occupancy *difference* (on the NATIVE MDP):
+        (learned policy on native) − (native random policy).
+        Naming rule: if mixing has zero softmax weight (mix[1] == 0), omit the temperature suffix “T...”.
 """
 
 import os
@@ -37,6 +40,7 @@ from customised_toy_text_envs.customised_frozenlake import (
     CustomisedFrozenLakeEnv,               # used to get native MDP from env
     plot_frozenlake_transition_overlays,
     plot_frozenlake_occupancy_overlays,   # occupancy overlay renderer
+    plot_frozenlake_occupancy_diff_overlay,  # NEW: occupancy difference renderer
 )
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import create_random_policy, q_table_to_policy
@@ -72,7 +76,7 @@ NATIVE_OPT_POLICY_MIXING: Tuple[float, float, float] = (0.0, 0.0, 1.0)
 # JSON MDP optimal policy: epsilon-greedy with epsilon=0.1 (parameterized)
 LOOP_OPT_POLICY_MIXING: Tuple[float, float, float] = (0.1, 0.0, 0.9)
 # Tolerance for tie-breaking in greedy/softmax
-OPT_TIE_TOL: float = 1e-6
+OPT_TIE_TOL: float = 1e-2
 
 # Occupancy overlay style
 OCC_ALPHA: float = 0.65
@@ -132,12 +136,22 @@ def _mix_tag(mix: Tuple[float, float, float]) -> str:
     return f"mix_u{u:.2f}_s{s:.2f}_g{g:.2f}"
 
 
+def _mix_suffix(mix: Tuple[float, float, float], temperature: float) -> str:
+    """
+    Filename suffix for a mixing config.
+    If softmax weight == 0, omit temperature from the suffix.
+    """
+    tag = _mix_tag(mix)
+    return f"{tag}_T{temperature:g}" if mix[1] > 0.0 else tag
+
+
 def process_one_mdp_bundle(
     label: str,
     env: FrozenLakeEnv,
     mdp: MDPNetwork,
     out_dir: Path,
-    native_mdp: Optional[MDPNetwork] = None,     # for cross-evaluation on the native environment
+    native_mdp: Optional[MDPNetwork] = None,       # for cross-evaluation on the native environment
+    native_occ_random: Optional["ValueTable"] = None,  # baseline random occupancy on native (for diff plots)
     opt_policy_mixing: Tuple[float, float, float] = LOOP_OPT_POLICY_MIXING,  # mapping Q*->policy on THIS mdp
     softmax_temperature: float = SOFTMAX_TEMPERATURE,
     tie_tol: float = OPT_TIE_TOL,
@@ -148,6 +162,8 @@ def process_one_mdp_bundle(
       - Compute occupancy for random policy and optimal mixed policy (on this MDP).
       - Plot both occupancy overlays.
       - If native_mdp is provided: cross-evaluate the learned optimal mixed policy on the native MDP and plot.
+      - NEW: If native_occ_random is provided, also plot the difference
+             (occ_opt_on_native − native_random) on the native MDP.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -189,7 +205,7 @@ def process_one_mdp_bundle(
         q_table=Q_star,
         states=mdp.states,
         num_actions=mdp.num_actions,
-        mixing=opt_policy_mixing,         # <== mixing controls uniform/softmax/greedy weights
+        mixing=opt_policy_mixing,         # mixing controls uniform/softmax/greedy weights
         temperature=softmax_temperature,  # used only if mixing softmax weight > 0
         tie_tol=tie_tol,
     )
@@ -220,12 +236,12 @@ def process_one_mdp_bundle(
         vmax=OCC_VMAX,
     )
 
-    mix_tag = _mix_tag(opt_policy_mixing)
+    mix_suffix = _mix_suffix(opt_policy_mixing, softmax_temperature)
     plot_frozenlake_occupancy_overlays(
         env=env,
         occupancy_matrix=occ_opt,
         output_dir=str(out_dir),
-        filename_prefix=f"{label}_occupancy_optimal_{mix_tag}_T{softmax_temperature:g}",
+        filename_prefix=f"{label}_occupancy_optimal_{mix_suffix}",
         alpha=OCC_ALPHA,
         annotate=True,
         dpi=DPI,
@@ -252,7 +268,7 @@ def process_one_mdp_bundle(
             env=env,
             occupancy_matrix=occ_cross_native,
             output_dir=str(out_dir),
-            filename_prefix=f"{label}_occupancy_optPolicy_on_NATIVE_{mix_tag}_T{softmax_temperature:g}",
+            filename_prefix=f"{label}_occupancy_optPolicy_on_NATIVE_{mix_suffix}",
             alpha=OCC_ALPHA,
             annotate=True,
             dpi=DPI,
@@ -264,6 +280,25 @@ def process_one_mdp_bundle(
             vmin=OCC_VMIN,
             vmax=OCC_VMAX,
         )
+
+        # 5) NEW: Difference plot on native: (learned policy on native) - (native random policy)
+        if native_occ_random is not None:
+            plot_frozenlake_occupancy_diff_overlay(
+                env=env,
+                occupancy_a=occ_cross_native,
+                occupancy_b=native_occ_random,
+                output_dir=str(out_dir),
+                filename_prefix=f"{label}_occupancy_DIFF_optPolicyMINUS_nativeRandom_{mix_suffix}",
+                alpha=OCC_ALPHA,
+                annotate=True,
+                dpi=DPI,
+                target_cell_px=OCC_TARGET_CELL_PX,
+                font_scale=OCC_FONT_SCALE,
+                cmap_name="coolwarm",            # diverging colormap for signed differences
+                min_abs_label=0.0,               # label threshold for |Δ|
+                vmin=None,                       # auto symmetric range
+                vmax=None,
+            )
 
     print(f"[OK] Saved occupancy overlays for '{label}' -> {out_dir}")
 
@@ -281,8 +316,20 @@ def main():
 
     # === (A) Native FrozenLake MDP first ===
     native_mdp = None
+    native_occ_random = None
     try:
         native_mdp = env.get_mdp_network()  # provided by CustomisedFrozenLakeEnv
+        # Pre-compute native random baseline occupancy for later diffs
+        native_policy_rand = create_random_policy(native_mdp)
+        native_occ_random = compute_occupancy_measure(
+            mdp_network=native_mdp,
+            policy=native_policy_rand,
+            gamma=OCC_GAMMA,
+            theta=OCC_THETA,
+            max_iterations=OCC_MAX_ITERS,
+            verbose=False,
+        )
+
         native_out = output_dir / NATIVE_SUBDIR_NAME
 
         # Native: optimal policy is GREEDY by default (mix=(0,0,1))
@@ -291,7 +338,8 @@ def main():
             env=env,
             mdp=native_mdp,
             out_dir=native_out,
-            native_mdp=None,  # no cross-eval for native-on-native
+            native_mdp=None,               # no cross-eval for native-on-native
+            native_occ_random=None,        # diff not required for native bundle
             opt_policy_mixing=NATIVE_OPT_POLICY_MIXING,
             softmax_temperature=SOFTMAX_TEMPERATURE,
             tie_tol=OPT_TIE_TOL,
@@ -330,7 +378,8 @@ def main():
                 env=env,
                 mdp=mdp,
                 out_dir=out_subdir,
-                native_mdp=native_mdp,   # cross-evaluate learned policy on the native MDP
+                native_mdp=native_mdp,               # cross-evaluate learned policy on the native MDP
+                native_occ_random=native_occ_random, # provide baseline random occupancy for diff
                 opt_policy_mixing=LOOP_OPT_POLICY_MIXING,
                 softmax_temperature=SOFTMAX_TEMPERATURE,
                 tie_tol=OPT_TIE_TOL,
