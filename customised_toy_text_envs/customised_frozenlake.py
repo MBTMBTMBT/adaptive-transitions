@@ -11,9 +11,7 @@ import matplotlib.colors as mcolors
 
 from mdp_network.mdp_network import MDPNetwork
 from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv, generate_random_map, LEFT, DOWN, RIGHT, UP
-from customisable_env_abs import CustomisableEnvAbs
-from mdp_network.mdp_tables import ValueTable
-
+from apis.customisable import CustomisableEnvAbs
 
 MAPS = {
     "4x4": ["SFFF", "FHFH", "FFFH", "HFFG"],

@@ -2,7 +2,7 @@ import json
 from typing import Dict, Optional, Any, Union, Tuple, List, Set
 import numpy as np
 import networkx as nx
-from serialisable import Serialisable
+from apis.serialisable import Serialisable
 
 
 class MDPNetwork(Serialisable):

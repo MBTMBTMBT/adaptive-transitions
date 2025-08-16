@@ -5,7 +5,7 @@ import scipy
 import numpy as np
 
 from mdp_network import MDPNetwork
-from serialisable import Serialisable
+from apis.serialisable import Serialisable
 
 
 class QTable(Serialisable):

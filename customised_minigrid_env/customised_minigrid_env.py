@@ -1,6 +1,6 @@
 import json
 import random
-from typing import Optional, Dict, Any, SupportsFloat, List, Tuple
+from typing import Optional, Dict, Any, SupportsFloat, List
 import itertools
 
 from gymnasium import spaces
@@ -10,11 +10,11 @@ from minigrid.core.world_object import *
 from minigrid.core.world_object import WorldObj
 from minigrid.minigrid_env import MiniGridEnv
 from gymnasium.core import ActType, ObsType
-from minigrid.core.constants import OBJECT_TO_IDX, COLOR_TO_IDX, STATE_TO_IDX, TILE_PIXELS
+from minigrid.core.constants import OBJECT_TO_IDX, COLOR_TO_IDX, TILE_PIXELS
 
 from .simple_actions import SimpleActions
 from .simple_manual_control import SimpleManualControl
-from customisable_env_abs import CustomisableEnvAbs
+from apis.customisable import CustomisableEnvAbs
 from mdp_network.mdp_network import MDPNetwork
 
 
