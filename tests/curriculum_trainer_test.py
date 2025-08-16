@@ -7,7 +7,7 @@ from typing import List, Dict
 from gymnasium.wrappers import TimeLimit
 import datetime
 
-from expetiment_utils.tabular_curriculum_trainer import (
+from two_stage_cl.tabular_curriculum_trainer import (
     EnvFactorySpec,
     PhaseSpec,
     EvalSpec,

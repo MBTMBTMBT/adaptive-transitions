@@ -13,7 +13,7 @@ from dataclasses import asdict
 import wandb
 
 # ---- GA system (NSGA-II version) ----
-from mdp_network.ga_mdp_search import (
+from genetic_algorithms.ga_mdp_search import (
     GAConfig,
     MDPEvolutionGA,
     register_score_fn,

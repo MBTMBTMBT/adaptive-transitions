@@ -72,9 +72,6 @@ WANDB_MODE="online"
 LOCAL_EXP_OUTROOT_DEFAULT="${PROJ_ROOT}/experiment_output"
 SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 
-# local logs (small text logs for driver)
-LOGDIR="${SCRIPT_DIR}/logs"
-
 # SLURM resources
 # SLURM_PARTITION="gpu"
 # SLURM_GRES="gpu:1"
@@ -100,6 +97,7 @@ EXTRA_ARGS=()
 LOCAL_EXP_OUTROOT="${LOCAL_EXP_OUTROOT_DEFAULT}"
 SLURM_EXP_OUTROOT="${SLURM_EXP_OUTROOT_DEFAULT}"
 SLURM_STDOUT_DIR="${SLURM_STDOUT_DIR_DEFAULT}"
+LOGDIR_CLI=""  # [MOD] Optional override for driver logs.
 
 usage() {
   cat <<EOF
@@ -128,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     --days)                SLURM_TIME_DAYS="${2:-}"; shift ;;
     --exclude)             SLURM_EXCLUDE="${2:-}"; shift ;;
     --script)              SCRIPT_PATH="$(cd "$(dirname "${2:-}")" && pwd)/$(basename "${2:-}")"; shift ;;
+    --logdir)              LOGDIR_CLI="${2:-}"; shift ;;  # [MOD] Allow user to override unified driver logs dir.
     --)                    shift; EXTRA_ARGS+=("$@"); break ;;
     -h|--help)             usage ;;
     *) echo "Unknown option: $1"; usage ;;
@@ -166,7 +165,16 @@ else
 fi
 
 WB_DIR="${EXP_OUTROOT%/}/wandb_runs"          # keep W&B artifacts outside code tree
-mkdir -p "${LOGDIR}" "${EXP_OUTROOT}" "${WB_DIR}"
+mkdir -p "${EXP_OUTROOT}" "${WB_DIR}"         # [MOD] Do NOT mkdir LOGDIR here; will be unified/overridden below.
+
+# [MOD] Unify driver LOGDIR under EXP_OUTROOT, but allow user override via --logdir.
+if [[ -n "${LOGDIR_CLI}" ]]; then
+  # honor user-provided logdir as-is (resolve if exists)
+  LOGDIR="$(cd "${LOGDIR_CLI}" 2>/dev/null && pwd || echo "${LOGDIR_CLI}")"
+else
+  LOGDIR="${EXP_OUTROOT%/}/${EXP_NAME}/_driver_logs"
+fi
+mkdir -p "${LOGDIR}"
 
 # sanity: container file presence (if requested)
 if [[ -n "${CONTAINER}" && ! -f "${CONTAINER}" ]]; then
@@ -232,6 +240,7 @@ if ! ${USE_SLURM}; then
   echo "[Local/${ENGINE:-host}] Running ${#MAPS[@]} map(s): ${MAPS[*]}"
   echo "[Local] EXP_OUTROOT = ${EXP_OUTROOT}"
   echo "[Local] WANDB_DIR   = ${WB_DIR}"
+  echo "[Local] LOGDIR      = ${LOGDIR}"   # [MOD] Show unified driver logs location.
   for map in "${MAPS[@]}"; do
     echo "==> MAP=${map}"
     build_cmd_for_map "${map}"
@@ -247,6 +256,7 @@ mkdir -p "${SLURM_STDOUT_DIR}"
 echo "[SLURM] Submitting ${#MAPS[@]} map(s): ${MAPS[*]}"
 echo "[SLURM] EXP_OUTROOT = ${EXP_OUTROOT}"
 echo "[SLURM] STDOUT_DIR  = ${SLURM_STDOUT_DIR}"
+echo "[SLURM] DRIVER LOGS = ${LOGDIR}"  # [MOD] Show where the driver logs live for consistency.
 
 for map in "${MAPS[@]}"; do
   job_script="$(mktemp)"

@@ -298,13 +298,6 @@ def _run_one_seed_worker(
     """
     results: Dict[str, Any] = {"seed": int(seed)}
 
-    # --- Build eval envs per label name ---
-    def _make_eval_envs(eval_specs: List[Dict[str, Any]]):
-        envs = {}
-        for es in eval_specs:
-            envs[es["name"]] = _make_env_from_spec(es["env_spec"], seed=12345)
-        return envs
-
     # --- Helper to run one multi-phase plan with multiple eval contexts ---
     def _run_plan(phase_specs: List[Dict[str, Any]], eval_specs: List[Dict[str, Any]]):
         # Training agent constructed on first phase env; we will switch by set_env.
