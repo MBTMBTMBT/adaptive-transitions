@@ -8,6 +8,8 @@
 #
 # ---------------------------------------------------------------------------
 # USAGE EXAMPLES (only set --exp and --maps; everything else has sane defaults)
+# 0) What I actually run on create:
+#      bash experiments/frozenlake/ga_experiment.sh --exp ga-frozenlake --use-slurm
 #
 # 1) Local (Apptainer, default maps env0..env4; outputs -> ./experiment_output):
 #      experiments/frozenlake/ga_experiment.sh --exp my_flk
