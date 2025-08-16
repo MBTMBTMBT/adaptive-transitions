@@ -31,7 +31,7 @@
 #      experiments/frozenlake/ga_experiment.sh --exp my_flk --use-slurm
 #      # custom resources:
 #      experiments/frozenlake/ga_experiment.sh --exp my_flk --use-slurm \
-#         --partition gpu --gres gpu:1 --mem 48G --cpus 12 --days 2
+#         --partition gpu --gres gpu:1 --mem 48G --cpus 12 --days 2.5
 #
 # 7) Override experiment output roots:
 #      # local:
@@ -75,13 +75,11 @@ LOCAL_EXP_OUTROOT_DEFAULT="${PROJ_ROOT}/experiment_output"
 SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 
 # SLURM resources
-# SLURM_PARTITION="gpu"
-# SLURM_GRES="gpu:1"
 SLURM_PARTITION="cpu"
 SLURM_GRES=""
-SLURM_MEM="63G"
-SLURM_CPUS="108"
-SLURM_TIME_DAYS=1
+SLURM_MEM="31G"
+SLURM_CPUS="63"
+SLURM_TIME_DAYS="0.5"   # supports decimal now, e.g., 1.5
 SLURM_EXCLUDE=""
 
 # SLURM stdout/err directory (on scratch, recommended by site docs)
@@ -99,11 +97,13 @@ EXTRA_ARGS=()
 LOCAL_EXP_OUTROOT="${LOCAL_EXP_OUTROOT_DEFAULT}"
 SLURM_EXP_OUTROOT="${SLURM_EXP_OUTROOT_DEFAULT}"
 SLURM_STDOUT_DIR="${SLURM_STDOUT_DIR_DEFAULT}"
-LOGDIR_CLI=""  # [MOD] Optional override for driver logs.
+LOGDIR_CLI=""  # Optional override for driver logs.
 
 usage() {
   cat <<EOF
 Usage: $0 --exp <name> [--maps <csv>|--maps-file <path>] [options]
+Options:
+  --days <float>     Walltime in DAYS (supports decimals, e.g., 0.5 -> 12h).
 EOF
   exit 1
 }
@@ -128,7 +128,7 @@ while [[ $# -gt 0 ]]; do
     --days)                SLURM_TIME_DAYS="${2:-}"; shift ;;
     --exclude)             SLURM_EXCLUDE="${2:-}"; shift ;;
     --script)              SCRIPT_PATH="$(cd "$(dirname "${2:-}")" && pwd)/$(basename "${2:-}")"; shift ;;
-    --logdir)              LOGDIR_CLI="${2:-}"; shift ;;  # [MOD] Allow user to override unified driver logs dir.
+    --logdir)              LOGDIR_CLI="${2:-}"; shift ;;
     --)                    shift; EXTRA_ARGS+=("$@"); break ;;
     -h|--help)             usage ;;
     *) echo "Unknown option: $1"; usage ;;
@@ -167,11 +167,10 @@ else
 fi
 
 WB_DIR="${EXP_OUTROOT%/}/wandb_runs"          # keep W&B artifacts outside code tree
-mkdir -p "${EXP_OUTROOT}" "${WB_DIR}"         # [MOD] Do NOT mkdir LOGDIR here; will be unified/overridden below.
+mkdir -p "${EXP_OUTROOT}" "${WB_DIR}"
 
-# [MOD] Unify driver LOGDIR under EXP_OUTROOT, but allow user override via --logdir.
+# Unify driver LOGDIR under EXP_OUTROOT, but allow user override via --logdir.
 if [[ -n "${LOGDIR_CLI}" ]]; then
-  # honor user-provided logdir as-is (resolve if exists)
   LOGDIR="$(cd "${LOGDIR_CLI}" 2>/dev/null && pwd || echo "${LOGDIR_CLI}")"
 else
   LOGDIR="${EXP_OUTROOT%/}/${EXP_NAME}/_driver_logs"
@@ -184,12 +183,35 @@ if [[ -n "${CONTAINER}" && ! -f "${CONTAINER}" ]]; then
   CONTAINER=""
 fi
 
-# SLURM time string
-case "${SLURM_TIME_DAYS}" in
-  1) SLURM_TIME="0-24:00" ;;
-  2) SLURM_TIME="0-48:00" ;;
-  *) SLURM_TIME="0-$((SLURM_TIME_DAYS*24)):00" ;;
-esac
+# -----------------------------
+# SLURM time string (supports decimal days)
+# -----------------------------
+days_str="${SLURM_TIME_DAYS}"
+# compute total minutes with rounding using awk (avoids bash float)
+total_min=$(awk -v d="$days_str" 'BEGIN{printf("%d", d*24*60 + 0.5)}')
+
+d=$(( total_min / (24*60) ))
+rem=$(( total_min % (24*60) ))
+h=$(( rem / 60 ))
+m=$(( rem % 60 ))
+
+SLURM_TIME=$(printf "%d-%02d:%02d:00" "$d" "$h" "$m")
+
+echo "[SLURM] Requested days=${SLURM_TIME_DAYS} -> --time=${SLURM_TIME}"
+
+# -----------------------------
+# NV flag logic
+# -----------------------------
+NV_FLAG=""
+if ${USE_SLURM}; then
+  # Only add --nv for Singularity when GPUs were requested
+  if [[ "${SLURM_GRES}" =~ gpu ]] || [[ "${SLURM_PARTITION}" =~ gpu ]]; then
+    NV_FLAG="--nv"
+  fi
+else
+  # Keep --nv for local Apptainer to match previous behavior
+  NV_FLAG="--nv"
+fi
 
 # -----------------------------
 # Command builder (array-safe)
@@ -205,7 +227,7 @@ build_cmd_for_map() {
   if [[ -n "${CONTAINER}" ]]; then
     if [[ "${ENGINE}" == "apptainer" ]]; then
       # Local: Apptainer
-      CMD_ARR=(apptainer exec --nv --pwd "${SCRIPT_DIR}"
+      CMD_ARR=(apptainer exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}"
                --bind "${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT}"
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
@@ -213,7 +235,7 @@ build_cmd_for_map() {
                --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
     else
       # SLURM: Singularity
-      CMD_ARR=(singularity exec --nv --pwd "${SCRIPT_DIR}"
+      CMD_ARR=(singularity exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}"
                --bind "${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER}"
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
@@ -242,7 +264,7 @@ if ! ${USE_SLURM}; then
   echo "[Local/${ENGINE:-host}] Running ${#MAPS[@]} map(s): ${MAPS[*]}"
   echo "[Local] EXP_OUTROOT = ${EXP_OUTROOT}"
   echo "[Local] WANDB_DIR   = ${WB_DIR}"
-  echo "[Local] LOGDIR      = ${LOGDIR}"   # [MOD] Show unified driver logs location.
+  echo "[Local] LOGDIR      = ${LOGDIR}"
   for map in "${MAPS[@]}"; do
     echo "==> MAP=${map}"
     build_cmd_for_map "${map}"
@@ -258,7 +280,7 @@ mkdir -p "${SLURM_STDOUT_DIR}"
 echo "[SLURM] Submitting ${#MAPS[@]} map(s): ${MAPS[*]}"
 echo "[SLURM] EXP_OUTROOT = ${EXP_OUTROOT}"
 echo "[SLURM] STDOUT_DIR  = ${SLURM_STDOUT_DIR}"
-echo "[SLURM] DRIVER LOGS = ${LOGDIR}"  # [MOD] Show where the driver logs live for consistency.
+echo "[SLURM] DRIVER LOGS = ${LOGDIR}"
 
 for map in "${MAPS[@]}"; do
   job_script="$(mktemp)"
@@ -271,7 +293,6 @@ for map in "${MAPS[@]}"; do
 #!/bin/bash -l
 #SBATCH --job-name=${job_name}
 #SBATCH --partition=${SLURM_PARTITION}
-#SBATCH --gres=${SLURM_GRES}
 #SBATCH --cpus-per-task=${SLURM_CPUS}
 #SBATCH --mem=${SLURM_MEM}
 #SBATCH --time=${SLURM_TIME}
@@ -280,6 +301,8 @@ for map in "${MAPS[@]}"; do
 #SBATCH --nodes=1
 #SBATCH --chdir=${SCRIPT_DIR}
 EOF
+  # Optional SBATCH lines
+  [[ -n "${SLURM_GRES}" ]]    && echo "#SBATCH --gres=${SLURM_GRES}"     >> "${job_script}"
   [[ -n "${SLURM_EXCLUDE}" ]] && echo "#SBATCH --exclude=${SLURM_EXCLUDE}" >> "${job_script}"
 
   # job body
