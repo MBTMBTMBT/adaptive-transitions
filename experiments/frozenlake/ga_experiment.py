@@ -577,22 +577,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete)
-    p.add_argument("--ga-pop-size", type=int, default=25)
-    p.add_argument("--ga-generations", type=int, default=10)
+    p.add_argument("--ga-pop-size", type=int, default=500)
+    p.add_argument("--ga-generations", type=int, default=500)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=5)
+    p.add_argument("--ga-elitism", type=int, default=50)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=_str2bool, default=True)
     p.add_argument("--ga-min-out-degree", type=int, default=1)
-    p.add_argument("--ga-max-out-degree", type=int, default=4)
+    p.add_argument("--ga-max-out-degree", type=int, default=5)
     p.add_argument("--ga-prob-floor", type=float, default=1e-6)
-    p.add_argument("--ga-add-edge-attempts-per-child", type=int, default=10)
+    p.add_argument("--ga-add-edge-attempts-per-child", type=int, default=5)
     p.add_argument("--ga-epsilon-new-prob", type=float, default=0.1)
     p.add_argument("--ga-gamma-sample", type=float, default=1.0)
     p.add_argument("--ga-gamma-prob", type=float, default=0.0)
     p.add_argument("--ga-prune-prob-threshold", type=float, default=1e-3)
-    p.add_argument("--ga-prob-tweak-actions-per-child", type=int, default=50)
+    p.add_argument("--ga-prob-tweak-actions-per-child", type=int, default=25)
     p.add_argument("--ga-prob-pairwise-step", type=float, default=0.05)
     p.add_argument("--ga-reward-tweak-edges-per-child", type=int, default=0)
     p.add_argument("--ga-reward-k-percent", type=float, default=0.05)
@@ -631,11 +631,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent-verbose", type=int, default=0)
 
     p.add_argument("--phase-steps", type=str, default="10000,140000")
-    p.add_argument("--eval-every", type=int, default=2500)
-    p.add_argument("--n-eval-episodes", type=int, default=100)
+    p.add_argument("--eval-every", type=int, default=2000)
+    p.add_argument("--n-eval-episodes", type=int, default=250)
 
     # Here: train-seeds is COUNT -> seeds [0..N-1]
-    p.add_argument("--train-seeds", type=int, default=8, help="Use N to get seeds [0..N-1].")
+    p.add_argument("--train-seeds", type=int, default=20, help="Use N to get seeds [0..N-1].")
     p.add_argument("--train-workers", type=int, default=0)
 
     p.add_argument("--eval-seed-base-target", type=int, default=10000)
