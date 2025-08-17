@@ -343,8 +343,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-workers", type=int, default=0, help="0=auto(cpu_count)")
     p.add_argument("--ga-sanity-batch", type=int, default=0)
 
-    p.add_argument("--ga-dist-max-hops", type=int, default=5)
-    p.add_argument("--ga-dist-node-cap", type=int, default=128)
+    p.add_argument("--ga-dist-max-hops", type=int, default=10)
+    p.add_argument("--ga-dist-node-cap", type=int, default=64)
     p.add_argument("--ga-dist-weight-eps", type=float, default=1e-6)
     p.add_argument("--ga-dist-unreachable", type=float, default=1e9)
 
