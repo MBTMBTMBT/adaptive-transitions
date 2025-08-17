@@ -90,7 +90,7 @@ def make_nx_env_from_mdp(mdp, seed: int, **kwargs):
 # - If this file is executed as a module within a package (e.g. `python -m tests.test_curriculum_trainer_frozenlake`),
 #   __name__ will be the importable module path and this dotted path will work across subprocesses.
 # - If you run as a top-level script and __name__ == "__main__", the dotted path will NOT be importable in workers.
-#   In that case, move these factories into a real module (e.g., expetiment_utils.env_factories) and update paths.
+#   In that case, move these factories into a real module (e.g., experiment_utils.env_factories) and update paths.
 TARGET_FACTORY_PATH = __name__ + ":make_frozenlake_target"
 SOURCE_FACTORY_PATH = __name__ + ":make_nx_env_from_mdp"
 

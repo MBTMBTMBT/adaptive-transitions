@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Any
 
-from expetiment_utils.utils import _ensure_dir, _save_json
+from experiment_utils.utils import _ensure_dir, _save_json
 from two_stage_cl.tabular_curriculum_trainer import EnvFactorySpec, PhaseSpec, EvalSpec, SourceFactorySpec, \
     TabularCurriculumTrainer as TrainerClass
 

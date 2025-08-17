@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List
 
-from expetiment_utils.utils import _ensure_dir
+from experiment_utils.utils import _ensure_dir
 from genetic_algorithms.ga_mdp_search import register_score_fn, obj_multi_perf, GAConfig, MDPEvolutionGA, \
     evaluate_mdp_objectives
 from mdp_network import MDPNetwork

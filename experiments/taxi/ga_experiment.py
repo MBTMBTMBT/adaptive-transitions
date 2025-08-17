@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# run_full_experiment.py
+# run_full_experiment_taxi.py
 # English comments only.
 
 from __future__ import annotations
@@ -9,12 +9,13 @@ import argparse
 from pathlib import Path
 from typing import List
 
-from customised_toy_text_envs.customised_frozenlake import (
-    CustomisedFrozenLakeEnv,
-    plot_frozenlake_transition_overlays,
-    plot_frozenlake_scalar_overlay,
-    plot_frozenlake_scalar_diff_overlay,
+from customised_toy_text_envs.customised_taxi import (
+    CustomisedTaxiEnv,
+    plot_taxi_transition_overlays,
+    plot_taxi_scalar_overlay,
+    plot_taxi_scalar_diff_overlay,
 )
+
 from experiment_utils.utils import (
     _ensure_dir,
     _str2bool,
@@ -22,8 +23,10 @@ from experiment_utils.utils import (
     _save_json,
     _load_json,
     _wandb_init,
-    _wandb_log_image, _resolve_args,
+    _wandb_log_image,
+    _resolve_args,            # reuse your generic arg resolver
 )
+
 from genetic_algorithms.stage_ga import stage_ga
 from mdp_network.mdp_network import MDPNetwork
 from mdp_network.mdp_tables import q_table_to_policy, create_random_policy
@@ -34,14 +37,14 @@ from mdp_network.solvers import (
 )
 from two_stage_cl.stage_train import stage_train
 
-# -------- FrozenLake-specific factories are kept here in main, not inside stage_train --------
-TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake_target"
+# -------- Taxi-specific factories are kept here in main, not inside stage_train --------
+TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_taxi_target"
 SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_nx_env_from_mdp"
 
 
-def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
-    """FrozenLake-specific helper to build the native MDP."""
-    env = CustomisedFrozenLakeEnv(render_mode=None, map_name=map_name, is_slippery=slippery)
+def _build_native_mdp() -> MDPNetwork:
+    """Taxi-specific helper to build the native MDP (no map/rainy/fickle)."""
+    env = CustomisedTaxiEnv(render_mode=None, is_rainy=False, fickle_passenger=False, networkx_env=None)
     env.reset(seed=0)
     return env.get_mdp_network()
 
@@ -51,10 +54,10 @@ def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
 # =============================================================================
 
 def stage_visualize(args, run, json_files: List[Path]):
-    vis_out = Path(args.outdir) / "vis"
+    vis_out = Path(args.outdir) / "vis_taxi"
     _ensure_dir(vis_out)
 
-    env = CustomisedFrozenLakeEnv(render_mode="rgb_array", map_name=args.map, is_slippery=bool(args.slippery))
+    env = CustomisedTaxiEnv(render_mode="rgb_array", is_rainy=False, fickle_passenger=False, networkx_env=None)
     env.reset()
 
     native_mdp = None
@@ -83,52 +86,57 @@ def stage_visualize(args, run, json_files: List[Path]):
             gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
         )
 
-        native_out = vis_out / "__native_frozenlake__"
+        native_out = vis_out / "__native_taxi__"
         _ensure_dir(native_out)
 
-        plot_frozenlake_transition_overlays(
-            env=env, mdp=native_mdp, output_dir=str(native_out), filename_prefix="native_frozenlake",
-            min_prob=args.vis_min_prob, alpha=args.vis_alpha, annotate=True,
-            show_self_loops=args.vis_show_self_loops, dpi=args.vis_dpi,
+        # Movement transitions mosaic (2x2) — Taxi-specific
+        plot_taxi_transition_overlays(
+            env=env, mdp=native_mdp, output_dir=str(native_out),
+            filename_prefix="native_taxi_transitions",
+            min_prob=args.vis_min_prob, alpha=args.vis_alpha,
+            annotate=True, show_self_loops=args.vis_show_self_loops, dpi=args.vis_dpi,
+            target_cell_px=120, arrow_scale=0.04, font_scale=0.16,
+            cmap_name="viridis", gamma=1.0,
         )
 
-        plot_frozenlake_scalar_overlay(
+        # Occupancy — Random
+        plot_taxi_scalar_overlay(
             env=env, value_map=native_occ_random, output_dir=str(native_out),
-            filename_prefix="native_frozenlake_occupancy_random",
+            filename_prefix="native_taxi_occupancy_random",
             alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
-            cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
+            target_cell_px=120, font_scale=0.18, cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
             min_abs_label=0.0, vmin=0.0, vmax=None,
             title="State Occupancy — Random", cbar_label="Occupancy measure",
             value_format=None,
         )
 
+        # V(s) — Random
         V_rand = policy_evaluation(
             mdp_network=native_mdp, policy=create_random_policy(native_mdp),
             gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
         )
-        plot_frozenlake_scalar_overlay(
+        plot_taxi_scalar_overlay(
             env=env, value_map=V_rand, output_dir=str(native_out),
-            filename_prefix="native_frozenlake_VALUE_random",
+            filename_prefix="native_taxi_VALUE_random",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
-            cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
+            target_cell_px=120, font_scale=0.18, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Random", cbar_label="V(s)",
             value_format=None,
         )
-        plot_frozenlake_scalar_overlay(
+
+        # V(s) — Optimal (greedy)
+        plot_taxi_scalar_overlay(
             env=env, value_map=native_V_opt_greedy, output_dir=str(native_out),
-            filename_prefix="native_frozenlake_VALUE_optimal_greedy",
+            filename_prefix="native_taxi_VALUE_optimal_greedy",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
-            cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
+            target_cell_px=120, font_scale=0.18, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
             value_format=None,
         )
 
-        for fn in sorted(native_out.glob("*.png"))[:6]:
+        for fn in sorted(native_out.glob("*.png"))[:8]:
             _wandb_log_image(run, f"images/vis/native/{fn.stem}", fn)
 
     if not json_files:
@@ -143,33 +151,38 @@ def stage_visualize(args, run, json_files: List[Path]):
         out_dir = vis_out / stem
         _ensure_dir(out_dir)
 
-        plot_frozenlake_transition_overlays(
-            env=env, mdp=mdp, output_dir=str(out_dir), filename_prefix=stem,
+        # Transitions overlays for movement actions
+        plot_taxi_transition_overlays(
+            env=env, mdp=mdp, output_dir=str(out_dir), filename_prefix=f"{stem}_transitions",
             min_prob=args.vis_min_prob, alpha=args.vis_alpha, annotate=True,
             show_self_loops=args.vis_show_self_loops, dpi=args.vis_dpi,
+            target_cell_px=120, arrow_scale=0.04, font_scale=0.16,
+            cmap_name="viridis", gamma=1.0,
         )
 
+        # Random policy occupancy
         policy_rand = create_random_policy(mdp)
         occ_rand = compute_occupancy_measure(
             mdp_network=mdp, policy=policy_rand,
             gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
         )
 
+        # Optimal Q*
         _, Q_star = optimal_value_iteration(
             mdp_network=mdp, gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
         )
 
-        # Mixed policy derived from optimal Q: this is the training policy with exploration.
-        policy_opt_mixed = q_table_to_policy(
+        # Training policy (mixed): derived from Q* but with exploration
+        policy_train_mixed = q_table_to_policy(
             q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
             mixing=tuple(args.vis_mix_loop), temperature=args.vis_temperature, tie_tol=args.vis_tie_tol,
         )
-        occ_opt_mixed = compute_occupancy_measure(
-            mdp_network=mdp, policy=policy_opt_mixed,
+        occ_train_mixed = compute_occupancy_measure(
+            mdp_network=mdp, policy=policy_train_mixed,
             gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
         )
 
-        # Pure greedy policy from optimal Q (kept as "optimal (greedy)").
+        # Optimal greedy policy
         policy_opt_greedy = q_table_to_policy(
             q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
             mixing=(1.0, 0.0, 0.0), temperature=1.0, tie_tol=args.vis_tie_tol,
@@ -179,103 +192,106 @@ def stage_visualize(args, run, json_files: List[Path]):
             gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
         )
 
-        plot_frozenlake_scalar_overlay(
+        # Occupancy — random
+        plot_taxi_scalar_overlay(
             env=env, value_map=occ_rand, output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_random",
             alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
+            target_cell_px=120, font_scale=0.18,
             cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
             min_abs_label=0.0, vmin=0.0, vmax=None,
             title="State Occupancy", cbar_label="Occupancy measure",
             value_format=None,
         )
 
+        # Occupancy — training policy (mixed)
         mix_suffix = f"mix_g{args.vis_mix_loop[0]:.2f}_s{args.vis_mix_loop[1]:.2f}_u{args.vis_mix_loop[2]:.2f}" + \
                      (f"_T{args.vis_temperature:g}" if args.vis_mix_loop[1] > 0.0 else "")
-        plot_frozenlake_scalar_overlay(
-            env=env, value_map=occ_opt_mixed, output_dir=str(out_dir),
+        plot_taxi_scalar_overlay(
+            env=env, value_map=occ_train_mixed, output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_trainPolicy_{mix_suffix}",
             alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
+            target_cell_px=120, font_scale=0.18,
             cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
             min_abs_label=0.0, vmin=0.0, vmax=None,
-            title="State Occupancy — Training policy (mixed)",
-            cbar_label="Occupancy measure",
+            title="State Occupancy — Training policy (mixed)", cbar_label="Occupancy measure",
             value_format=None,
         )
 
+        # V(s) — random
         V_rand = policy_evaluation(
             mdp_network=mdp, policy=policy_rand,
             gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
         )
-        plot_frozenlake_scalar_overlay(
+        plot_taxi_scalar_overlay(
             env=env, value_map=V_rand, output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_random",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
+            target_cell_px=120, font_scale=0.18,
             cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Random", cbar_label="V(s)",
             value_format=None,
         )
-        plot_frozenlake_scalar_overlay(
+
+        # V(s) — optimal (greedy)
+        plot_taxi_scalar_overlay(
             env=env, value_map=V_opt_greedy, output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_optimal_greedy",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
+            target_cell_px=120, font_scale=0.18,
             cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
             value_format=None,
         )
 
+        # Cross: training policy on native mdp (if available)
         if native_mdp is not None:
             occ_cross_native = compute_occupancy_measure(
-                mdp_network=native_mdp, policy=policy_opt_mixed,
+                mdp_network=native_mdp, policy=policy_train_mixed,
                 gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
             )
-            plot_frozenlake_scalar_overlay(
+            plot_taxi_scalar_overlay(
                 env=env, value_map=occ_cross_native, output_dir=str(out_dir),
                 filename_prefix=f"{stem}_occupancy_trainPolicy_on_NATIVE_{mix_suffix}",
                 alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
+                target_cell_px=120, font_scale=0.18,
                 cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
                 min_abs_label=0.0, vmin=0.0, vmax=None,
-                title="State Occupancy — Training policy on NATIVE",
-                cbar_label="Occupancy measure",
+                title="State Occupancy — Training policy on NATIVE", cbar_label="Occupancy measure",
                 value_format=None,
             )
             if native_occ_random is not None:
-                plot_frozenlake_scalar_diff_overlay(
+                plot_taxi_scalar_diff_overlay(
                     env=env,
                     values_a=occ_cross_native,
                     values_b=native_occ_random,
                     output_dir=str(out_dir),
                     filename_prefix=f"{stem}_occupancy_DIFF_trainPolicyMINUS_nativeRandom_{mix_suffix}",
                     alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                    target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
+                    target_cell_px=120, font_scale=0.18,
                     cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
-                    title="Δ State Occupancy (training − native-random)",
-                    cbar_label="Δ occupancy (A − B)",
+                    title="Δ State Occupancy (training − native-random)", cbar_label="Δ occupancy (A − B)",
                     value_format="+.2e",
                 )
 
+        # V diff vs native greedy
         if native_V_opt_greedy is not None:
-            plot_frozenlake_scalar_diff_overlay(
+            plot_taxi_scalar_diff_overlay(
                 env=env,
                 values_a=V_opt_greedy,
                 values_b=native_V_opt_greedy,
                 output_dir=str(out_dir),
                 filename_prefix=f"{stem}_VALUE_DIFF_optGreedyMINUS_nativeOptGreedy",
                 alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-                target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
+                target_cell_px=120, font_scale=0.18,
                 cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
-                title="Δ State Value: optGreedy(loop) − optGreedy(native)",
-                cbar_label="Δ V(s) (loop − native)",
+                title="Δ State Value: optGreedy(loop) − optGreedy(native)", cbar_label="Δ V(s) (loop − native)",
                 value_format="+.2f",
             )
 
-        for fn in sorted(out_dir.glob("*.png"))[:8]:
+        for fn in sorted(out_dir.glob("*.png"))[:10]:
             _wandb_log_image(run, f"images/vis/{stem}/{fn.stem}", fn)
 
 
@@ -284,12 +300,12 @@ def stage_visualize(args, run, json_files: List[Path]):
 # =============================================================================
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="End-to-end GA → Curriculum → Visualization with W&B (images only).")
+    p = argparse.ArgumentParser(description="Taxi: GA → Curriculum → Visualization with W&B (images only).")
 
     # W&B
-    p.add_argument("--outdir", type=str, default="./outputs")
+    p.add_argument("--outdir", type=str, default="./outputs_taxi")
     p.add_argument("--run-name", type=str, default=None)
-    p.add_argument("--wandb-project", type=str, default="full-frozenlake")
+    p.add_argument("--wandb-project", type=str, default="full-taxi")
     p.add_argument("--wandb-entity", type=str, default=None)
     p.add_argument("--wandb-mode", type=str, choices=["online", "offline"], default="online")
 
@@ -298,12 +314,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-train", action="store_true")
     p.add_argument("--skip-vis", action="store_true")
 
-    # Env
-    p.add_argument("--map", type=str, default="8x8")
-    p.add_argument("--slippery", type=_str2bool, default=True)
+    # Env (Taxi has no map/slippery toggles)
     p.add_argument("--max-steps", type=int, default=1000)
 
-    # GA (complete)
+    # GA
     p.add_argument("--ga-pop-size", type=int, default=500)
     p.add_argument("--ga-generations", type=int, default=150)
     p.add_argument("--ga-tournament-k", type=int, default=2)
@@ -351,7 +365,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent-learning-rate", type=float, default=0.1)
     p.add_argument("--agent-gamma", type=float, default=0.99)
     p.add_argument("--agent-policy-mix", type=_parse_tuple3, default=(0.9, 0.0, 0.1),
-                   help="Tuple 'g,s,u' for (greedy, softmax, uniform), e.g. 0.9,0.0,0.1")
+                   help="Tuple 'g,s,u' for (greedy, softmax, uniform)")
     p.add_argument("--agent-temperature", type=float, default=0.01,
                    help="Used only if softmax weight > 0")
     p.add_argument("--agent-tie-tol", type=float, default=1e-2)
@@ -384,13 +398,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--vis-mix-loop", type=_parse_tuple3, default=(0.9, 0.0, 0.1))
     p.add_argument("--vis-tie-tol", type=float, default=1e-2)
     p.add_argument("--vis-occ-alpha", type=float, default=0.65)
-    p.add_argument("--vis-occ-cell-px", type=int, default=240)
-    p.add_argument("--vis-occ-font-scale", type=float, default=0.16)
+    p.add_argument("--vis-occ-cell-px", type=int, default=120)
+    p.add_argument("--vis-occ-font-scale", type=float, default=0.18)
     p.add_argument("--vis-occ-cmap", type=str, default="magma")
     p.add_argument("--vis-occ-gamma", type=float, default=1.0)
     p.add_argument("--vis-val-alpha", type=float, default=0.65)
-    p.add_argument("--vis-val-cell-px", type=int, default=240)
-    p.add_argument("--vis-val-font-scale", type=float, default=0.16)
+    p.add_argument("--vis-val-cell-px", type=int, default=120)
+    p.add_argument("--vis-val-font-scale", type=float, default=0.18)
     p.add_argument("--vis-val-cmap", type=str, default="viridis")
     p.add_argument("--vis-val-gamma", type=float, default=1.0)
     return p
@@ -398,7 +412,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main():
     parser = build_arg_parser()
-    args = _resolve_args(parser)
+    args = _resolve_args(parser)   # your generic resolver builds agent_kwargs, seeds, phase_steps, etc.
 
     run = _wandb_init(args)
 
@@ -413,9 +427,8 @@ def main():
         print(f"[MAIN] Using external JSON dir: {json_dir} ({len(json_files)} files).")
     else:
         if not args.skip_ga:
-            # FrozenLake-specific build stays here; stage_ga itself is environment-agnostic already.
-            print("[GA] Building native MDP…")
-            base_mdp = _build_native_mdp(args.map, args.slippery)
+            print("[GA] Building native Taxi MDP…")
+            base_mdp = _build_native_mdp()
             json_files = stage_ga(args, run, base_mdp)
         else:
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
@@ -427,14 +440,14 @@ def main():
     if args.json_max > 0:
         json_files = json_files[:args.json_max]
 
-    # Training Stage — now call a fully environment-agnostic stage_train
+    # Training Stage — environment-agnostic stage_train
     if not args.skip_train and json_files:
         _ = stage_train(
             args=args,
             run=run,
             json_files=json_files,
             target_factory_path=TARGET_FACTORY_PATH,
-            target_factory_kwargs=dict(map_name=args.map, is_slippery=bool(args.slippery), max_steps=int(args.max_steps)),
+            target_factory_kwargs=dict(max_steps=int(args.max_steps)),  # Taxi has no map/slippery
             source_factory_path=SOURCE_FACTORY_PATH,
             source_env_base_kwargs=dict(max_steps=int(args.max_steps)),
             phase_steps=args.phase_steps,
