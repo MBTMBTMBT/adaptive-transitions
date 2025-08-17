@@ -427,6 +427,112 @@ def _px_to_pt(px: float, dpi: int) -> float:
     return float(px) * 72.0 / float(dpi)
 
 
+def _make_blank_board_char_ratio(nrow: int, ncol: int, char_px: int = 24) -> np.ndarray:
+    """
+    Build a white board that matches the Taxi render aspect ratio (ascii grid 11x7 for 5x5).
+    Draw light grid lines aligned to Taxi's *character* grid (with outer margins).
+    """
+    ascii_rows = nrow + 2           # top + bottom margins
+    ascii_cols = 2 * ncol + 1       # vertical bars layout
+    H, W = ascii_rows * char_px, ascii_cols * char_px
+    img = np.ones((H, W, 3), dtype=np.uint8) * 255  # white
+
+    # Character cell sizes
+    ch = H / ascii_rows
+    cw = W / ascii_cols
+
+    # Draw Taxi interior grid lines (only the playable 5x5 area)
+    # Vertical lines at x = cw*(1 + 2*k), k=0..ncol
+    # Horizontal lines at y = ch*(1 + r), r=0..nrow
+    color = 230
+    for k in range(ncol + 1):
+        x = int(round(cw * (1 + 2 * k)))
+        img[:, max(x - 1, 0):x + 1, :] = color
+    for r in range(nrow + 1):
+        y = int(round(ch * (1 + r)))
+        img[max(y - 1, 0):y + 1, :, :] = color
+    return img
+
+
+def _draw_landmarks_rgby_char(ax, env, cw: float, ch: float, alpha: float = 0.22):
+    """
+    Draw semi-transparent RG/Y/B landmark rectangles aligned to the *character-grid*
+    geometry used by the Taxi renderer (with outer margins).
+    """
+    try:
+        locs = list(getattr(env, "locs", [(0, 0), (0, 4), (4, 0), (4, 3)]))
+        colors = list(getattr(env, "locs_colors", [(255, 0, 0), (0, 255, 0),
+                                                   (255, 255, 0), (0, 0, 255)]))
+    except Exception:
+        locs = [(0, 0), (0, 4), (4, 0), (4, 3)]
+        colors = [(255, 0, 0), (0, 255, 0), (255, 255, 0), (0, 0, 255)]
+
+    for (r, c), rgb in zip(locs, colors):
+        # Taxi cell spans x in [(2c+1)cw, (2c+3)cw], y in [(r+1)ch, (r+2)ch]
+        x0 = (2 * c + 1) * cw
+        y0 = (r + 1) * ch
+        ax.add_patch(
+            plt.Rectangle(
+                (x0, y0),
+                2 * cw, ch,
+                facecolor=np.array(rgb) / 255.0,
+                edgecolor="none",
+                alpha=alpha,
+                zorder=0.5,
+            )
+        )
+
+
+def _render_taxi_bg_image(
+    env: Union[TaxiEnv, "CustomisedTaxiEnv"],
+    dest_idx: int,
+    pass_loc: int,
+    cell_px: int = 120,
+) -> tuple[np.ndarray, bool]:
+    """
+    Render an RGB background from the live Taxi environment for a representative state
+    consistent with (pass_loc, dest_idx). If real rendering fails (e.g., pygame missing),
+    fall back to a synthetic board that preserves the Taxi render aspect ratio.
+
+    Returns:
+        (img, used_env): img is HxWx3 uint8, used_env=True if real env render succeeded.
+    """
+    nrow, ncol = _taxi_grid_shape(env)
+    used_env = False
+    prev_mode = getattr(env, "render_mode", None)
+
+    try:
+        # Pick a neutral taxi cell (center) – any row/col is fine for background
+        r0, c0 = nrow // 2, ncol // 2
+        state = int(env.encode(int(r0), int(c0), int(pass_loc), int(dest_idx)))
+
+        # Switch to rgb_array render, set state, and render
+        env.render_mode = "rgb_array"
+        try:
+            # Prefer the custom decode_state (resets bookkeeping cleanly)
+            env.decode_state(state)  # type: ignore[attr-defined]
+        except Exception:
+            env.s = state
+            if hasattr(env, "lastaction"):
+                env.lastaction = None
+
+        img = env.render()
+        if img is None:
+            img = env._render_gui("rgb_array")  # type: ignore[attr-defined]
+        used_env = True
+
+        # Keep the *original* render size to preserve the true aspect ratio.
+        # (No forced resizing to square.)
+    except Exception:
+        # Fallback: synth board with Taxi's 11:7 character-grid aspect ratio
+        img = _make_blank_board_char_ratio(nrow, ncol, char_px=max(16, int(cell_px * 0.5)))
+        used_env = False
+    finally:
+        env.render_mode = prev_mode
+
+    return img, used_env
+
+
 def plot_taxi_transition_overlays(
     env: Union[TaxiEnv, "CustomisedTaxiEnv"],
     mdp: MDPNetwork,
@@ -437,117 +543,135 @@ def plot_taxi_transition_overlays(
     annotate: bool = True,
     show_self_loops: bool = True,
     dpi: int = 200,
-    target_cell_px: int = 120,          # a bit smaller than FrozenLake default (board is 5x5 but we have 4 panes)
-    arrow_scale: float = 0.04,
-    font_scale: float = 0.16,
+    target_cell_px: int = 120,      # only used if we must fallback to synthetic background
+    arrow_scale: float = 0.035,     # slightly thinner
+    font_scale: float = 0.14,       # slightly smaller
     cmap_name: str = "viridis",
     gamma: float = 1.0,
+    # choose a slice for the background so sprites (passenger/dest) look consistent
+    pass_loc_for_bg: int = 4,       # IN_TAXI
+    dest_idx_for_bg: int = 0,       # R
 ) -> str:
     """
-    Draw a 2x2 mosaic of per-action overlays (South, North, East, West) for the Taxi MDP.
-    Only movement actions {0..3} are visualized. Pickup(4)/Dropoff(5) are intentionally ignored.
+    2x2 mosaic of per-action transition overlays (South, North, East, West) for Taxi.
+    Uses a live env-rendered background (native aspect ratio). Arrows are drawn only
+    over the playable 5x5 inner area; pickup/dropoff are ignored.
 
-    For each taxi grid cell (row, col), we use a representative state with passenger=in taxi (4),
-    destination=0 (arbitrary but fixed) to read movement transitions, since movement dynamics
-    do not depend on passenger/destination in Taxi.
+    We query transitions from representative states (row, col, pass=pass_loc_for_bg, dest=dest_idx_for_bg).
+    For Taxi, movement dynamics do not depend on passenger/destination, so this is safe.
     """
     assert hasattr(env, "encode") and hasattr(env, "decode"), "Taxi env must provide encode/decode."
     nrow, ncol = _taxi_grid_shape(env)
     os.makedirs(output_dir, exist_ok=True)
 
-    # --- Build a neutral board background (no sprites) ---
-    bg_img = _make_blank_board(nrow, ncol, target_cell_px)
-    H, W = bg_img.shape[:2]
-    cell_w, cell_h = W / ncol, H / nrow
+    # Background image (native aspect); reuse for all four panes
+    bg_img, used_env = _render_taxi_bg_image(
+        env, dest_idx=int(dest_idx_for_bg), pass_loc=int(pass_loc_for_bg), cell_px=target_cell_px
+    )
+    H_bg, W_bg = bg_img.shape[:2]
 
-    # --- Visual style helpers ---
-    cell_min = min(cell_w, cell_h)
+    # Character-grid geometry (matches Taxi ascii renderer)
+    ascii_rows = nrow + 2
+    ascii_cols = 2 * ncol + 1
+    cw = W_bg / ascii_cols  # character cell width
+    ch = H_bg / ascii_rows  # character cell height
+
+    # Effective taxi cell size (each grid cell spans 2*cw x 1*ch)
+    cell_w_eff = 2 * cw
+    cell_h_eff = ch
+    cell_min = min(cell_w_eff, cell_h_eff)
+
+    # Styling
     ARROW_LW_PT = _px_to_pt(max(1.0, arrow_scale * cell_min), dpi)
-    mutation_scale = _px_to_pt(0.45 * cell_min, dpi)
-    shrink_pt = _px_to_pt(0.18 * cell_min, dpi)
-    font_pt = max(6.0, min(12.0, _px_to_pt(font_scale * cell_min, dpi)))
-    title_pt = max(9.0, min(14.0, _px_to_pt(0.18 * cell_min, dpi)))
-    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
-    text_effects = [pe.withStroke(linewidth=_px_to_pt(1.0, dpi), foreground="black", alpha=0.35)]
+    mutation_scale = _px_to_pt(0.42 * cell_min, dpi)
+    shrink_pt = _px_to_pt(0.16 * cell_min, dpi)
+    font_pt  = max(5.0, min(12.0, _px_to_pt(font_scale * cell_min, dpi)))
+    title_pt = max(8.5, min(13.0, _px_to_pt(0.15 * cell_min, dpi)))
+    text_bbox = dict(facecolor="white", alpha=0.50, edgecolor="none", boxstyle="round,pad=0.12")
+    text_effects = [pe.withStroke(linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.30)]
     cmap = cm.get_cmap(cmap_name)
     prob_norm = mcolors.PowerNorm(gamma=gamma, vmin=0.0, vmax=1.0)
 
     def prob_to_color(p: float):
         return cmap(prob_norm(np.clip(p, 0.0, 1.0)))
 
-    def state_center_xy(row: int, col: int) -> tuple[float, float]:
-        return (col + 0.5) * cell_w, (row + 0.5) * cell_h
+    def cell_center(col: int, row: int) -> tuple[float, float]:
+        # Center of the taxi cell (character-grid coordinates)
+        return ((2 * col + 2) * cw, (row + 1.5) * ch)
+
+    def inner_extent() -> list[float]:
+        # Arrow layer limits (playable inner rectangle)
+        return [1 * cw, (2 * ncol + 1) * cw, 1 * ch, (nrow + 1) * ch]
 
     def draw_self_loop(ax, x, y, p):
         color = prob_to_color(p)
-        radius = 0.30 * cell_min
-        arc = Arc((x + 0.35 * radius, y - 0.35 * radius),
+        radius = 0.40 * cell_min
+        arc = Arc((x + 0.30 * radius, y - 0.30 * radius),
                   width=radius, height=radius,
                   angle=0, theta1=30, theta2=320,
                   linewidth=ARROW_LW_PT, color=color, alpha=alpha, zorder=3)
         ax.add_patch(arc)
         arr = FancyArrowPatch(
-            (x + 0.75 * radius, y - 0.52 * radius),
-            (x + 0.60 * radius, y - 0.40 * radius),
+            (x + 0.70 * radius, y - 0.48 * radius),
+            (x + 0.55 * radius, y - 0.38 * radius),
             arrowstyle="->", mutation_scale=mutation_scale,
             linewidth=ARROW_LW_PT, facecolor=color, edgecolor=color,
             alpha=alpha, zorder=4, shrinkA=0.0, shrinkB=0.0
         )
         ax.add_patch(arr)
 
-    # --- Build figure with 2x2 axes ---
-    fig_w_in = (W / dpi) * 2
-    fig_h_in = (H / dpi) * 2
-    fig = plt.figure(figsize=(fig_w_in, fig_h_in), dpi=dpi)
-    axes = [
-        plt.subplot(2, 2, 1),
-        plt.subplot(2, 2, 2),
-        plt.subplot(2, 2, 3),
-        plt.subplot(2, 2, 4),
-    ]
+    # Figure sized by the background's native aspect ratio
+    fig = plt.figure(figsize=((W_bg / dpi) * 2, (H_bg / dpi) * 2), dpi=dpi)
+    axes = [plt.subplot(2, 2, i) for i in (1, 2, 3, 4)]
+    action_names = ["South", "North", "East", "West"]
 
     # Shared colorbar scaffold
     sm = cm.ScalarMappable(cmap=cmap, norm=prob_norm)
     sm.set_array([])
 
-    for a, ax in zip(_TAXI_MOVE_ACTIONS, axes):
-        # Base board
-        ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
-        ax.set_xlim(0, W)
-        ax.set_ylim(H, 0)
+    # Draw four panes
+    for a, ax in zip([0, 1, 2, 3], axes):
+        # Background (native aspect)
+        ax.imshow(bg_img, origin="upper", extent=[0, W_bg, H_bg, 0], zorder=0)
+        ax.set_xlim(0, W_bg)
+        ax.set_ylim(H_bg, 0)
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_title(f"Action: {_TAXI_ACTION_NAMES[a]}", fontsize=title_pt)
+        ax.set_title(f"Action: {action_names[a]}", fontsize=title_pt)
 
-        # Landmarks for orientation
-        _draw_landmarks_rgby(ax, env, cell_w, cell_h, alpha=0.20)
+        # If fallback, add RG/Y/B landmarks for orientation
+        if not used_env:
+            _draw_landmarks_rgby_char(ax, env, cw, ch, alpha=0.20)
 
-        # Draw arrows for each taxi grid cell (representative state has pass=4, dest=0)
+        # Arrows: iterate over taxi positions; query transitions from a representative state
         for r in range(nrow):
             for c in range(ncol):
-                s_rep = int(env.encode(r, c, 4, 0))
+                s_rep = int(env.encode(r, c, int(pass_loc_for_bg), int(dest_idx_for_bg)))
                 probs = mdp.get_transition_probabilities(s_rep, a)
                 if not probs:
                     continue
-                x0, y0 = state_center_xy(r, c)
+                x0, y0 = cell_center(c, r)
                 for sp, p in probs.items():
-                    if p < min_prob:
-                        continue
                     try:
                         tr, tc, tpass, tdest = env.decode(int(sp))
                     except Exception:
                         continue
-                    x1, y1 = state_center_xy(int(tr), int(tc))
-                    color = prob_to_color(float(p))
+                    p = float(p)
+                    if p < min_prob:
+                        continue
+                    x1, y1 = cell_center(int(tc), int(tr))
+                    color = prob_to_color(p)
+
                     if (tr == r) and (tc == c):
                         if show_self_loops:
-                            draw_self_loop(ax, x0, y0, float(p))
+                            draw_self_loop(ax, x0, y0, p)
                             if annotate:
-                                ax.text(x0, y0 - 0.33 * cell_h, f"{p:.2f}",
+                                ax.text(x0, y0 - 0.33 * ch, f"{p:.2f}",
                                         ha="center", va="center", fontsize=font_pt,
                                         bbox=text_bbox, alpha=alpha, zorder=5,
                                         path_effects=text_effects)
                         continue
+
                     arrow = FancyArrowPatch(
                         (x0, y0), (x1, y1),
                         arrowstyle="->", mutation_scale=mutation_scale,
@@ -555,15 +679,18 @@ def plot_taxi_transition_overlays(
                         alpha=alpha, zorder=3, shrinkA=shrink_pt, shrinkB=shrink_pt
                     )
                     ax.add_patch(arrow)
+
                     if annotate:
                         mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-                        ax.text(mx, my, f"{p:.2f}", ha="center", va="center",
-                                fontsize=font_pt, bbox=text_bbox, alpha=alpha,
-                                zorder=4, path_effects=text_effects)
+                        ax.text(mx, my, f"{p:.2f}",
+                                ha="center", va="center", fontsize=font_pt,
+                                bbox=text_bbox, alpha=alpha, zorder=4,
+                                path_effects=text_effects)
 
-    # One shared colorbar on the right
+    # One shared colorbar
     cbar = fig.colorbar(sm, ax=axes, fraction=0.046, pad=0.02)
-    cbar.set_label("Transition probability", fontsize=max(8, int(title_pt * 0.7)))
+    cbar.set_label("Transition probability", fontsize=max(7, int(title_pt * 0.6)))
+    cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
 
     out_path = os.path.join(output_dir, f"{filename_prefix}.png")
     plt.savefig(out_path, bbox_inches="tight", pad_inches=0.15, dpi=dpi)
@@ -574,19 +701,17 @@ def plot_taxi_transition_overlays(
 
 def plot_taxi_scalar_overlay(
     env: Union[TaxiEnv, "CustomisedTaxiEnv"],
-    value_map: "ValueTable",                 # supports .get_value(s) or dict-like
+    value_map: "ValueTable",
     output_dir: str,
     filename_prefix: str = "taxi_scalar_facets",
-    # Faceting controls:
-    dest_idx: int = 0,                       # fixed destination page (0=R,1=G,2=Y,3=B)
-    pass_locs: List[int] | None = None,      # which passenger-locs to facet; default -> [IN_TAXI, others≠dest]
-    skip_terminal_slice: bool = True,        # skip facet where pass_loc == dest_idx (terminal-like)
-    # Style:
+    dest_idx: int = 0,
+    pass_locs: List[int] | None = None,
+    skip_terminal_slice: bool = True,
     alpha: float = 0.65,
     annotate: bool = True,
     dpi: int = 200,
     target_cell_px: int = 120,
-    font_scale: float = 0.18,
+    font_scale: float = 0.15,
     cmap_name: str = "magma",
     gamma: float = 1.0,
     min_abs_label: float = 0.0,
@@ -594,57 +719,50 @@ def plot_taxi_scalar_overlay(
     vmax: float | None = None,
     title: str = "State Scalar",
     cbar_label: str = "Value",
-    value_format: str | None = None,         # e.g. ".2f", ".2e"; None -> auto (2f/2e)
+    value_format: str | None = None,
 ) -> str:
     """
-    Draw a 2x2 faceted heatmap page for a per-state scalar on Taxi (e.g., V(s) or occupancy).
-    Facets are four passenger-location slices at a fixed destination:
-      - IN_TAXI (4)
-      - the three pickup points excluding `dest_idx`
-      - (optionally) the 'terminal' slice where pass_loc==dest_idx is skipped and replaced by a gray tile.
-
-    Each facet shows a 5x5 grid over taxi positions; the scalar is read from the state
-    encoded as (row, col, pass_loc, dest_idx).
+    2x2 faceted heatmap of a per-state scalar at fixed destination.
+    Now each facet uses an env-rendered background (kept at its native aspect ratio),
+    and the heat layer only covers the playable inner area (no ascii margins).
     """
-    assert hasattr(env, "encode") and hasattr(env, "decode"), "Taxi env must provide encode/decode."
+    assert hasattr(env, "encode") and hasattr(env, "decode")
     nrow, ncol = _taxi_grid_shape(env)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Determine the 4 facets: IN_TAXI + the three pickups != dest
+    # Facet order: IN_TAXI + the three pickups != dest
     if pass_locs is None:
         pickups = [0, 1, 2, 3]
         pickups.remove(int(dest_idx))
-        facet_pass_locs = [4] + pickups  # [IN_TAXI, the other three]
+        facet_pass_locs = [4] + pickups
     else:
         facet_pass_locs = list(pass_locs)
 
-    # Prepare grids and collect global min/max for shared colorbar
     def get_val(tbl, s: int) -> float:
         if hasattr(tbl, "get_value"):
             return float(tbl.get_value(int(s)))
         try:
-            return float(tbl.get(int(s), 0.0))  # type: ignore[attr-defined]
+            return float(tbl.get(int(s), 0.0))
         except Exception:
             return 0.0
 
-    facet_grids: list[np.ndarray] = []
+    # Build grids & min/max
+    facet_grids: list[np.ndarray | None] = []
     data_min, data_max = +np.inf, -np.inf
-
     for pl in facet_pass_locs:
-        # Skip the terminal-like slice if requested (pass at destination and not in taxi)
         if skip_terminal_slice and (pl == dest_idx) and (pl != 4):
-            facet_grids.append(None)  # placeholder for "terminal (skipped)"
+            facet_grids.append(None)
             continue
-        grid = np.zeros((nrow, ncol), dtype=float)
+        G = np.zeros((nrow, ncol), dtype=float)
         for r in range(nrow):
             for c in range(ncol):
                 s = int(env.encode(r, c, int(pl), int(dest_idx)))
-                grid[r, c] = get_val(value_map, s)
-        facet_grids.append(grid)
-        data_min = min(data_min, float(np.nanmin(grid)))
-        data_max = max(data_max, float(np.nanmax(grid)))
+                G[r, c] = get_val(value_map, s)
+        facet_grids.append(G)
+        data_min = min(data_min, float(np.nanmin(G)))
+        data_max = max(data_max, float(np.nanmax(G)))
 
-    # Color scale (shared across facets)
+    # Color scale
     if not np.isfinite(data_min):
         data_min = 0.0
     if not np.isfinite(data_max):
@@ -656,53 +774,65 @@ def plot_taxi_scalar_overlay(
     cmap = cm.get_cmap(cmap_name)
     norm = mcolors.PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax)
 
-    # Layout: 2x2 mosaic
-    bg_img = _make_blank_board(nrow, ncol, target_cell_px)
-    H, W = bg_img.shape[:2]
-    cell_w, cell_h = W / ncol, H / nrow
-    cell_min = min(cell_w, cell_h)
-    font_pt = max(6.0, min(14.0, _px_to_pt(font_scale * cell_min, dpi)))
-    title_pt = max(10.0, min(16.0, _px_to_pt(0.20 * cell_min, dpi)))
-    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
-    text_effects = [pe.withStroke(linewidth=_px_to_pt(1.0, dpi), foreground="black", alpha=0.35)]
+    # Prepare figure size from one background (native aspect ratio)
+    sample_bg, _ = _render_taxi_bg_image(env, dest_idx=int(dest_idx), pass_loc=int(facet_pass_locs[0]), cell_px=target_cell_px)
+    H_bg, W_bg = sample_bg.shape[:2]
+    fig = plt.figure(figsize=((W_bg / dpi) * 2, (H_bg / dpi) * 2), dpi=dpi)
+    axes = [plt.subplot(2, 2, i) for i in (1, 2, 3, 4)]
+
+    # Character-grid geometry (matches Taxi renderer)
+    ascii_rows = nrow + 2
+    ascii_cols = 2 * ncol + 1
+    cw = W_bg / ascii_cols
+    ch = H_bg / ascii_rows
+
+    # Typography
+    cell_w_effective = 2 * cw     # taxi cell width in pixels
+    cell_h_effective = ch         # taxi cell height in pixels
+    cell_min = min(cell_w_effective, cell_h_effective)
+    font_pt  = max(5.0, min(12.0, _px_to_pt(font_scale * cell_min, dpi)))
+    title_pt = max(9.0,  min(14.0, _px_to_pt(0.16 * cell_min, dpi)))
+    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.12")
+    text_effects = [pe.withStroke(linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.3)]
 
     def fmt_val(v: float) -> str:
         if value_format is not None:
             return format(v, value_format)
         return (f"{v:.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:.2f}")
 
-    fig = plt.figure(figsize=((W / dpi) * 2, (H / dpi) * 2), dpi=dpi)
-    axes = [
-        plt.subplot(2, 2, 1),
-        plt.subplot(2, 2, 2),
-        plt.subplot(2, 2, 3),
-        plt.subplot(2, 2, 4),
-    ]
+    def cell_center(c: int, r: int) -> tuple[float, float]:
+        # Center of taxi cell in pixel coords
+        return ( (2 * c + 2) * cw, (r + 1.5) * ch )
 
-    # Titles per facet
-    def _facet_title(pl: int) -> str:
-        names = ["P=R", "P=G", "P=Y", "P=B", "P=IN_TAXI"]
-        return names[pl] if 0 <= pl <= 4 else f"P={pl}"
+    def inner_extent() -> list[float]:
+        # Heat layer covers only the playable inner rectangle
+        return [1 * cw, (2 * ncol + 1) * cw, 1 * ch, (nrow + 1) * ch]
 
     for ax, pl, grid in zip(axes, facet_pass_locs, facet_grids):
+        # Background for this slice (native aspect)
+        bg_img, used_env = _render_taxi_bg_image(env, dest_idx=int(dest_idx), pass_loc=int(pl), cell_px=target_cell_px)
+        H, W = bg_img.shape[:2]
         ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
         ax.set_xlim(0, W)
         ax.set_ylim(H, 0)
         ax.set_xticks([])
         ax.set_yticks([])
-        _draw_landmarks_rgby(ax, env, cell_w, cell_h, alpha=0.20)
-        ax.set_title(f"{title} — {_facet_title(pl)}, D={['R','G','Y','B'][dest_idx]}", fontsize=title_pt)
+        ax.set_title(f"{title} — {['P=R','P=G','P=Y','P=B','P=IN_TAXI'][pl] if 0 <= pl <=4 else f'P={pl}'}, "
+                     f"D={['R','G','Y','B'][dest_idx]}", fontsize=title_pt)
+
+        if not used_env:
+            _draw_landmarks_rgby_char(ax, env, cw, ch, alpha=0.20)
 
         if grid is None:
-            # Terminal-like slice placeholder
-            ax.imshow(np.zeros((nrow, ncol)), origin="upper", extent=[0, W, H, 0],
-                      cmap="Greys", alpha=0.15, interpolation="nearest", zorder=1)
+            ax.imshow(np.zeros((nrow, ncol)), origin="upper",
+                      extent=inner_extent(), cmap="Greys",
+                      alpha=0.15, interpolation="nearest", zorder=1)
             ax.text(W * 0.5, H * 0.5, "terminal (skipped)", ha="center", va="center",
-                    fontsize=font_pt, bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
+                    fontsize=font_pt, bbox=dict(facecolor="white", alpha=0.85, edgecolor="none"))
             continue
 
-        ax.imshow(grid, origin="upper", cmap=cmap, norm=norm, extent=[0, W, H, 0],
-                  alpha=alpha, zorder=1, interpolation="nearest")
+        ax.imshow(grid, origin="upper", cmap=cmap, norm=norm,
+                  extent=inner_extent(), alpha=alpha, zorder=1, interpolation="nearest")
 
         if annotate:
             for r in range(nrow):
@@ -710,15 +840,15 @@ def plot_taxi_scalar_overlay(
                     v = float(grid[r, c])
                     if abs(v) < min_abs_label:
                         continue
-                    x, y = (c + 0.5) * cell_w, (r + 0.5) * cell_h
+                    x, y = cell_center(c, r)
                     ax.text(x, y, fmt_val(v), ha="center", va="center", fontsize=font_pt,
                             bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects)
 
-    # Shared colorbar
+    # Shared colorbar (smaller labels)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=axes, fraction=0.046, pad=0.02)
-    cbar.set_label(cbar_label, fontsize=max(8, int(title_pt * 0.7)))
+    cbar.set_label(cbar_label, fontsize=max(7, int(title_pt * 0.6)))
     cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
 
     out_path = os.path.join(output_dir, f"{filename_prefix}_D{dest_idx}.png")
@@ -734,31 +864,27 @@ def plot_taxi_scalar_diff_overlay(
     values_b: "ValueTable",
     output_dir: str,
     filename_prefix: str = "taxi_scalar_diff_facets",
-    # Faceting
     dest_idx: int = 0,
     pass_locs: List[int] | None = None,
     skip_terminal_slice: bool = True,
-    # Style
     alpha: float = 0.65,
     annotate: bool = True,
     dpi: int = 200,
     target_cell_px: int = 120,
-    font_scale: float = 0.18,
+    font_scale: float = 0.15,
     cmap_name: str = "coolwarm",
     min_abs_label: float = 0.0,
-    vmin: float | None = None,              # if None -> symmetric by max |Δ|
+    vmin: float | None = None,
     vmax: float | None = None,
     title: str = "Δ State Value (A − B)",
     cbar_label: str = "Δ value (A − B)",
     value_format: str | None = "+.2f",
 ) -> str:
     """
-    Draw a 2x2 faceted, **diverging** heatmap page of differences (A − B) at a fixed destination.
-    Facets follow the same convention as plot_taxi_scalar_overlay.
-
-    A and B can be any per-state scalar tables (e.g., V_opt(loop) and V_opt(native)).
+    2x2 faceted diverging heatmap of differences (A − B) at fixed destination.
+    Backgrounds keep the native Taxi aspect; diff layer covers only the inner area.
     """
-    assert hasattr(env, "encode") and hasattr(env, "decode"), "Taxi env must provide encode/decode."
+    assert hasattr(env, "encode") and hasattr(env, "decode")
     nrow, ncol = _taxi_grid_shape(env)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -773,27 +899,26 @@ def plot_taxi_scalar_diff_overlay(
         if hasattr(tbl, "get_value"):
             return float(tbl.get_value(int(s)))
         try:
-            return float(tbl.get(int(s), 0.0))  # type: ignore[attr-defined]
+            return float(tbl.get(int(s), 0.0))
         except Exception:
             return 0.0
 
-    facet_grids: list[np.ndarray] = []
+    facet_grids: list[np.ndarray | None] = []
     max_abs = 0.0
-
     for pl in facet_pass_locs:
         if skip_terminal_slice and (pl == dest_idx) and (pl != 4):
             facet_grids.append(None)
             continue
-        grid = np.zeros((nrow, ncol), dtype=float)
+        G = np.zeros((nrow, ncol), dtype=float)
         for r in range(nrow):
             for c in range(ncol):
                 s = int(env.encode(r, c, int(pl), int(dest_idx)))
-                grid[r, c] = get_val(values_a, s) - get_val(values_b, s)
-        facet_grids.append(grid)
-        if np.isfinite(grid).any():
-            max_abs = max(max_abs, float(np.nanmax(np.abs(grid))))
+                G[r, c] = get_val(values_a, s) - get_val(values_b, s)
+        facet_grids.append(G)
+        if np.isfinite(G).any():
+            max_abs = max(max_abs, float(np.nanmax(np.abs(G))))
 
-    # Symmetric color limits
+    # Symmetric diverging limits
     if (vmin is None) or (vmax is None):
         vmin, vmax = -max_abs, max_abs
     if not (vmin < 0.0 < vmax):
@@ -810,50 +935,62 @@ def plot_taxi_scalar_diff_overlay(
     except Exception:
         norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
-    bg_img = _make_blank_board(nrow, ncol, target_cell_px)
-    H, W = bg_img.shape[:2]
-    cell_w, cell_h = W / ncol, H / nrow
-    cell_min = min(cell_w, cell_h)
-    font_pt = max(6.0, min(14.0, _px_to_pt(font_scale * cell_min, dpi)))
-    title_pt = max(10.0, min(16.0, _px_to_pt(0.20 * cell_min, dpi)))
-    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
-    text_effects = [pe.withStroke(linewidth=_px_to_pt(1.0, dpi), foreground="black", alpha=0.35)]
+    # Figure size from one background (native aspect)
+    sample_bg, _ = _render_taxi_bg_image(env, dest_idx=int(dest_idx), pass_loc=int(facet_pass_locs[0]), cell_px=target_cell_px)
+    H_bg, W_bg = sample_bg.shape[:2]
+    fig = plt.figure(figsize=((W_bg / dpi) * 2, (H_bg / dpi) * 2), dpi=dpi)
+    axes = [plt.subplot(2, 2, i) for i in (1, 2, 3, 4)]
+
+    # Character-grid geometry
+    ascii_rows = nrow + 2
+    ascii_cols = 2 * ncol + 1
+    cw = W_bg / ascii_cols
+    ch = H_bg / ascii_rows
+
+    # Typography
+    cell_w_effective = 2 * cw
+    cell_h_effective = ch
+    cell_min = min(cell_w_effective, cell_h_effective)
+    font_pt  = max(5.0, min(12.0, _px_to_pt(font_scale * cell_min, dpi)))
+    title_pt = max(9.0,  min(14.0, _px_to_pt(0.16 * cell_min, dpi)))
+    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.12")
+    text_effects = [pe.withStroke(linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.3)]
 
     def fmt_val(v: float) -> str:
         if value_format is not None:
             return format(v, value_format)
         return (f"{v:+.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:+.2f}")
 
-    fig = plt.figure(figsize=((W / dpi) * 2, (H / dpi) * 2), dpi=dpi)
-    axes = [
-        plt.subplot(2, 2, 1),
-        plt.subplot(2, 2, 2),
-        plt.subplot(2, 2, 3),
-        plt.subplot(2, 2, 4),
-    ]
+    def cell_center(c: int, r: int) -> tuple[float, float]:
+        return ( (2 * c + 2) * cw, (r + 1.5) * ch )
 
-    def _facet_title(pl: int) -> str:
-        names = ["P=R", "P=G", "P=Y", "P=B", "P=IN_TAXI"]
-        return names[pl] if 0 <= pl <= 4 else f"P={pl}"
+    def inner_extent() -> list[float]:
+        return [1 * cw, (2 * ncol + 1) * cw, 1 * ch, (nrow + 1) * ch]
 
     for ax, pl, grid in zip(axes, facet_pass_locs, facet_grids):
+        bg_img, used_env = _render_taxi_bg_image(env, dest_idx=int(dest_idx), pass_loc=int(pl), cell_px=target_cell_px)
+        H, W = bg_img.shape[:2]
         ax.imshow(bg_img, origin="upper", extent=[0, W, H, 0], zorder=0)
         ax.set_xlim(0, W)
         ax.set_ylim(H, 0)
         ax.set_xticks([])
         ax.set_yticks([])
-        _draw_landmarks_rgby(ax, env, cell_w, cell_h, alpha=0.20)
-        ax.set_title(f"{title} — {_facet_title(pl)}, D={['R','G','Y','B'][dest_idx]}", fontsize=title_pt)
+        ax.set_title(f"{title} — {['P=R','P=G','P=Y','P=B','P=IN_TAXI'][pl] if 0 <= pl <=4 else f'P={pl}'}, "
+                     f"D={['R','G','Y','B'][dest_idx]}", fontsize=title_pt)
+
+        if not used_env:
+            _draw_landmarks_rgby_char(ax, env, cw, ch, alpha=0.20)
 
         if grid is None:
-            ax.imshow(np.zeros((nrow, ncol)), origin="upper", extent=[0, W, H, 0],
-                      cmap="Greys", alpha=0.15, interpolation="nearest", zorder=1)
+            ax.imshow(np.zeros((nrow, ncol)), origin="upper",
+                      extent=inner_extent(), cmap="Greys",
+                      alpha=0.15, interpolation="nearest", zorder=1)
             ax.text(W * 0.5, H * 0.5, "terminal (skipped)", ha="center", va="center",
-                    fontsize=font_pt, bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
+                    fontsize=font_pt, bbox=dict(facecolor="white", alpha=0.85, edgecolor="none"))
             continue
 
-        ax.imshow(grid, origin="upper", cmap=cmap, norm=norm, extent=[0, W, H, 0],
-                  alpha=alpha, zorder=1, interpolation="nearest")
+        ax.imshow(grid, origin="upper", cmap=cmap, norm=norm,
+                  extent=inner_extent(), alpha=alpha, zorder=1, interpolation="nearest")
 
         if annotate:
             for r in range(nrow):
@@ -861,14 +998,14 @@ def plot_taxi_scalar_diff_overlay(
                     v = float(grid[r, c])
                     if not np.isfinite(v) or abs(v) < min_abs_label:
                         continue
-                    x, y = (c + 0.5) * cell_w, (r + 0.5) * cell_h
+                    x, y = cell_center(c, r)
                     ax.text(x, y, fmt_val(v), ha="center", va="center", fontsize=font_pt,
                             bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects)
 
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=axes, fraction=0.046, pad=0.02)
-    cbar.set_label(cbar_label, fontsize=max(8, int(title_pt * 0.7)))
+    cbar.set_label(cbar_label, fontsize=max(7, int(title_pt * 0.6)))
     cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
 
     out_path = os.path.join(output_dir, f"{filename_prefix}_D{dest_idx}.png")
@@ -876,4 +1013,3 @@ def plot_taxi_scalar_diff_overlay(
     plt.close(fig)
     print(f"[OK] Saved Taxi scalar diff facets to: {os.path.abspath(out_path)}")
     return os.path.abspath(out_path)
-
