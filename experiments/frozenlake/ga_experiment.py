@@ -429,6 +429,7 @@ def main():
 
     # Training Stage — now call a fully environment-agnostic stage_train
     if not args.skip_train and json_files:
+        print("[Training] Curriculum test starting...")
         _ = stage_train(
             args=args,
             run=run,
