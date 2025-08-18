@@ -82,6 +82,16 @@ def stage_train(
         output_dir=str(trainer_out),
         wandb_run=run,
         max_workers=args.train_workers or None,
+        media_cfg={
+            "enabled": True,
+            "episodes": 3,
+            "max_steps": 200,
+            "fps": 8,
+            "format": "gif",
+            "deterministic": True,
+            "eval_names": None,
+            "log_first_seed_only": True,
+        },
     )
 
     aggregated = trainer.run(

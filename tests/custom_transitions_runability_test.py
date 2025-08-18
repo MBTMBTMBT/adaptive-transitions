@@ -208,7 +208,7 @@ if __name__ == "__main__":
     mg_map_path = "../customised_minigrid_env/maps/three-rooms-two-doors-two-keys.json"
 
     mg_env_for_mdp = CustomMiniGridEnv(
-        json_file_path=mg_map_path,
+        map_name="door-key-fixed",
         config=None,
         display_size=None,
         display_mode="middle",
@@ -244,7 +244,7 @@ if __name__ == "__main__":
 
     print("\nCreating deterministic GIF (MiniGrid, NetworkX-backed)...")
     mg_rgb_env = CustomMiniGridEnv(
-        json_file_path=mg_map_path,
+        map_name="door-key-fixed",
         config=None,
         display_size=None,
         display_mode="middle",
@@ -271,9 +271,9 @@ if __name__ == "__main__":
     # Summary
     # ---------------------------------------------------------
     print("\n=== Summary ===")
-    print(f"Deterministic Taxi MDP JSON: {det_mdp_path}")
-    print(f"Stochastic   Taxi MDP JSON: {stoch_mdp_path}")
-    print(f"Stochastic   FrozenLake MDP JSON: {fl_mdp_path}")
+    # print(f"Deterministic Taxi MDP JSON: {det_mdp_path}")
+    # print(f"Stochastic   Taxi MDP JSON: {stoch_mdp_path}")
+    # print(f"Stochastic   FrozenLake MDP JSON: {fl_mdp_path}")
     print(f"Deterministic MiniGrid MDP JSON: {mg_mdp_path}")
     print("Deterministic CSVs: det_taxi_random_policy.csv, det_taxi_optimal_values.csv, det_taxi_optimal_q_values.csv")
     print("Stochastic   CSVs: stoch_taxi_random_policy.csv, stoch_taxi_optimal_values.csv, stoch_taxi_optimal_q_values.csv")

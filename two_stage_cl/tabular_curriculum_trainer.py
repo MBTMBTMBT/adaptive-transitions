@@ -277,6 +277,88 @@ def build_checkpoints_from_curve_len_multiphase(steps_per_phase: List[int], n_po
     return xs
 
 
+def _rollout_and_save_media(
+    make_env_fn: Callable[[], Any],
+    model: Any,
+    out_path: str,
+    episodes: int = 3,
+    max_steps: int = 200,
+    fps: int = 8,
+    fmt: str = "gif",
+    deterministic: bool = True,
+) -> Optional[str]:
+    """
+    Rollout with a trained model while capturing rgb frames, then save as GIF/MP4.
+    - make_env_fn(): returns a fresh single env; we will set env.render_mode='rgb_array' if available
+    - model: SB3-like model with .predict(obs, deterministic=...) -> (action, state)
+    Returns the saved file path or None if failed/no frames.
+    """
+    try:
+        import imageio.v2 as imageio  # lazy import
+    except Exception as e:
+        print(f"[media] imageio not available: {e}")
+        return None
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    env = make_env_fn()
+    # force rgb_array if the env supports this knob
+    if hasattr(env, "render_mode"):
+        try:
+            env.render_mode = "rgb_array"
+        except Exception:
+            pass
+
+    frames: list = []
+    try:
+        for ep in range(episodes):
+            obs, _info = env.reset(seed=12345 + ep)
+            for t in range(max_steps):
+                # grab frame (if renderer returns something)
+                try:
+                    fr = env.render()
+                    if fr is not None:
+                        frames.append(fr)
+                except Exception:
+                    pass
+
+                action, _state = model.predict(obs, deterministic=deterministic)
+                obs, r, terminated, truncated, info = env.step(action)
+                if terminated or truncated:
+                    # final frame
+                    try:
+                        fr = env.render()
+                        if fr is not None:
+                            frames.append(fr)
+                    except Exception:
+                        pass
+                    break
+
+        if not frames:
+            print("[media] No frames captured; skip saving.")
+            return None
+
+        fmt = fmt.lower()
+        if fmt == "gif":
+            # duration: seconds per frame
+            imageio.mimsave(out_path, frames, duration=max(1e-6, 1.0 / float(fps)))
+        else:
+            # mp4 or other: use writer with fps
+            writer = imageio.get_writer(out_path, fps=int(fps))
+            for fr in frames:
+                writer.append_data(fr)
+            writer.close()
+        print(f"[media] Saved media to {out_path}")
+        return out_path
+    except Exception as e:
+        print(f"[media] Failed to save media: {e}")
+        return None
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass
+
+
 # =========================
 # Worker (runs in subprocess)
 # =========================
@@ -289,6 +371,8 @@ def _run_one_seed_worker(
     baseline_phase_specs: List[Dict[str, Any]],
     item_phase_specs_map: Dict[str, List[Dict[str, Any]]],
     eval_specs_map: Dict[str, List[Dict[str, Any]]],
+    media_cfg: Optional[Dict[str, Any]] = None,   # <-- NEW
+    media_dir: Optional[str] = None,               # <-- NEW
 ) -> Dict[str, Any]:
     """
     Run one seed across:
@@ -299,7 +383,9 @@ def _run_one_seed_worker(
     results: Dict[str, Any] = {"seed": int(seed)}
 
     # --- Helper to run one multi-phase plan with multiple eval contexts ---
-    def _run_plan(phase_specs: List[Dict[str, Any]], eval_specs: List[Dict[str, Any]]):
+    def _run_plan(phase_specs: List[Dict[str, Any]],
+              eval_specs: List[Dict[str, Any]],
+              label_for_media: str) -> Dict[str, Any]:
         # Training agent constructed on first phase env; we will switch by set_env.
         first_env = DummyVecEnv([lambda: _make_env_from_spec(phase_specs[0]["env_spec"], seed=seed)])
         agent = _make_agent_from_ctor(agent_ctor_path, env=first_env, agent_kwargs=agent_kwargs, seed=seed)
@@ -368,17 +454,68 @@ def _run_one_seed_worker(
                 "greedy": np.asarray(greedy_lists[name], dtype=float),
                 "train": np.asarray(train_lists[name], dtype=float),
             }
+
+        # --- Media recording (optional) ---
+        out["media"] = {}  # name -> path or None
+        if media_cfg and media_cfg.get("enabled", False) and media_dir:
+            episodes = int(media_cfg.get("episodes", 3))
+            max_steps = int(media_cfg.get("max_steps", 200))
+            fps = int(media_cfg.get("fps", 8))
+            fmt = str(media_cfg.get("format", "gif")).lower()
+            deterministic = bool(media_cfg.get("deterministic", True))
+            only_names = media_cfg.get("eval_names")  # None or list of eval names to record
+
+            for es in eval_specs:
+                name = es["name"]
+                if (only_names is not None) and (name not in set(only_names)):
+                    continue
+
+                # fresh env factory for recording
+                def _make_media_env():
+                    env = _make_env_from_spec(es["env_spec"], seed=seed + 42)  # different seed for demo
+                    if hasattr(env, "render_mode"):
+                        try:
+                            env.render_mode = "rgb_array"
+                        except Exception:
+                            pass
+                    return env
+
+                # {media_dir}/seed_{seed}/{label}/{eval}.gif|mp4
+                subdir = os.path.join(str(media_dir), f"seed_{seed}", label_for_media)
+                os.makedirs(subdir, exist_ok=True)
+                out_path = os.path.join(subdir, f"{name}.{fmt if fmt in ('gif', 'mp4') else 'gif'}")
+
+                try:
+                    saved = _rollout_and_save_media(
+                        make_env_fn=_make_media_env,
+                        model=agent,
+                        out_path=out_path,
+                        episodes=episodes,
+                        max_steps=max_steps,
+                        fps=fps,
+                        fmt=fmt,
+                        deterministic=deterministic,
+                    )
+                except Exception as e:
+                    print(f"[media] recording failed for '{label_for_media}/{name}': {e}")
+                    saved = None
+                out["media"][name] = saved
+
         return out
 
     # --- Baseline (single plan) ---
-    baseline_out = _run_plan(baseline_phase_specs, eval_specs=[{"name": "Target", "env_spec": baseline_phase_specs[-1]["env_spec"]}])
+    baseline_out = _run_plan(
+        baseline_phase_specs,
+        eval_specs=[{"name": "Target", "env_spec": baseline_phase_specs[-1]["env_spec"]}],
+        label_for_media="baseline",
+    )
     results["baseline"] = baseline_out
 
     # --- Items (per label) ---
     items_out: Dict[str, Any] = {}
     for label, phase_specs in item_phase_specs_map.items():
-        evs = eval_specs_map[label]  # List of EvalSpec dicts
-        items_out[label] = _run_plan(phase_specs, evs)
+        evs = eval_specs_map[label]
+        items_out[label] = _run_plan(phase_specs, evs, label_for_media=str(label))
     results["items"] = items_out
     return results
 
@@ -489,6 +626,7 @@ class TabularCurriculumTrainer:
         output_dir: str,
         wandb_run: Optional[Any] = None,
         max_workers: Optional[int] = None,
+        media_cfg: Optional[Dict[str, Any]] = None,
     ):
         self.agent_ctor_path = agent_ctor_path
         self.agent_kwargs = dict(agent_kwargs)
@@ -497,6 +635,19 @@ class TabularCurriculumTrainer:
         self.output_dir = str(output_dir)
         self.wandb_run = wandb_run if _WANDB_AVAILABLE else None
         self.max_workers = max_workers
+
+        self.media_cfg = {
+            "enabled": False,  # turn on to record
+            "episodes": 3,
+            "max_steps": 200,
+            "fps": 8,
+            "format": "gif",  # "gif" or "mp4"
+            "deterministic": True,
+            "eval_names": ["Target"],  # None for all eval contexts
+            "log_first_seed_only": True,  # only log seed_?=first result to W&B
+        }
+        if media_cfg:
+            self.media_cfg.update(media_cfg)
 
         _ensure_dir(self.output_dir)
 
@@ -522,6 +673,8 @@ class TabularCurriculumTrainer:
         num_workers = self.max_workers or min(len(seeds), os.cpu_count() or 1)
         all_results: List[Dict[str, Any]] = []
 
+        media_root = os.path.join(self.output_dir, "media")
+        _ensure_dir(media_root)
         with ProcessPoolExecutor(max_workers=num_workers, mp_context=get_context("spawn")) as ex:
             futs = {
                 ex.submit(
@@ -534,6 +687,8 @@ class TabularCurriculumTrainer:
                     baseline_phase_specs_d,
                     item_phase_specs_map_d,
                     eval_specs_map_d,
+                    self.media_cfg,  # <-- NEW
+                    media_root,  # <-- NEW
                 ): seed
                 for seed in seeds
             }
@@ -686,6 +841,36 @@ class TabularCurriculumTrainer:
 
                 except Exception as e:
                     print(f"[W&B] logging failed for '{lb}': {e}")
+
+        # --- W&B: upload media (if any) ---
+        if self.wandb_run is not None and self.media_cfg.get("enabled", False):
+            to_log = []
+            for i, r in enumerate(all_results):
+                if self.media_cfg.get("log_first_seed_only", True) and i > 0:
+                    break
+                sd = int(r.get("seed", i))
+                # baseline media
+                base_media = (r.get("baseline", {}) or {}).get("media", {})
+                for name, path in (base_media.items() if isinstance(base_media, dict) else []):
+                    if path:
+                        to_log.append((f"media/seed_{sd}/baseline/{name}", path))
+                # items media
+                items = r.get("items", {}) or {}
+                for lb, d in items.items():
+                    media_map = (d or {}).get("media", {}) or {}
+                    for name, path in media_map.items():
+                        if path:
+                            to_log.append((f"media/seed_{sd}/{lb}/{name}", path))
+
+            for key, path in to_log:
+                try:
+                    if str(path).lower().endswith(".gif"):
+                        self.wandb_run.log(
+                            {key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)), format="gif")})
+                    else:
+                        self.wandb_run.log({key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)))})
+                except Exception as e:
+                    print(f"[W&B] video log failed for {key}: {e}")
 
         # Save meta
         with open(os.path.join(self.output_dir, "meta.json"), "w") as f:
