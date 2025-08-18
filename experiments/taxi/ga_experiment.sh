@@ -55,7 +55,7 @@ SLURM_PARTITION="cpu"
 SLURM_GRES=""
 SLURM_MEM="31G"
 SLURM_CPUS="63"
-SLURM_TIME_DAYS="2.0"   # supports decimal (e.g., 1.5 -> 36h)
+SLURM_TIME_DAYS="1.9"   # supports decimal (e.g., 1.5 -> 36h)
 SLURM_EXCLUDE=""
 
 # SLURM stdout/err directory
