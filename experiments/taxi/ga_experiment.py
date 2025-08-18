@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# run_full_experiment_taxi.py
+# ga_experiment.py
 # English comments only.
 
 from __future__ import annotations

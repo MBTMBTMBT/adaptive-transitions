@@ -55,7 +55,7 @@ SLURM_PARTITION="cpu"
 SLURM_GRES=""
 SLURM_MEM="31G"
 SLURM_CPUS="63"
-SLURM_TIME_DAYS="1.9"   # supports decimal (e.g., 1.5 -> 36h)
+SLURM_TIME_DAYS="2.0"   # supports decimal (e.g., 1.5 -> 36h)
 SLURM_EXCLUDE=""
 
 # SLURM stdout/err directory
@@ -275,7 +275,20 @@ EOF
 
   cat >> "${job_script}" <<'EOF'
 set -euo pipefail
+# Reset environment modules (ignore failures quietly).
 module purge >/dev/null 2>&1 || true
+
+# 1) Ensure container runtime modules are available (common on clusters); try loading both.
+module load apptainer  >/dev/null 2>&1 || true
+module load singularity >/dev/null 2>&1 || true
+
+# 2) Pre-flight check: can this node resolve my UID? (critical)
+if ! getent passwd "${UID}" >/dev/null 2>&1; then
+  echo "[WARN] $(hostname): no passwd entry for UID=${UID}; requeue job ${SLURM_JOB_ID}"
+  # Try to requeue (so the scheduler places us on another node).
+  scontrol requeue "${SLURM_JOB_ID}" || exit 1
+  exit 0
+fi
 EOF
 
   cat >> "${job_script}" <<EOF
