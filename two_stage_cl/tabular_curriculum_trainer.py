@@ -432,10 +432,10 @@ def _plot_pairwise(
     ax1.plot(checkpoints, curves_target["greedy_mean"], label="Curriculum → Target (primary)", linewidth=2.2)
     ax1.fill_between(checkpoints, curves_target["greedy_mean"] - curves_target["greedy_std"],
                      curves_target["greedy_mean"] + curves_target["greedy_std"], alpha=0.15)
-    if curves_source is not None:
-        ax1.plot(checkpoints, curves_source["greedy_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
-        ax1.fill_between(checkpoints, curves_source["greedy_mean"] - curves_source["greedy_std"],
-                         curves_source["greedy_mean"] + curves_source["greedy_std"], alpha=0.15)
+    # if curves_source is not None:
+    #     ax1.plot(checkpoints, curves_source["greedy_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
+    #     ax1.fill_between(checkpoints, curves_source["greedy_mean"] - curves_source["greedy_std"],
+    #                      curves_source["greedy_mean"] + curves_source["greedy_std"], alpha=0.15)
     ax1.set_xlabel("Timesteps"); ax1.set_ylabel("Mean return"); ax1.grid(True, alpha=0.3); ax1.legend()
 
     # Train-policy
@@ -445,10 +445,10 @@ def _plot_pairwise(
     ax2.plot(checkpoints, curves_target["train_mean"], label="Curriculum → Target (primary)", linewidth=2.2)
     ax2.fill_between(checkpoints, curves_target["train_mean"] - curves_target["train_std"],
                      curves_target["train_mean"] + curves_target["train_std"], alpha=0.15)
-    if curves_source is not None:
-        ax2.plot(checkpoints, curves_source["train_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
-        ax2.fill_between(checkpoints, curves_source["train_mean"] - curves_source["train_std"],
-                         curves_source["train_mean"] + curves_source["train_std"], alpha=0.15)
+    # if curves_source is not None:
+    #     ax2.plot(checkpoints, curves_source["train_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
+    #     ax2.fill_between(checkpoints, curves_source["train_mean"] - curves_source["train_std"],
+    #                      curves_source["train_mean"] + curves_source["train_std"], alpha=0.15)
     ax2.set_xlabel("Timesteps"); ax2.set_ylabel("Mean return"); ax2.grid(True, alpha=0.3); ax2.legend()
 
     # Phase boundary markers
