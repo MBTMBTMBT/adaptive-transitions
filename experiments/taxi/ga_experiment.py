@@ -95,7 +95,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             filename_prefix="native_taxi_transitions",
             min_prob=args.vis_min_prob, alpha=args.vis_alpha,
             annotate=True, show_self_loops=args.vis_show_self_loops, dpi=args.vis_dpi,
-            target_cell_px=120, arrow_scale=0.04, font_scale=0.14,
+            target_cell_px=240, arrow_scale=0.04, font_scale=0.14,
             cmap_name="viridis", gamma=1.0,
         )
 
@@ -104,7 +104,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, value_map=native_occ_random, output_dir=str(native_out),
             filename_prefix="native_taxi_occupancy_random",
             alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=120, font_scale=0.14, cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
+            target_cell_px=240, font_scale=0.14, cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
             min_abs_label=0.0, vmin=0.0, vmax=None,
             title="State Occupancy — Random", cbar_label="Occupancy measure",
             value_format=None,
@@ -119,7 +119,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, value_map=V_rand, output_dir=str(native_out),
             filename_prefix="native_taxi_VALUE_random",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=120, font_scale=0.14, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
+            target_cell_px=240, font_scale=0.14, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Random", cbar_label="V(s)",
             value_format=None,
@@ -130,7 +130,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, value_map=native_V_opt_greedy, output_dir=str(native_out),
             filename_prefix="native_taxi_VALUE_optimal_greedy",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=120, font_scale=0.14, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
+            target_cell_px=240, font_scale=0.14, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
             value_format=None,
@@ -156,7 +156,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, mdp=mdp, output_dir=str(out_dir), filename_prefix=f"{stem}_transitions",
             min_prob=args.vis_min_prob, alpha=args.vis_alpha, annotate=True,
             show_self_loops=args.vis_show_self_loops, dpi=args.vis_dpi,
-            target_cell_px=120, arrow_scale=0.04, font_scale=0.14,
+            target_cell_px=240, arrow_scale=0.04, font_scale=0.14,
             cmap_name="viridis", gamma=1.0,
         )
 
@@ -197,7 +197,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, value_map=occ_rand, output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_random",
             alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=120, font_scale=0.14,
+            target_cell_px=240, font_scale=0.14,
             cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
             min_abs_label=0.0, vmin=0.0, vmax=None,
             title="State Occupancy", cbar_label="Occupancy measure",
@@ -211,7 +211,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, value_map=occ_train_mixed, output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_trainPolicy_{mix_suffix}",
             alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=120, font_scale=0.14,
+            target_cell_px=240, font_scale=0.14,
             cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
             min_abs_label=0.0, vmin=0.0, vmax=None,
             title="State Occupancy — Training policy (mixed)", cbar_label="Occupancy measure",
@@ -227,7 +227,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, value_map=V_rand, output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_random",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=120, font_scale=0.14,
+            target_cell_px=240, font_scale=0.14,
             cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Random", cbar_label="V(s)",
@@ -239,7 +239,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             env=env, value_map=V_opt_greedy, output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_optimal_greedy",
             alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=120, font_scale=0.14,
+            target_cell_px=240, font_scale=0.14,
             cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
             min_abs_label=0.0, vmin=None, vmax=None,
             title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
@@ -256,7 +256,7 @@ def stage_visualize(args, run, json_files: List[Path]):
                 env=env, value_map=occ_cross_native, output_dir=str(out_dir),
                 filename_prefix=f"{stem}_occupancy_trainPolicy_on_NATIVE_{mix_suffix}",
                 alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                target_cell_px=120, font_scale=0.14,
+                target_cell_px=240, font_scale=0.14,
                 cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
                 min_abs_label=0.0, vmin=0.0, vmax=None,
                 title="State Occupancy — Training policy on NATIVE", cbar_label="Occupancy measure",
@@ -270,7 +270,7 @@ def stage_visualize(args, run, json_files: List[Path]):
                     output_dir=str(out_dir),
                     filename_prefix=f"{stem}_occupancy_DIFF_trainPolicyMINUS_nativeRandom_{mix_suffix}",
                     alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                    target_cell_px=120, font_scale=0.14,
+                    target_cell_px=240, font_scale=0.14,
                     cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
                     title="Δ State Occupancy (training − native-random)", cbar_label="Δ occupancy (A − B)",
                     value_format="+.2e",
@@ -285,7 +285,7 @@ def stage_visualize(args, run, json_files: List[Path]):
                 output_dir=str(out_dir),
                 filename_prefix=f"{stem}_VALUE_DIFF_optGreedyMINUS_nativeOptGreedy",
                 alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-                target_cell_px=120, font_scale=0.14,
+                target_cell_px=240, font_scale=0.14,
                 cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
                 title="Δ State Value: optGreedy(loop) − optGreedy(native)", cbar_label="Δ V(s) (loop − native)",
                 value_format="+.2f",
@@ -315,13 +315,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-vis", action="store_true")
 
     # Env (Taxi has no map/slippery toggles)
-    p.add_argument("--max-steps", type=int, default=1000)
+    p.add_argument("--max-steps", type=int, default=200)
 
     # GA
     p.add_argument("--ga-pop-size", type=int, default=100)
     p.add_argument("--ga-generations", type=int, default=500)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=20)
+    p.add_argument("--ga-elitism", type=int, default=10)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=_str2bool, default=True)
