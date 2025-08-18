@@ -2,6 +2,8 @@
 # English comments only.
 
 from gymnasium.wrappers import TimeLimit
+
+from customised_minigrid_env import CustomMiniGridEnv
 from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
 from customised_toy_text_envs.customised_taxi import CustomisedTaxiEnv
 from networkx_env.networkx_env import NetworkXMDPEnvironment
@@ -43,6 +45,29 @@ def make_taxi_target(seed: int, **kwargs):
         render_mode=None,
         is_rainy=False,
         fickle_passenger=False,
+        networkx_env=None,
+    )
+    env = TimeLimit(env, max_episode_steps=max_steps)
+    if seed is not None:
+        env.reset(seed=seed)
+    return env
+
+
+def make_minigrid_target(seed: int, **kwargs):
+    """
+    Create the native MiniGrid env wrapped with TimeLimit.
+    kwargs:
+      - map_name: str (default "door-key")
+      - max_steps: int (default 1000)
+    """
+    map_name = kwargs.get("map_name", "door-key")
+    max_steps = int(kwargs.get("max_steps", 1000))
+
+    env = CustomMiniGridEnv(
+        map_name=map_name,
+        random_rotate=False,
+        random_flip=False,
+        any_key_opens_the_door=False,
         networkx_env=None,
     )
     env = TimeLimit(env, max_episode_steps=max_steps)
