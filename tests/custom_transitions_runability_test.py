@@ -205,7 +205,7 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     print("\n=== Group D: MiniGrid (deterministic) via NetworkX ===")
     # Choose your layout file; deterministic here means we export the actual fixed-layout dynamics
-    mg_map_path = "../customised_minigrid_env/maps/three-rooms.json"
+    mg_map_path = "../customised_minigrid_env/maps/three-rooms-two-doors-two-keys.json"
 
     mg_env_for_mdp = CustomMiniGridEnv(
         json_file_path=mg_map_path,

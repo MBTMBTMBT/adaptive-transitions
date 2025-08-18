@@ -14,6 +14,7 @@ from minigrid.core.constants import OBJECT_TO_IDX, COLOR_TO_IDX, TILE_PIXELS
 
 from .simple_actions import SimpleActions
 from .simple_manual_control import SimpleManualControl
+from . import load_map_config_by_name
 from apis.customisable import CustomisableEnvAbs
 from mdp_network.mdp_network import MDPNetwork
 
@@ -42,6 +43,7 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
     # -----------------------------
     def __init__(
         self,
+        map_name: Optional[str] = None,
         json_file_path: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         display_size: Optional[int] = None,
@@ -56,11 +58,11 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         networkx_env=None,
         **kwargs,
     ) -> None:
-        # one of file / dict
-        assert (json_file_path is not None) ^ (config is not None), \
-            "You must provide either 'json_file_path' or 'config', but not both."
+        # Exactly one source of config must be provided.
+        provided = sum(x is not None for x in (map_name, json_file_path, config))
+        assert provided == 1, "Provide exactly one of: map_name / json_file_path / config."
 
-        self.txt_file_path = json_file_path
+        self.txt_file_path = json_file_path  # kept for compatibility/debug
         self.display_mode = display_mode
         self.random_rotate = random_rotate
         self.random_flip = random_flip
@@ -73,21 +75,24 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         self.reward_config = {**DEFAULT_REWARD_DICT, **(reward_config or {})}
         self.cumulative_reward = 0.0
 
-        # load config
-        if json_file_path is not None:
-            with open(json_file_path, "r") as f:
+        # ---- Load config from exactly one source ----
+        if map_name is not None:
+            self.config = load_map_config_by_name(map_name)
+            self.txt_file_path = None  # no real path when using packaged resource
+        elif json_file_path is not None:
+            with open(json_file_path, "r", encoding="utf-8") as f:
                 self.config = json.load(f)
         else:
             self.config = config
 
-        # sizes
+        # ---- Sizes ----
         height, width = self.config["height_width"]
         layout_size = max(height, width)
         self.display_size = layout_size if display_size is None else display_size
         assert display_mode in ["middle", "random"], "Invalid display_mode"
         assert self.display_size >= layout_size, "display_size must be >= layout layout_size"
 
-        # parents
+        # ---- Parents ----
         super().__init__(
             mission_space=MissionSpace(mission_func=lambda: custom_mission),
             grid_size=self.display_size,
@@ -100,8 +105,8 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         self.action_space = spaces.Discrete(len(self.actions))
         self.step_count = 0
 
-        # integer codec spec (prepared lazily)
-        self._int_spec = None  # filled by _prepare_int_codec()
+        # Integer codec spec (prepared lazily)
+        self._int_spec = None
 
     # -----------------------------
     # Rendering helpers
@@ -1166,7 +1171,7 @@ def flip_direction(direction, flip_mode):
 
 if __name__ == "__main__":
     env = CustomMiniGridEnv(
-        json_file_path='./maps/door-key-no-random-3x6.json',
+        map_name="door-key-fixed",
         config=None,
         display_size=None,
         display_mode="random",

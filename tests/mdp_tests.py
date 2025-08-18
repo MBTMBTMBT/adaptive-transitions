@@ -38,23 +38,15 @@ if __name__ == "__main__":
     # Sample MDPs from environments (small to large)
     env_configs = [
         {
-            'path': '../customised_minigrid_env/maps/door-key-no-random-3x6.json',
-            'prefix': 'sampled_3x6'
+            'name': "door-key-fixed",
+            'prefix': 'door-key-fixed'
         },
-        {
-            'path': '../customised_minigrid_env/maps/door-key-no-random-4x7.json',
-            'prefix': 'sampled_4x7'
-        },
-        {
-            'path': '../customised_minigrid_env/maps/door-key-no-random-5x9.json',
-            'prefix': 'sampled_5x9'
-        }
     ]
 
     for env_config in env_configs:
         try:
             env = CustomMiniGridEnv(
-                json_file_path=env_config['path'],
+                map_name=env_config['name'],
                 config=None,
                 display_size=None,
                 display_mode="middle",
@@ -66,9 +58,9 @@ if __name__ == "__main__":
             sampled_mdp = deterministic_mdp_sampling(env)
             mdps.append(sampled_mdp)
             prefixes.append(env_config['prefix'])
-            print(f"Successfully loaded environment: {env_config['path']}")
+            print(f"Successfully loaded environment: {env_config['name']}")
         except Exception as e:
-            print(f"Warning: Could not load environment {env_config['path']}: {e}")
+            print(f"Warning: Could not load environment {env_config['name']}: {e}")
             continue
 
     # Common parameters
@@ -281,51 +273,51 @@ if __name__ == "__main__":
 
         print(f"Gaussian fitting results saved to: {gaussian_results_path}")
 
-        # Test 7: Information Surprise Analysis
-        print("\n=== Test 7: Information Surprise Analysis ===")
+        # # Test 7: Information Surprise Analysis
+        # print("\n=== Test 7: Information Surprise Analysis ===")
+        #
+        # # Use fitted Gaussian as prior distribution
+        # surprise_results = compute_information_surprise(
+        #     mdp, occupancy, mu_count, sigma_count, observation_sigma=1e-8
+        # )
 
-        # Use fitted Gaussian as prior distribution
-        surprise_results = compute_information_surprise(
-            mdp, occupancy, mu_count, sigma_count, observation_sigma=1e-8
-        )
-
-        if 'error' not in surprise_results:
-            print("Information Surprise Results:")
-            print(f"  Total Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}")
-            print(f"  Total Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}")
-            print(f"  Most surprising terminal state: {surprise_results['max_surprise_state']}")
-            print(f"  Maximum surprise value (KL): {surprise_results['max_surprise_value_kl']:.6f}")
-            print(f"  Maximum surprise value (-logP): {surprise_results['max_surprise_value_nll']:.6f}")
-
-            # Save surprise analysis results
-            surprise_results_path = os.path.join(output_dir, f"{prefix}_{i}_information_surprise.txt")
-            with open(surprise_results_path, 'w') as f:
-                f.write(f"Information Surprise Analysis for {prefix}_{i}\n")
-                f.write("=" * 50 + "\n\n")
-                f.write(
-                    f"Prior Distribution: μ={surprise_results['prior_mu']:.6f}, σ={surprise_results['prior_sigma']:.6f}\n")
-                f.write(f"Observation σ: {surprise_results['observation_sigma']:.6f}\n")
-                f.write(f"Total Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}\n")
-                f.write(f"Total Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}\n")
-                f.write(f"Number of Terminal States: {surprise_results['num_terminal_states']}\n\n")
-
-                f.write("Terminal State Analysis (sorted by -logP surprise):\n")
-                f.write("-" * 70 + "\n")
-                for info in surprise_results['terminal_state_analysis']:
-                    f.write(f"State {info['state']}:\n")
-                    f.write(f"  Reward: {info['reward']:.6f}\n")
-                    f.write(f"  Occupancy: {info['occupancy']:.6f}\n")
-                    f.write(f"  Posterior μ: {info['posterior_mu']:.6f}\n")
-                    f.write(f"  Posterior σ: {info['posterior_sigma']:.6f}\n")
-                    f.write(f"  KL Divergence: {info['kl_divergence']:.6f}\n")
-                    f.write(f"  Weighted KL: {info['weighted_kl']:.6f}\n")
-                    f.write(f"  -log P(reward): {info['negative_log_likelihood']:.6f}\n")
-                    f.write(f"  Weighted -logP: {info['weighted_nll']:.6f}\n")
-                    f.write("\n")
-
-            print(f"Information surprise analysis saved to: {surprise_results_path}")
-        else:
-            print(f"  Error: {surprise_results['error']}")
+        # if 'error' not in surprise_results:
+        #     print("Information Surprise Results:")
+        #     print(f"  Total Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}")
+        #     print(f"  Total Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}")
+        #     print(f"  Most surprising terminal state: {surprise_results['max_surprise_state']}")
+        #     print(f"  Maximum surprise value (KL): {surprise_results['max_surprise_value_kl']:.6f}")
+        #     print(f"  Maximum surprise value (-logP): {surprise_results['max_surprise_value_nll']:.6f}")
+        #
+        #     # Save surprise analysis results
+        #     surprise_results_path = os.path.join(output_dir, f"{prefix}_{i}_information_surprise.txt")
+        #     with open(surprise_results_path, 'w') as f:
+        #         f.write(f"Information Surprise Analysis for {prefix}_{i}\n")
+        #         f.write("=" * 50 + "\n\n")
+        #         f.write(
+        #             f"Prior Distribution: μ={surprise_results['prior_mu']:.6f}, σ={surprise_results['prior_sigma']:.6f}\n")
+        #         f.write(f"Observation σ: {surprise_results['observation_sigma']:.6f}\n")
+        #         f.write(f"Total Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}\n")
+        #         f.write(f"Total Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}\n")
+        #         f.write(f"Number of Terminal States: {surprise_results['num_terminal_states']}\n\n")
+        #
+        #         f.write("Terminal State Analysis (sorted by -logP surprise):\n")
+        #         f.write("-" * 70 + "\n")
+        #         for info in surprise_results['terminal_state_analysis']:
+        #             f.write(f"State {info['state']}:\n")
+        #             f.write(f"  Reward: {info['reward']:.6f}\n")
+        #             f.write(f"  Occupancy: {info['occupancy']:.6f}\n")
+        #             f.write(f"  Posterior μ: {info['posterior_mu']:.6f}\n")
+        #             f.write(f"  Posterior σ: {info['posterior_sigma']:.6f}\n")
+        #             f.write(f"  KL Divergence: {info['kl_divergence']:.6f}\n")
+        #             f.write(f"  Weighted KL: {info['weighted_kl']:.6f}\n")
+        #             f.write(f"  -log P(reward): {info['negative_log_likelihood']:.6f}\n")
+        #             f.write(f"  Weighted -logP: {info['weighted_nll']:.6f}\n")
+        #             f.write("\n")
+        #
+        #     print(f"Information surprise analysis saved to: {surprise_results_path}")
+        # else:
+        #     print(f"  Error: {surprise_results['error']}")
 
         # Print summary statistics
         print(f"\n=== Summary Statistics for {prefix} ===")
@@ -333,9 +325,9 @@ if __name__ == "__main__":
         print(f"Terminal states: {len(mdp.terminal_states)}")
         print(f"Actions available: {mdp.num_actions}")
         print(f"Gaussian fit: μ={mu_count:.4f}, σ={sigma_count:.4f}")
-        if 'error' not in surprise_results:
-            print(f"Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}")
-            print(f"Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}")
+        # if 'error' not in surprise_results:
+        #     print(f"Information Surprise (KL): {surprise_results['total_information_surprise_kl']:.6f}")
+        #     print(f"Information Surprise (-logP): {surprise_results['total_information_surprise_nll']:.6f}")
 
         print("Value differences (vs Optimal):")
         for state in sorted(mdp.states)[:5]:
@@ -371,8 +363,8 @@ if __name__ == "__main__":
             f"{prefix}_{i}_qlearning_q_values.csv",
             f"{prefix}_{i}_qlearning_policy.csv",
             f"{prefix}_{i}_occupancy_measure.csv",
-            f"{prefix}_{i}_reward_count_distribution.csv",
-            f"{prefix}_{i}_reward_prob_distribution.csv"
+            # f"{prefix}_{i}_reward_count_distribution.csv",
+            # f"{prefix}_{i}_reward_prob_distribution.csv"
         ])
 
     for csv_file in csv_files:
