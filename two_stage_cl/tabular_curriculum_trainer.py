@@ -277,6 +277,35 @@ def build_checkpoints_from_curve_len_multiphase(steps_per_phase: List[int], n_po
     return xs
 
 
+def _dedup_by_equal_steps(
+    checkpoints: np.ndarray,
+    curves: Dict[str, Dict[str, np.ndarray]]
+) -> tuple[np.ndarray, Dict[str, Dict[str, np.ndarray]]]:
+    """
+    Remove consecutive duplicates in `checkpoints` (same timestep twice),
+    and drop the same indices from all curves to keep them aligned.
+    Keeps the FIRST of each duplicate run, drops the later one.
+    """
+    if checkpoints.size <= 1:
+        return checkpoints, curves
+
+    keep = [0]
+    for i in range(1, len(checkpoints)):
+        if checkpoints[i] != checkpoints[i - 1]:
+            keep.append(i)
+    keep_idx = np.asarray(keep, dtype=int)
+
+    # new x
+    new_ckpt = checkpoints[keep_idx]
+
+    # new y for every eval name
+    for name, dd in curves.items():
+        dd["greedy"] = dd["greedy"][keep_idx]
+        dd["train"]  = dd["train"][keep_idx]
+
+    return new_ckpt, curves
+
+
 def _rollout_and_save_media(
     make_env_fn: Callable[[], Any],
     model: Any,
@@ -371,30 +400,43 @@ def _run_one_seed_worker(
     baseline_phase_specs: List[Dict[str, Any]],
     item_phase_specs_map: Dict[str, List[Dict[str, Any]]],
     eval_specs_map: Dict[str, List[Dict[str, Any]]],
-    media_cfg: Optional[Dict[str, Any]] = None,   # <-- NEW
-    media_dir: Optional[str] = None,               # <-- NEW
+    media_cfg: Optional[Dict[str, Any]] = None,
+    media_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run one seed across:
-      - Baseline plan (phases on Target only)
-      - For each item label: an item plan (e.g., [Source->Target]) plus multiple eval contexts
+      - Baseline plan (all phases on Target)
+      - Per-item plans (e.g., [Source -> Target]) with multiple eval contexts
+    Adds "boundary tests": right AFTER specified phases finish (e.g., after Phase-0),
+    we evaluate ON SELECTED EVAL ENVS (typically Target/baseline), and optionally record media.
+
     Returns only pickle-safe data (numpy arrays, dicts, lists, numbers).
     """
     results: Dict[str, Any] = {"seed": int(seed)}
 
-    # --- Helper to run one multi-phase plan with multiple eval contexts ---
-    def _run_plan(phase_specs: List[Dict[str, Any]],
-              eval_specs: List[Dict[str, Any]],
-              label_for_media: str) -> Dict[str, Any]:
-        # Training agent constructed on first phase env; we will switch by set_env.
+    # -----------------------------
+    # Helper to run one multi-phase plan
+    # -----------------------------
+    def _run_plan(
+        phase_specs: List[Dict[str, Any]],
+        eval_specs: List[Dict[str, Any]],
+        label_for_media: str
+    ) -> Dict[str, Any]:
+        """
+        Train across multiple phases without resetting num_timesteps.
+        Keeps periodic/start/end evaluations via PeriodicEvalCallback,
+        and additionally performs "boundary tests" right AFTER selected phases end.
+        """
+        # Build the agent on the first phase env; later phases call set_env(...)
         first_env = DummyVecEnv([lambda: _make_env_from_spec(phase_specs[0]["env_spec"], seed=seed)])
         agent = _make_agent_from_ctor(agent_ctor_path, env=first_env, agent_kwargs=agent_kwargs, seed=seed)
 
-        # Build evaluation targets and callbacks
-        eval_envs = {}
-        greedy_lists = {}
-        train_lists = {}
-        callbacks = {}
+        # Build evaluation environments + callback storage
+        eval_envs: Dict[str, Any] = {}
+        greedy_lists: Dict[str, List[float]] = {}
+        train_lists: Dict[str, List[float]] = {}
+        callbacks: Dict[str, PeriodicEvalCallback] = {}
+
         for es in eval_specs:
             name = es["name"]
             eval_envs[name] = _make_env_from_spec(es["env_spec"], seed=12345)
@@ -408,71 +450,156 @@ def _run_one_seed_worker(
                 train_scores_list=train_lists[name],
                 eval_seed_base=es.get("eval_seed_base", 10000),
                 verbose=0,
-                wandb_run=None,  # for multi process, we don't want to log to the same run
+                wandb_run=None,
                 wandb_prefix="eval",
-                eval_name=name
+                eval_name=name,
             )
 
-        # Training start callbacks
+        # Fire "training start" callbacks once before Phase-0 training
         for cb in callbacks.values():
             cb.on_training_start(agent)
 
-        # Train through phases sequentially without resetting num_timesteps
+        # Parse boundary-test configuration
+        boundary_cfg = (media_cfg or {}).get("boundary_tests", {}) or {}
+        boundary_enabled: bool = bool(boundary_cfg.get("enabled", False))
+        boundary_phase_indices = set(int(i) for i in boundary_cfg.get("phase_indices", [0]))  # default: after Phase-0
+        boundary_eval_names = boundary_cfg.get("eval_names", ["Target"])  # default: only Target
+        boundary_eval_names_set = None if boundary_eval_names is None else set(boundary_eval_names)
+        record_boundary_media: bool = bool(boundary_cfg.get("record_media", False))
+
+        # Boundary cache: out["boundary"][f"phase_{idx}"][eval_name] = {...}
+        boundary_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+        # Train through phases
         total_steps_list: List[int] = []
         for idx, ph in enumerate(phase_specs):
             steps = int(ph["steps"])
             total_steps_list.append(steps)
-            if idx > 0:
-                # swap env to the new phase env
-                next_env = DummyVecEnv([lambda: _make_env_from_spec(ph["env_spec"], seed=seed)])
-                agent.set_env(next_env)
-                # Duplicate eval at boundary: start of new training call
-                for cb in callbacks.values():
-                    cb.on_training_start(agent)
 
-            # Standard SB3-like training loop imitation
-            # We call agent.learn with a simple loop to be callback-compatible
-            remaining = steps
-            # If agent has a .learn(total_timesteps, reset_num_timesteps=False, callback=callable)
-            # we can call it directly and step callback via its built-in mechanism.
-            # To make it generic, we rely on agent.learn calling cb.on_step internally.
+            # Train current phase with callbacks being ticked by the agent
             step_cb = FunctionCallback(lambda model: all(cb.on_step() for cb in callbacks.values()))
             agent.learn(total_timesteps=steps, reset_num_timesteps=False, progress_bar=False, callback=step_cb)
 
-        # Finalize
+            # -----------------------------
+            # Boundary test right AFTER this phase finishes
+            # -----------------------------
+            if boundary_enabled and (idx in boundary_phase_indices):
+                boundary_key = f"phase_{idx}"
+                for es in eval_specs:
+                    name = es["name"]
+                    if (boundary_eval_names_set is not None) and (name not in boundary_eval_names_set):
+                        continue
+
+                    # Fresh eval env for this boundary (isolated RNG)
+                    test_env = _make_env_from_spec(es["env_spec"], seed=seed + 777 + idx)
+                    try:
+                        # Greedy (deterministic) policy eval
+                        test_env.reset(seed=seed + 777 + idx)
+                        greedy_mean, _ = evaluate_policy(
+                            model=agent, env=test_env,
+                            n_eval_episodes=n_eval_episodes,
+                            deterministic=True, render=False, warn=False
+                        )
+                        # Stochastic (training-policy) eval
+                        test_env.reset(seed=seed + 888 + idx)
+                        train_mean, _ = evaluate_policy(
+                            model=agent, env=test_env,
+                            n_eval_episodes=n_eval_episodes,
+                            deterministic=False, render=False, warn=False
+                        )
+                    finally:
+                        try:
+                            test_env.close()
+                        except Exception:
+                            pass
+
+                    # Save numbers
+                    boundary_cache.setdefault(boundary_key, {})
+                    boundary_cache[boundary_key].setdefault(name, {})
+                    boundary_cache[boundary_key][name]["greedy"] = float(greedy_mean)
+                    boundary_cache[boundary_key][name]["train"] = float(train_mean)
+
+                    # Optional media at the boundary
+                    if record_boundary_media and media_cfg and media_dir:
+                        def _make_media_env():
+                            env = _make_env_from_spec(es["env_spec"], seed=seed + 42 + idx)
+                            if hasattr(env, "render_mode"):
+                                try:
+                                    env.render_mode = "rgb_array"
+                                except Exception:
+                                    pass
+                            return env
+
+                        subdir = os.path.join(str(media_dir), f"seed_{seed}", label_for_media)
+                        os.makedirs(subdir, exist_ok=True)
+                        fmt = str(media_cfg.get("format", "gif")).lower()
+                        out_path = os.path.join(subdir, f"{name}_phase{idx}.{fmt if fmt in ('gif','mp4') else 'gif'}")
+                        try:
+                            saved = _rollout_and_save_media(
+                                make_env_fn=_make_media_env,
+                                model=agent,
+                                out_path=out_path,
+                                episodes=int(media_cfg.get("episodes", 3)),
+                                max_steps=int(media_cfg.get("max_steps", 200)),
+                                fps=int(media_cfg.get("fps", 8)),
+                                fmt=fmt,
+                                deterministic=bool(media_cfg.get("deterministic", True)),
+                            )
+                        except Exception as e:
+                            print(f"[media] boundary recording failed for '{label_for_media}/{name}@phase{idx}': {e}")
+                            saved = None
+                        boundary_cache[boundary_key][name]["media_path"] = saved
+
+            # -----------------------------
+            # Switch to the next phase's env (if any) and trigger "start" evals
+            # -----------------------------
+            if idx < len(phase_specs) - 1:
+                next_env = DummyVecEnv([lambda: _make_env_from_spec(phase_specs[idx + 1]["env_spec"], seed=seed)])
+                agent.set_env(next_env)
+                for cb in callbacks.values():
+                    cb.on_training_start(agent)
+
+        # Finalize (end-of-training evals)
         for cb in callbacks.values():
             cb.on_training_end()
 
-        # Build checkpoint x-axis array from lengths (same for all eval contexts)
+        # Build checkpoints array (same for all eval contexts)
         n_points = len(next(iter(greedy_lists.values())))
         checkpoints = build_checkpoints_from_curve_len_multiphase(total_steps_list, n_points)
 
-        # Bundle curves per eval name
-        out = {"checkpoints": checkpoints}
-        for name in greedy_lists:
-            out[name] = {
+        # Assemble curves
+        curves = {
+            name: {
                 "greedy": np.asarray(greedy_lists[name], dtype=float),
                 "train": np.asarray(train_lists[name], dtype=float),
             }
+            for name in greedy_lists
+        }
 
-        # --- Media recording (optional) ---
-        out["media"] = {}  # name -> path or None
+        # Drop boundary duplicates (same timestep back-to-back)
+        checkpoints, curves = _dedup_by_equal_steps(checkpoints, curves)
+
+        # Bundle outputs
+        out: Dict[str, Any] = {"checkpoints": checkpoints}
+        out.update(curves)
+
+        # Regular media from post-training rollout
+        out["media"] = {}
         if media_cfg and media_cfg.get("enabled", False) and media_dir:
             episodes = int(media_cfg.get("episodes", 3))
             max_steps = int(media_cfg.get("max_steps", 200))
             fps = int(media_cfg.get("fps", 8))
             fmt = str(media_cfg.get("format", "gif")).lower()
             deterministic = bool(media_cfg.get("deterministic", True))
-            only_names = media_cfg.get("eval_names")  # None or list of eval names to record
+            only_names = media_cfg.get("eval_names")  # None -> all eval contexts
 
             for es in eval_specs:
                 name = es["name"]
                 if (only_names is not None) and (name not in set(only_names)):
                     continue
 
-                # fresh env factory for recording
                 def _make_media_env():
-                    env = _make_env_from_spec(es["env_spec"], seed=seed + 42)  # different seed for demo
+                    env = _make_env_from_spec(es["env_spec"], seed=seed + 42)
                     if hasattr(env, "render_mode"):
                         try:
                             env.render_mode = "rgb_array"
@@ -480,7 +607,6 @@ def _run_one_seed_worker(
                             pass
                     return env
 
-                # {media_dir}/seed_{seed}/{label}/{eval}.gif|mp4
                 subdir = os.path.join(str(media_dir), f"seed_{seed}", label_for_media)
                 os.makedirs(subdir, exist_ok=True)
                 out_path = os.path.join(subdir, f"{name}.{fmt if fmt in ('gif', 'mp4') else 'gif'}")
@@ -501,17 +627,18 @@ def _run_one_seed_worker(
                     saved = None
                 out["media"][name] = saved
 
+        # Attach boundary results (if any)
+        out["boundary"] = boundary_cache
         return out
 
-    # --- Baseline (single plan) ---
-    baseline_out = _run_plan(
+    # --- Baseline (Target-only) ---
+    results["baseline"] = _run_plan(
         baseline_phase_specs,
         eval_specs=[{"name": "Target", "env_spec": baseline_phase_specs[-1]["env_spec"]}],
         label_for_media="baseline",
     )
-    results["baseline"] = baseline_out
 
-    # --- Items (per label) ---
+    # --- Per-item plans ---
     items_out: Dict[str, Any] = {}
     for label, phase_specs in item_phase_specs_map.items():
         evs = eval_specs_map[label]
@@ -652,18 +779,15 @@ class TabularCurriculumTrainer:
         _ensure_dir(self.output_dir)
 
     def run(
-        self,
-        seeds: List[int],
-        baseline_phase_specs: List[PhaseSpec],
-        item_phase_specs_map: Dict[str, List[PhaseSpec]],
-        eval_specs_map: Dict[str, List[EvalSpec]],
+            self,
+            seeds: List[int],
+            baseline_phase_specs: List[PhaseSpec],
+            item_phase_specs_map: Dict[str, List[PhaseSpec]],
+            eval_specs_map: Dict[str, List[EvalSpec]],
     ) -> Dict[str, Any]:
         """
-        Execute parallel training across seeds.
-        - baseline_phase_specs: phases for target-only baseline
-        - item_phase_specs_map: per label phases (e.g., [Source->Target])
-        - eval_specs_map: per label evaluation contexts (e.g., {"Target","Source"})
-        Returns aggregated results with means/stds and file paths.
+        Execute parallel training across seeds and aggregate results.
+        Also uploads both end-of-training media and boundary-test media to W&B (if enabled).
         """
         # Serialize specs to dicts (pickle-safe)
         baseline_phase_specs_d = [ph.as_dict() for ph in baseline_phase_specs]
@@ -687,8 +811,8 @@ class TabularCurriculumTrainer:
                     baseline_phase_specs_d,
                     item_phase_specs_map_d,
                     eval_specs_map_d,
-                    self.media_cfg,  # <-- NEW
-                    media_root,  # <-- NEW
+                    self.media_cfg,
+                    media_root,
                 ): seed
                 for seed in seeds
             }
@@ -697,8 +821,9 @@ class TabularCurriculumTrainer:
                 all_results.append(res)
                 print(f"[Seed {res['seed']}] finished.")
 
-        # ---------- Aggregate ----------
+        # ---------- Aggregate curves ----------
         labels = sorted(item_phase_specs_map.keys())
+
         # Use first seed checkpoints as reference; assert match
         ref_checkpoints = all_results[0]["baseline"]["checkpoints"]
         for r in all_results:
@@ -707,18 +832,16 @@ class TabularCurriculumTrainer:
                 assert np.array_equal(r["items"][lb]["checkpoints"], all_results[0]["items"][lb]["checkpoints"]), \
                     f"Item checkpoints mismatch for '{lb}'."
 
-        # Compute phase boundaries (cumulative steps) for naming & markers
+        # Compute phase boundaries for baseline (for plot/filenames)
         baseline_boundaries = []
         s = 0
-        for i, ph in enumerate(baseline_phase_specs[:-1]):
+        for ph in baseline_phase_specs[:-1]:
             s += int(ph.steps)
             baseline_boundaries.append(s)
-        # Boundaries string for filenames
         boundaries_str = "-".join(str(b) for b in baseline_boundaries) if baseline_boundaries else "none"
 
         # Baseline aggregate
-        base_greedy_all = []
-        base_train_all = []
+        base_greedy_all, base_train_all = [], []
         for r in all_results:
             base = r["baseline"]["Target"]
             base_greedy_all.append(base["greedy"])
@@ -738,9 +861,8 @@ class TabularCurriculumTrainer:
             "items": {}
         }
 
-        # Per item aggregate and plotting/logging
+        # Per item aggregate + save CSV + plot + (optional) W&B images/tables
         for lb in labels:
-            # Collect per-eval curves
             eval_names = [es.name for es in eval_specs_map[lb]]
             eval_curves: Dict[str, Dict[str, List[np.ndarray]]] = {nm: {"greedy": [], "train": []} for nm in eval_names}
             for r in all_results:
@@ -749,7 +871,6 @@ class TabularCurriculumTrainer:
                     eval_curves[nm]["greedy"].append(item[nm]["greedy"])
                     eval_curves[nm]["train"].append(item[nm]["train"])
 
-            # Mean/std
             agg_item: Dict[str, Dict[str, Any]] = {}
             for nm in eval_names:
                 g_mean, g_std = _mean_std(eval_curves[nm]["greedy"])
@@ -764,26 +885,30 @@ class TabularCurriculumTrainer:
             # Save CSVs
             item_out_dir = os.path.join(self.output_dir, f"{lb}")
             _ensure_dir(item_out_dir)
-            # Baseline CSV
+
             _save_csv(os.path.join(item_out_dir, f"baseline_target_phase_{boundaries_str}.csv"),
                       ref_checkpoints, base_greedy_mean, base_greedy_std, header="greedy")
             _save_csv(os.path.join(item_out_dir, f"baseline_target_train_phase_{boundaries_str}.csv"),
                       ref_checkpoints, base_train_mean, base_train_std, header="train")
-            # Target eval CSV
+
             if "Target" in agg_item:
                 _save_csv(os.path.join(item_out_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item["Target"]["greedy_mean"], agg_item["Target"]["greedy_std"], header="greedy")
+                          ref_checkpoints, agg_item["Target"]["greedy_mean"], agg_item["Target"]["greedy_std"],
+                          header="greedy")
                 _save_csv(os.path.join(item_out_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item["Target"]["train_mean"], agg_item["Target"]["train_std"], header="train")
-            # Source eval CSV (optional)
+                          ref_checkpoints, agg_item["Target"]["train_mean"], agg_item["Target"]["train_std"],
+                          header="train")
+
             src_key = next((nm for nm in eval_names if nm.lower().startswith("source")), None)
             if src_key is not None:
                 _save_csv(os.path.join(item_out_dir, f"curriculum_eval_source_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item[src_key]["greedy_mean"], agg_item[src_key]["greedy_std"], header="greedy")
+                          ref_checkpoints, agg_item[src_key]["greedy_mean"], agg_item[src_key]["greedy_std"],
+                          header="greedy")
                 _save_csv(os.path.join(item_out_dir, f"curriculum_eval_source_train_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item[src_key]["train_mean"], agg_item[src_key]["train_std"], header="train")
+                          ref_checkpoints, agg_item[src_key]["train_mean"], agg_item[src_key]["train_std"],
+                          header="train")
 
-            # Plot and (optionally) log to W&B
+            # Plot pairwise
             png_path = os.path.join(item_out_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
             _plot_pairwise(
                 out_png_path=png_path,
@@ -800,13 +925,9 @@ class TabularCurriculumTrainer:
 
             if self.wandb_run is not None:
                 try:
-                    # 1) Log the saved pairwise image as before
-                    self.wandb_run.log({
-                        f"images/pairwise_{lb}_phase_{boundaries_str}": wandb.Image(png_path)
-                    })
+                    self.wandb_run.log({f"images/pairwise_{lb}_phase_{boundaries_str}": wandb.Image(png_path)})
 
-                    # 2) Log curves as a proper wandb.Table (instead of a dict-of-lists)
-                    # Build table schema (columns)
+                    # Log curves as a wandb.Table
                     columns = [
                         "step",
                         "baseline_greedy_mean", "baseline_greedy_std",
@@ -818,7 +939,6 @@ class TabularCurriculumTrainer:
                             f"{nm}_train_mean", f"{nm}_train_std",
                         ])
 
-                    # Build table rows
                     data = []
                     L = len(ref_checkpoints)
                     for i in range(L):
@@ -838,37 +958,64 @@ class TabularCurriculumTrainer:
 
                     table = wandb.Table(columns=columns, data=data)
                     self.wandb_run.log({f"tables/curves_{lb}_phase_{boundaries_str}": table})
-
                 except Exception as e:
                     print(f"[W&B] logging failed for '{lb}': {e}")
 
-        # --- W&B: upload media (if any) ---
+        # --- W&B: upload media (end-of-training + boundary), if any ---
         if self.wandb_run is not None and self.media_cfg.get("enabled", False):
             to_log = []
+
+            def _enqueue_media(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
+                # media_map: {"Target": ".../Target.gif", ...}
+                if not isinstance(media_map, dict):
+                    return
+                for name, path in media_map.items():
+                    if path:
+                        # e.g. media/seed_0/<label>/Target
+                        to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
+
+            def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
+                # boundary_map: {"phase_0": {"Target": {"media_path": ".../Target_phase0.gif", ...}}, ...}
+                if not isinstance(boundary_map, dict):
+                    return
+                for phase_key, per_eval in boundary_map.items():
+                    if not isinstance(per_eval, dict):
+                        continue
+                    for eval_name, rec in per_eval.items():
+                        path = (rec or {}).get("media_path", None)
+                        if path:
+                            # e.g. media/seed_0/<label>/Target_phase_0
+                            to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", path))
+
             for i, r in enumerate(all_results):
                 if self.media_cfg.get("log_first_seed_only", True) and i > 0:
                     break
                 sd = int(r.get("seed", i))
-                # baseline media
-                base_media = (r.get("baseline", {}) or {}).get("media", {})
-                for name, path in (base_media.items() if isinstance(base_media, dict) else []):
-                    if path:
-                        to_log.append((f"media/seed_{sd}/baseline/{name}", path))
-                # items media
-                items = r.get("items", {}) or {}
-                for lb, d in items.items():
-                    media_map = (d or {}).get("media", {}) or {}
-                    for name, path in media_map.items():
-                        if path:
-                            to_log.append((f"media/seed_{sd}/{lb}/{name}", path))
 
+                # baseline: end-of-training media + boundary media
+                base = r.get("baseline", {}) or {}
+                _enqueue_media(sd, "baseline", base.get("media", {}) or {})
+                _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
+
+                # items: end-of-training media + boundary media
+                items_map = r.get("items", {}) or {}
+                for lb, d in items_map.items():
+                    d = d or {}
+                    _enqueue_media(sd, str(lb), d.get("media", {}) or {})
+                    _enqueue_boundary(sd, str(lb), d.get("boundary", {}) or {})
+
+            print(f"[W&B] prepared {len(to_log)} media files to upload.")
             for key, path in to_log:
                 try:
                     if str(path).lower().endswith(".gif"):
                         self.wandb_run.log(
-                            {key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)), format="gif")})
+                            {key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)), format="gif")}
+                        )
                     else:
-                        self.wandb_run.log({key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)))})
+                        self.wandb_run.log(
+                            {key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)))}
+                        )
+                    print(f"[W&B] uploaded: {key}  -->  {path}")
                 except Exception as e:
                     print(f"[W&B] video log failed for {key}: {e}")
 
