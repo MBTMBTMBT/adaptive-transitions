@@ -14,7 +14,7 @@ MAPS: Dict[str, str] = {
     "door-key": "door-key.json",
     "door-key-fixed": "door-key-fixed.json",
     "3-rooms-2-doors-2-keys": "three-rooms-two-doors-two-keys.json",
-    "2-doors-2-keys": "2-doors-2-keys.json",
+    "2-doors-2-keys": "two-doors-two-keys.json",
 }
 
 def list_builtin_maps() -> List[str]:
