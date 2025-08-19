@@ -12,10 +12,9 @@ from typing import List
 from customised_minigrid_env import (               # your package providing maps & env
     CustomMiniGridEnv,
     list_builtin_maps,
-    load_map_config_by_name,                        # not used directly here but handy for validation
-    plot_minigrid_scalar_overlay,
-    plot_minigrid_scalar_diff_overlay,
 )
+from customised_minigrid_env.customised_minigrid_env import plot_minigrid_scalar_overlay, \
+    plot_minigrid_scalar_diff_overlay
 
 from experiment_utils.utils import (
     _ensure_dir,
@@ -299,10 +298,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (kept modest; MiniGrid state space is typically larger than Taxi, tune as needed)
-    p.add_argument("--ga-pop-size", type=int, default=150)
-    p.add_argument("--ga-generations", type=int, default=250)
+    p.add_argument("--ga-pop-size", type=int, default=25)
+    p.add_argument("--ga-generations", type=int, default=1)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=20)
+    p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=_str2bool, default=True)
@@ -324,7 +323,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-workers", type=int, default=0, help="0=auto(cpu_count)")
     p.add_argument("--ga-sanity-batch", type=int, default=0)
 
-    p.add_argument("--ga-dist-max-hops", type=int, default=12)
+    p.add_argument("--ga-dist-max-hops", type=int, default=10)
     p.add_argument("--ga-dist-node-cap", type=int, default=256)
     p.add_argument("--ga-dist-weight-eps", type=float, default=1e-6)
     p.add_argument("--ga-dist-unreachable", type=float, default=1e9)
@@ -336,7 +335,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-policy-temperature", type=float, default=0.01)
     p.add_argument("--ga-tie-tol", type=float, default=1e-2)
     p.add_argument("--ga-blend-weight", type=float, default=0.8)
-    p.add_argument("--ga-perf-numpoints", type=int, default=16)
+    p.add_argument("--ga-perf-numpoints", type=int, default=5)
     p.add_argument("--ga-perf-gamma", type=float, default=0.99)
     p.add_argument("--ga-perf-theta", type=float, default=1e-3)
     p.add_argument("--ga-perf-max-iters", type=int, default=1000)
@@ -352,12 +351,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent-tie-tol", type=float, default=1e-2)
     p.add_argument("--agent-verbose", type=int, default=0)
 
-    p.add_argument("--phase-steps", type=str, default="10000,140000")
+    p.add_argument("--phase-steps", type=str, default="10000, 10000")
     p.add_argument("--eval-every", type=int, default=2000)
-    p.add_argument("--n-eval-episodes", type=int, default=100)
+    p.add_argument("--n-eval-episodes", type=int, default=10)
 
     # Train seeds as COUNT -> seeds [0..N-1]
-    p.add_argument("--train-seeds", type=int, default=50, help="Use N to get seeds [0..N-1].")
+    p.add_argument("--train-seeds", type=int, default=8, help="Use N to get seeds [0..N-1].")
     p.add_argument("--train-workers", type=int, default=0)
 
     p.add_argument("--eval-seed-base-target", type=int, default=0)
@@ -375,13 +374,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--vis-mix-loop", type=_parse_tuple3, default=(0.9, 0.0, 0.1))
     p.add_argument("--vis-tie-tol", type=float, default=1e-2)
 
-    p.add_argument("--vis-occ-alpha", type=float, default=0.65)
-    p.add_argument("--vis-occ-font-scale", type=float, default=0.15)
+    p.add_argument("--vis-occ-alpha", type=float, default=0.55)
+    p.add_argument("--vis-occ-font-scale", type=float, default=0.11)
     p.add_argument("--vis-occ-cmap", type=str, default="magma")
     p.add_argument("--vis-occ-gamma", type=float, default=1.0)
 
-    p.add_argument("--vis-val-alpha", type=float, default=0.65)
-    p.add_argument("--vis-val-font-scale", type=float, default=0.15)
+    p.add_argument("--vis-val-alpha", type=float, default=0.60)
+    p.add_argument("--vis-val-font-scale", type=float, default=0.11)
     p.add_argument("--vis-val-cmap", type=str, default="viridis")
     p.add_argument("--vis-val-gamma", type=float, default=1.0)
     return p

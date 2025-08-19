@@ -83,7 +83,7 @@ def stage_train(
         wandb_run=run,
         max_workers=args.train_workers or None,
         media_cfg={
-            "enabled": True,
+            "enabled": True,  # keep your end-of-training media
             "episodes": 3,
             "max_steps": 200,
             "fps": 8,
@@ -91,6 +91,13 @@ def stage_train(
             "deterministic": True,
             "eval_names": None,
             "log_first_seed_only": True,
+            # NEW: boundary tests
+            "boundary_tests": {
+                "enabled": True,
+                "phase_indices": [0],  # after Phase-0 finishes
+                "eval_names": None,
+                "record_media": True  # also record a GIF/MP4 at the boundary
+            },
         },
     )
 
