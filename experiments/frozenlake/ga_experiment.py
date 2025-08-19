@@ -304,10 +304,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete)
-    p.add_argument("--ga-pop-size", type=int, default=500)
+    p.add_argument("--ga-pop-size", type=int, default=250)
     p.add_argument("--ga-generations", type=int, default=150)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=50)
+    p.add_argument("--ga-elitism", type=int, default=25)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=_str2bool, default=True)
@@ -341,7 +341,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-policy-temperature", type=float, default=0.01)
     p.add_argument("--ga-tie-tol", type=float, default=1e-2)
     p.add_argument("--ga-blend-weight", type=float, default=0.8)
-    p.add_argument("--ga-perf-numpoints", type=int, default=32)
+    p.add_argument("--ga-perf-numpoints", type=int, default=16)
     p.add_argument("--ga-perf-gamma", type=float, default=0.99)
     p.add_argument("--ga-perf-theta", type=float, default=1e-3)
     p.add_argument("--ga-perf-max-iters", type=int, default=1000)

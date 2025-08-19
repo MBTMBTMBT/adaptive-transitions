@@ -80,10 +80,10 @@ def make_frozenlake_target(seed: int, **kwargs):
     max_steps = int(kwargs.get("max_steps", 500))
 
     env = CustomisedFrozenLakeEnv(
-        render_mode=None,
         map_name=map_name,
         is_slippery=is_slippery,
         networkx_env=None,
+        render_mode="rgb_array",
     )
     env = TimeLimit(env, max_episode_steps=max_steps)
     if seed is not None:
@@ -101,10 +101,10 @@ def make_taxi_target(seed: int, **kwargs):
     max_steps = int(kwargs.get("max_steps", 250))
 
     env = CustomisedTaxiEnv(
-        render_mode=None,
         is_rainy=False,
         fickle_passenger=False,
         networkx_env=None,
+        render_mode="rgb_array",
     )
     env = TimeLimit(env, max_episode_steps=max_steps)
     if seed is not None:
