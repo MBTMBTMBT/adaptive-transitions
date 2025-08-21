@@ -39,8 +39,8 @@ SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 SLURM_PARTITION="cpu"
 SLURM_GRES=""
 SLURM_MEM="31G"
-SLURM_CPUS="63"
-SLURM_TIME_DAYS="2.0"   # supports decimals (e.g., 1.5 -> 36h)
+SLURM_CPUS="51"
+SLURM_TIME_DAYS="1.5"   # supports decimals (e.g., 1.5 -> 36h)
 SLURM_EXCLUDE=""
 
 # SLURM stdout/err directory (on scratch, per site recommendation)
