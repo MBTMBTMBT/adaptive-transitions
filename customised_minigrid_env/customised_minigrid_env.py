@@ -26,7 +26,7 @@ from mdp_network.mdp_network import MDPNetwork
 
 
 DEFAULT_REWARD_DICT = {
-    "sparse": True,
+    "sparse": False,
     "step_penalty": -0.1,
     "goal_reward": 0.0,
     "lava_penalty": 0.0,
