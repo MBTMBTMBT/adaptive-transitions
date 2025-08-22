@@ -3,6 +3,7 @@
 --extra-index-url https://pypi.org/simple
 
 # ---------- Core scientific stack ----------
+ray==2.48.0
 numpy==1.23.5
 scipy==1.11.4
 pandas==2.1.1
