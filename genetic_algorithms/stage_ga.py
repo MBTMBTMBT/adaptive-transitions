@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List
 
-from experiment_utils.utils import _ensure_dir
+from experiment_utils.utils import ensure_dir
 from genetic_algorithms.ga_mdp_search import register_score_fn, obj_multi_perf, GAConfig, MDPEvolutionGA, \
     evaluate_mdp_objectives
 from mdp_network import MDPNetwork
@@ -17,7 +17,7 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
     """Run GA given a pre-built base MDP (environment-agnostic)."""
     out_dir = Path(args.outdir) / "ga"
     mdp_out_dir = out_dir / "mdps"
-    _ensure_dir(mdp_out_dir)
+    ensure_dir(mdp_out_dir)
 
     if args.skip_ga and mdp_out_dir.exists():
         files = sorted(mdp_out_dir.glob("*.json"))
@@ -128,7 +128,7 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
     print(f"[GA] Pareto front size = {len(pareto_mdps)}, population size = {len(pop)}")
 
     saved = []
-    _ensure_dir(mdp_out_dir)
+    ensure_dir(mdp_out_dir)
     for i, m in enumerate(pareto_mdps):
         tag = "_".join(f"{v:.4f}" for v in pareto_objs[i])
         out_path = mdp_out_dir / f"pareto_{i}_objs_{tag}.json"

@@ -16,14 +16,14 @@ from customised_toy_text_envs.customised_frozenlake import (
     plot_frozenlake_scalar_diff_overlay,
 )
 from experiment_utils.utils import (
-    _ensure_dir,
-    _str2bool,
-    _parse_tuple3,
-    _save_json,
-    _load_json,
-    _wandb_init,
-    _wandb_log_image, _resolve_args,
+    ensure_dir,
+    str2bool,
+    parse_tuple3,
+    save_json,
+    load_json,
+    resolve_args,
 )
+from experiment_utils.wandb_utils import wandb_init, wandb_log_image
 from genetic_algorithms.stage_ga import stage_ga
 from mdp_network.mdp_network import MDPNetwork
 from mdp_network.mdp_tables import q_table_to_policy, create_random_policy
@@ -35,8 +35,8 @@ from mdp_network.solvers import (
 from two_stage_cl.stage_train import stage_train
 
 # -------- FrozenLake-specific factories are kept here in main, not inside stage_train --------
-TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake_target"
-SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_nx_env_from_mdp"
+TARGET_FACTORY_PATH = "experiment_utils._env_factories:make_frozenlake_target"
+SOURCE_FACTORY_PATH = "experiment_utils._env_factories:make_nx_env_from_mdp"
 
 
 def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
@@ -52,7 +52,7 @@ def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
 
 def stage_visualize(args, run, json_files: List[Path]):
     vis_out = Path(args.outdir) / "vis"
-    _ensure_dir(vis_out)
+    ensure_dir(vis_out)
 
     env = CustomisedFrozenLakeEnv(render_mode="rgb_array", map_name=args.map, is_slippery=bool(args.slippery))
     env.reset()
@@ -84,7 +84,7 @@ def stage_visualize(args, run, json_files: List[Path]):
         )
 
         native_out = vis_out / "__native_frozenlake__"
-        _ensure_dir(native_out)
+        ensure_dir(native_out)
 
         plot_frozenlake_transition_overlays(
             env=env, mdp=native_mdp, output_dir=str(native_out), filename_prefix="native_frozenlake",
@@ -129,19 +129,19 @@ def stage_visualize(args, run, json_files: List[Path]):
         )
 
         for fn in sorted(native_out.glob("*.png"))[:6]:
-            _wandb_log_image(run, f"images/vis/native/{fn.stem}", fn)
+            wandb_log_image(run, f"images/vis/native/{fn.stem}", fn)
 
     if not json_files:
         print("[VIS] No JSON files; skip visualization on loops.")
         return
 
     for jf in json_files:
-        cfg = _load_json(jf)
+        cfg = load_json(jf)
         mdp = MDPNetwork(config_data=cfg)
 
         stem = jf.stem
         out_dir = vis_out / stem
-        _ensure_dir(out_dir)
+        ensure_dir(out_dir)
 
         plot_frozenlake_transition_overlays(
             env=env, mdp=mdp, output_dir=str(out_dir), filename_prefix=stem,
@@ -276,7 +276,7 @@ def stage_visualize(args, run, json_files: List[Path]):
             )
 
         for fn in sorted(out_dir.glob("*.png"))[:8]:
-            _wandb_log_image(run, f"images/vis/{stem}/{fn.stem}", fn)
+            wandb_log_image(run, f"images/vis/{stem}/{fn.stem}", fn)
 
 
 # =============================================================================
@@ -300,7 +300,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Env
     p.add_argument("--map", type=str, default="8x8")
-    p.add_argument("--slippery", type=_str2bool, default=True)
+    p.add_argument("--slippery", type=str2bool, default=True)
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete)
@@ -310,7 +310,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-elitism", type=int, default=25)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
-    p.add_argument("--ga-allow-self-loops", type=_str2bool, default=True)
+    p.add_argument("--ga-allow-self-loops", type=str2bool, default=True)
     p.add_argument("--ga-min-out-degree", type=int, default=1)
     p.add_argument("--ga-max-out-degree", type=int, default=5)
     p.add_argument("--ga-prob-floor", type=float, default=1e-6)
@@ -324,7 +324,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-reward-tweak-edges-per-child", type=int, default=0)
     p.add_argument("--ga-reward-k-percent", type=float, default=0.05)
     p.add_argument("--ga-reward-ref-floor", type=float, default=1e-3)
-    p.add_argument("--ga-add-edge-allow-out-of-scope", type=_str2bool, default=False)
+    p.add_argument("--ga-add-edge-allow-out-of-scope", type=str2bool, default=False)
 
     p.add_argument("--ga-workers", type=int, default=0, help="0=auto(cpu_count)")
     p.add_argument("--ga-sanity-batch", type=int, default=0)
@@ -337,7 +337,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-vi-gamma", type=float, default=0.99)
     p.add_argument("--ga-vi-theta", type=float, default=1e-3)
     p.add_argument("--ga-vi-max-iters", type=int, default=1000)
-    p.add_argument("--ga-policy-mix", type=_parse_tuple3, default=(0.9, 0.0, 0.1))
+    p.add_argument("--ga-policy-mix", type=parse_tuple3, default=(0.9, 0.0, 0.1))
     p.add_argument("--ga-policy-temperature", type=float, default=0.01)
     p.add_argument("--ga-tie-tol", type=float, default=1e-2)
     p.add_argument("--ga-blend-weight", type=float, default=0.8)
@@ -350,7 +350,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Training (flattened agent kwargs)
     p.add_argument("--agent-learning-rate", type=float, default=0.1)
     p.add_argument("--agent-gamma", type=float, default=0.99)
-    p.add_argument("--agent-policy-mix", type=_parse_tuple3, default=(0.9, 0.0, 0.1),
+    p.add_argument("--agent-policy-mix", type=parse_tuple3, default=(0.9, 0.0, 0.1),
                    help="Tuple 'g,s,u' for (greedy, softmax, uniform), e.g. 0.9,0.0,0.1")
     p.add_argument("--agent-temperature", type=float, default=0.01,
                    help="Used only if softmax weight > 0")
@@ -371,17 +371,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--json-max", type=int, default=0)
 
     # Visualization
-    p.add_argument("--vis-include-native", type=_str2bool, default=True)
+    p.add_argument("--vis-include-native", type=str2bool, default=True)
     p.add_argument("--vis-min-prob", type=float, default=0.05)
     p.add_argument("--vis-alpha", type=float, default=0.65)
-    p.add_argument("--vis-show-self-loops", type=_str2bool, default=False)
+    p.add_argument("--vis-show-self-loops", type=str2bool, default=False)
     p.add_argument("--vis-dpi", type=int, default=200)
     p.add_argument("--vis-gamma", type=float, default=0.99)
     p.add_argument("--vis-theta", type=float, default=1e-6)
     p.add_argument("--vis-max-iters", type=int, default=1000)
     p.add_argument("--vis-temperature", type=float, default=1.0)
-    p.add_argument("--vis-mix-native", type=_parse_tuple3, default=(1.0, 0.0, 0.0))
-    p.add_argument("--vis-mix-loop", type=_parse_tuple3, default=(0.9, 0.0, 0.1))
+    p.add_argument("--vis-mix-native", type=parse_tuple3, default=(1.0, 0.0, 0.0))
+    p.add_argument("--vis-mix-loop", type=parse_tuple3, default=(0.9, 0.0, 0.1))
     p.add_argument("--vis-tie-tol", type=float, default=1e-2)
     p.add_argument("--vis-occ-alpha", type=float, default=0.65)
     p.add_argument("--vis-occ-cell-px", type=int, default=240)
@@ -398,11 +398,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main():
     parser = build_arg_parser()
-    args = _resolve_args(parser)
+    args = resolve_args(parser)
 
-    run = _wandb_init(args)
+    run = wandb_init(args)
 
-    _save_json(Path(args.outdir) / "meta" / "config.json", {k: getattr(args, k) for k in vars(args)})
+    save_json(Path(args.outdir) / "meta" / "config.json", {k: getattr(args, k) for k in vars(args)})
 
     # GA Stage
     if args.json_dir:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Any
 
-from experiment_utils.utils import _ensure_dir, _save_json
+from experiment_utils.utils import ensure_dir, save_json
 from two_stage_cl.tabular_curriculum_trainer import EnvFactorySpec, PhaseSpec, EvalSpec, SourceFactorySpec, \
     TabularCurriculumTrainer as TrainerClass
 
@@ -36,7 +36,7 @@ def stage_train(
     All environment details are passed as parameters; the function itself is agnostic.
     """
     trainer_out = Path(args.outdir) / "trainer"
-    _ensure_dir(trainer_out)
+    ensure_dir(trainer_out)
 
     # Build target env spec (generic)
     target_env_spec = EnvFactorySpec(
@@ -108,5 +108,5 @@ def stage_train(
         eval_specs_map=eval_specs_map,
     )
 
-    _save_json(Path(args.outdir) / "meta" / "trainer_meta.json", aggregated)
+    save_json(Path(args.outdir) / "meta" / "trainer_meta.json", aggregated)
     return aggregated
