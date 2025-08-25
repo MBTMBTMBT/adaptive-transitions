@@ -24,6 +24,7 @@ import ray
 import wandb
 from ray.actor import ActorHandle
 
+from experiment_utils.utils import ensure_dir
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
     q_table_to_policy,
@@ -569,6 +570,36 @@ class GAWorker:
 
         return ind.to_portable()
 
+    def score_batch(self, portables: List[Dict[str, Any]], score_spec: Dict[str, Any]) -> List[List[float]]:
+        """
+        Evaluate a batch of portable MDPs with the unified score spec:
+          score_spec = {"fns": [{"name": str, "params": dict}, ...]}
+        Returns: list of objective vectors (concatenated across fns).
+        """
+        # Compile score functions once
+        fns_spec = (score_spec or {}).get("fns") or [{"name": "obj_multi_perf", "params": {}}]
+        compiled = []
+        for spec in fns_spec:
+            name = spec.get("name")
+            params = dict(spec.get("params") or {})
+            fn = get_score_fn(name)  # uses the registry defined in this module
+            compiled.append((fn, params))
+
+        shared = {
+            "solver": self.solver,
+            "precomputed": self.precomputed_portables,
+        }
+
+        results: List[List[float]] = []
+        for p in portables:
+            mdp = MDPNetwork.from_portable(p)
+            obj: List[float] = []
+            for fn, params in compiled:
+                vals = fn(mdp, shared, params)  # wrapper returns Sequence[float]
+                obj.extend([float(x) for x in vals])
+            results.append(obj)
+        return results
+
 
 # =========================================================
 # Public driver
@@ -607,30 +638,37 @@ def run_ga(
     solver: Optional[Dict[str, Any]] = None,
     score: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[MDPNetwork], List[List[float]], List[MDPNetwork], List[List[float]]]:
-
     """
-    Returns: pareto_mdps, pareto_objs, pop, pop_objs
+    Genetic Algorithm driver.
+    Key W&B logging policy:
+      - Bind all "ga/*" series to x-axis "ga/gen".
+      - Do NOT pass an explicit `step` to wandb; include "ga/gen" in the payload.
     """
     ops = dict(ops or {})
     distance = dict(distance or {})
     solver = dict(solver or {})
     score = dict(score or {"fns": [{"name": "obj_multi_perf", "params": {}}]})
 
-    # small util
-    def _ensure_dir(p: Path) -> None:
-        p.mkdir(parents=True, exist_ok=True)
-
-    # logger
+    # logger setup
     logger = logging.getLogger("ga")
     if not logger.handlers:
         _h = logging.StreamHandler(sys.stdout)
         _h.setFormatter(logging.Formatter(fmt="%(asctime)s | %(levelname)s | %(message)s"))
         logger.addHandler(_h)
-        logger.setLevel(logging.INFO)
+    logger.setLevel(logging.INFO)
 
-    # init ray once
+    # ray init
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)
+
+    # --- W&B axis binding for GA (MOST-SPECIFIC RULE) ---
+    if wandb_writer is not None:
+        try:
+            # All "ga/*" metrics use the custom x-axis "ga/gen".
+            # This specific rule overrides any generic "*" step rules applied elsewhere.
+            wandb_writer.define_metric.remote("ga/*", step_metric="ga/gen")
+        except Exception:
+            pass
 
     # ===== Precompute baseline policy/occupancy =====
     gamma = float(solver.get("vi_gamma", 0.99))
@@ -653,9 +691,14 @@ def run_ga(
     base_occupancy = compute_occupancy_measure(base_mdp, base_policy, gamma=gamma, theta=theta, max_iterations=max_iters)
     precomputed = [base_policy.to_portable(), base_occupancy.to_portable()]
     t1 = time.perf_counter()
-    # Log precompute timing through WandbWriter (optional).
+
     if wandb_writer is not None:
-        wandb_writer.log.remote({"gen": -1, "time/precompute_sec": float(t1 - t0)})
+        # Log a "precompute" row at a special generation value (-1).
+        # No explicit `step` argument; the chart x-axis is "ga/gen".
+        try:
+            wandb_writer.log.remote({"ga/time/precompute_sec": float(t1 - t0), "ga/gen": -1})
+        except Exception:
+            pass
 
     # ===== Build worker pool =====
     whitelist = _list_all_triples(base_mdp)
@@ -671,7 +714,6 @@ def run_ga(
         ) for _ in range(max(1, int(workers)))
     ]
 
-    # master RNG for driver-only randomness (deterministic)
     rng_drv = np.random.default_rng(_derive_seed(seed, "driver"))
 
     # ===== Init population =====
@@ -685,8 +727,9 @@ def run_ga(
         children_portables = ray.get(futs)
         pop.extend([MDPNetwork.from_portable(p) for p in children_portables])
 
-    # ===== Evaluate population=====
+    # ===== Evaluate population =====
     def _score_portables(portables: List[Dict[str, Any]]) -> List[List[float]]:
+        """Parallel scoring helper (keeps order)."""
         W = len(pool)
         if W == 0:
             return []
@@ -696,8 +739,7 @@ def run_ga(
             w = i % W
             chunks[w].append(p)
             idx_chunks[w].append(i)
-        futs = []
-        active_wids: List[int] = []
+        futs, active_wids = [], []
         for wid, ch in enumerate(chunks):
             if ch:
                 futs.append(pool[wid].score_batch.remote(ch, score))
@@ -721,17 +763,20 @@ def run_ga(
             f"mean={init_stats.get(f'mean_{m}', float('nan')):.4f} "
             f"max={init_stats.get(f'max_{m}', float('nan')):.4f}"
             for m in range(len(objs[0]) if objs else 0)
-        )
-        or "NA",
+        ) or "NA",
     )
     if wandb_writer is not None:
-        payload = {"gen": 0, "init/pop_size": int(len(pop))}
+        # Generation 0 snapshot (no explicit `step`)
+        payload = {"ga/init/pop_size": int(len(pop)), "ga/gen": 0}
         M = len(objs[0]) if objs else 0
         for m in range(M):
-            payload[f"init/obj{m}_min"] = init_stats.get(f"min_{m}", float("nan"))
-            payload[f"init/obj{m}_mean"] = init_stats.get(f"mean_{m}", float("nan"))
-            payload[f"init/obj{m}_max"] = init_stats.get(f"max_{m}", float("nan"))
-        wandb_writer.log.remote(payload)
+            payload[f"ga/init/obj{m}_min"]  = init_stats.get(f"min_{m}", float("nan"))
+            payload[f"ga/init/obj{m}_mean"] = init_stats.get(f"mean_{m}", float("nan"))
+            payload[f"ga/init/obj{m}_max"]  = init_stats.get(f"max_{m}", float("nan"))
+        try:
+            wandb_writer.log.remote(payload)
+        except Exception:
+            pass
 
     # ===== Ranks & crowding =====
     fronts = _fast_non_dominated_sort(objs)
@@ -748,13 +793,12 @@ def run_ga(
         gstart = time.perf_counter()
         elite_k = max(0, min(int(elitism), population_size, len(pop)))
         if elite_k > 0:
-            order_prev = sorted(range(len(pop)),
-                                key=lambda i: (ranks[i], -crowding.get(i, 0.0)))
+            order_prev = sorted(range(len(pop)), key=lambda i: (ranks[i], -crowding.get(i, 0.0)))
             elite_parent_idxs = set(order_prev[:elite_k])
         else:
             elite_parent_idxs = set()
 
-        # --- parent selection (tournament) ---
+        # --- tournament selection ---
         parents_pairs: List[Tuple[MDPNetwork, MDPNetwork]] = []
         for k in range(population_size):
             # first parent
@@ -772,9 +816,8 @@ def run_ga(
                 if ranks[j] < ranks[best2] or (ranks[j] == ranks[best2] and crowding.get(j, 0.0) > crowding.get(best2, 0.0)):
                     best2 = j
             parents_pairs.append((pop[best], pop[best2]))
-        t_sel = time.perf_counter()
 
-        # --- offspring (parallel) ---
+        # --- offspring (parallel mutation/crossover) ---
         futs = []
         for k, (pa, pb) in enumerate(parents_pairs):
             actor = pool[k % len(pool)]
@@ -789,11 +832,9 @@ def run_ga(
             )
         child_portables = ray.get(futs)
         children = [MDPNetwork.from_portable(p) for p in child_portables]
-        t_child = time.perf_counter()
 
-        # --- evaluate children  ---
+        # --- evaluate children ---
         child_objs = _score_portables([c.to_portable() for c in children])
-        t_eval = time.perf_counter()
 
         # --- environmental selection with locked elites ---
         union_pop = pop + children
@@ -817,6 +858,7 @@ def run_ga(
                 new_pop.extend([union_pop[i] for i in chosen])
                 new_objs.extend([union_objs[i] for i in chosen])
                 break
+
         pop, objs = new_pop, new_objs
 
         # --- refresh ranks & crowding ---
@@ -829,7 +871,7 @@ def run_ga(
         for F in fronts:
             crowding.update(_compute_crowding_distance(objs, F))
 
-        # --- logging ---
+        # --- logging (generation k -> "ga/gen" = k+1) ---
         gen_stats = _summ_stats(objs)
         logger.info(
             "[Gen %d/%d] pop=%d | %s | F1=%d",
@@ -839,27 +881,25 @@ def run_ga(
                 f"mean={gen_stats.get(f'mean_{m}', float('nan')):.4f} "
                 f"max={gen_stats.get(f'max_{m}', float('nan')):.4f}"
                 for m in range(len(objs[0]) if objs else 0)
-            )
-            or "NA",
+            ) or "NA",
             len(fronts[0]) if fronts else 0,
         )
-        gend = time.perf_counter()
         if wandb_writer is not None:
             payload = {
-                "gen": gen + 1,
-                "pop/size": int(len(pop)),
-                "pop/F1_size": int(len(fronts[0]) if fronts else 0),
-                "time/selection_sec": float(t_child - t_sel),
-                "time/offspring_sec": float(t_eval - t_child),
-                "time/eval_sec": float(gend - t_eval),
-                "time/total_gen_sec": float(gend - gstart),
+                "ga/pop/size": int(len(pop)),
+                "ga/pop/F1_size": int(len(fronts[0]) if fronts else 0),
+                "ga/time/total_gen_sec": float(time.perf_counter() - gstart),
+                "ga/gen": int(gen + 1),
             }
             M = len(objs[0]) if objs else 0
             for m in range(M):
-                payload[f"pop/obj{m}_min"] = gen_stats.get(f"min_{m}", float("nan"))
-                payload[f"pop/obj{m}_mean"] = gen_stats.get(f"mean_{m}", float("nan"))
-                payload[f"pop/obj{m}_max"] = gen_stats.get(f"max_{m}", float("nan"))
-            wandb_writer.log.remote(payload)
+                payload[f"ga/pop/obj{m}_min"]  = gen_stats.get(f"min_{m}", float("nan"))
+                payload[f"ga/pop/obj{m}_mean"] = gen_stats.get(f"mean_{m}", float("nan"))
+                payload[f"ga/pop/obj{m}_max"]  = gen_stats.get(f"max_{m}", float("nan"))
+            try:
+                wandb_writer.log.remote(payload)  # no explicit step
+            except Exception:
+                pass
 
     # ===== Final Pareto =====
     final_fronts = _fast_non_dominated_sort(objs)
@@ -867,25 +907,29 @@ def run_ga(
     pareto_mdps = [pop[i].clone() for i in F1]
     pareto_objs = [objs[i][:] for i in F1]
 
-    # optional: save to disk
+    # optional save
     if output_dir:
         mdp_out_dir = Path(output_dir) / "ga" / "mdps"
-        _ensure_dir(mdp_out_dir)
+        ensure_dir(mdp_out_dir)
         for i, (m, objv) in enumerate(zip(pareto_mdps, pareto_objs)):
             tag = "_".join(f"{v:.4f}" for v in objv)
             p = mdp_out_dir / f"pareto_{i}_objs_{tag}.json"
             m.export_to_json(str(p))
             logger.info("[GA] Saved PF[%d] -> %s", i, p.name)
 
+    # final W&B row
     if wandb_writer is not None:
-        payload = {"gen": generations, "final/F1_size": int(len(F1))}
+        payload = {"ga/final/F1_size": int(len(F1)), "ga/gen": int(generations)}
         M = len(objs[0]) if objs else 0
         fstats = _summ_stats([objs[i] for i in F1] if F1 else objs)
         for m in range(M):
-            payload[f"final/obj{m}_min"] = fstats.get(f"min_{m}", float("nan"))
-            payload[f"final/obj{m}_mean"] = fstats.get(f"mean_{m}", float("nan"))
-            payload[f"final/obj{m}_max"] = fstats.get(f"max_{m}", float("nan"))
-        wandb_writer.log.remote(payload)
+            payload[f"ga/final/obj{m}_min"]  = fstats.get(f"min_{m}", float("nan"))
+            payload[f"ga/final/obj{m}_mean"] = fstats.get(f"mean_{m}", float("nan"))
+            payload[f"ga/final/obj{m}_max"]  = fstats.get(f"max_{m}", float("nan"))
+        try:
+            wandb_writer.log.remote(payload)  # no explicit step
+        except Exception:
+            pass
 
     return pareto_mdps, pareto_objs, pop, objs
 

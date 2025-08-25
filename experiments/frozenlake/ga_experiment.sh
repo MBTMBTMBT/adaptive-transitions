@@ -67,7 +67,7 @@ PYTHONPATH_EXTRA="${PROJ_ROOT}"
 USE_SLURM=false
 CONTAINER="${DEFAULT_SIF}"          # --no-container to force host venv
 PYTHON="python3"
-SCRIPT_PATH="${SCRIPT_DIR}/ga_experiment.py"
+SCRIPT_PATH="${SCRIPT_DIR}/ga_experiment_ray.py"
 WANDB_MODE="online"
 
 # experiment outputs (NEW: fully separated)

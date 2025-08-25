@@ -38,49 +38,67 @@ def wandb_log_image(run, key: str, path: Path):
     run.log({key: wandb.Image(str(path))})
 
 
-@ray.remote
-class WandbWriter:
-    """
-    Thin wrapper over wandb. Create this actor OUTSIDE and pass its handle into
-    Collector/Driver. If W&B unavailable or init_kwargs is None, it becomes a no-op.
-    """
-    def __init__(self, init_kwargs: Optional[Dict[str, Any]] = None):
-        self._on = False
-        self._run = None
-        if init_kwargs:
-            try:
-                self._run = wandb.init(**init_kwargs)
-                self._on = True
-            except Exception as e:
-                print(f"[W&B] init failed: {e}")
+@ray.remote # single-threaded actor by default -> serialized W&B calls
+class WandbActor:
+    def __init__(self, init_kwargs: Dict[str, Any], env: Dict[str, str] | None = None) -> None:
+        # Safer start method in multi-proc envs; optional overrides via env.
+        os.environ.setdefault("WANDB_START_METHOD", "thread")
+        if env:
+            for k, v in env.items():
+                os.environ[k] = v
 
-    def log(self, data: Dict[str, Any], step: Optional[int] = None):
-        if not self._on: return
-        try:
-            self._run.log(data, step=step)
-        except Exception as e:
-            print(f"[W&B] log failed: {e}")
+        self.wandb = wandb
+        self.run = wandb.init(**init_kwargs)
 
-    def log_video(self, key: str, path: str, fps: int = 8, fmt: Optional[str] = None):
-        if not self._on: return
-        try:
-            if (fmt or "").lower() == "gif" or str(path).lower().endswith(".gif"):
-                self._run.log({key: wandb.Video(path, fps=int(fps), format="gif")})
-            else:
-                self._run.log({key: wandb.Video(path, fps=int(fps))})
-        except Exception as e:
-            print(f"[W&B] video log failed ({key}): {e}")
+    # -------- Common helpers --------
+    def log(self, metrics: Dict[str, Any], **kwargs) -> None:
+        self.run.log(dict(metrics), **kwargs)
 
-    def log_image(self, key: str, path: str):
-        if not self._on: return
-        try:
-            self._run.log({key: wandb.Image(path)})
-        except Exception as e:
-            print(f"[W&B] image log failed ({key}): {e}")
+    def summary_update(self, d: Dict[str, Any], **kwargs) -> None:
+        self.run.summary.update(dict(d), **kwargs)
 
-    def finish(self):
-        if not self._on: return
-        try:
-            self._run.finish()
-        except Exception:
-            pass
+    def config_update(self, d: Dict[str, Any], **kwargs) -> None:
+        # allow_val_change etc. can be passed in kwargs
+        self.run.config.update(dict(d), **kwargs)
+
+    def define_metric(self, *args, **kwargs) -> None:
+        self.wandb.define_metric(*args, **kwargs)
+
+    def log_artifact_dir(self, name: str, a_type: str, dir_path: str, metadata: Dict[str, Any] | None = None, **kwargs) -> None:
+        art = self.wandb.Artifact(name=name, type=a_type, metadata=(metadata or {}))
+        art.add_dir(dir_path)
+        self.run.log_artifact(art, **kwargs)
+
+    def log_image(self,
+                  key: str,
+                  path: str | os.PathLike,
+                  caption: str | None = None,
+                  **kwargs) -> None:
+        img = self.wandb.Image(str(path), caption=caption)
+        self.run.log({key: img}, **kwargs)
+
+    def log_video(self,
+                  key: str,
+                  path: str | os.PathLike,
+                  fps: int | None = None,
+                  fmt: str | None = None,
+                  **kwargs) -> None:
+        vkw = {}
+        if fps is not None:
+            vkw["fps"] = int(fps)
+        if fmt is not None:
+            vkw["format"] = str(fmt)  # W&B uses 'format' param
+        vid = self.wandb.Video(str(path), **vkw)
+        self.run.log({key: vid}, **kwargs)
+
+    # -------- Generic passthroughs to cover "latest W&B features" --------
+    def call_run(self, method: str, *args, **kwargs) -> Any:
+        # Example: call_run("watch", model, log="all", log_freq=100)
+        return getattr(self.run, method)(*args, **kwargs)
+
+    def call_wandb(self, method: str, *args, **kwargs) -> Any:
+        # Example: call_wandb("alert", title="x", text="y")
+        return getattr(self.wandb, method)(*args, **kwargs)
+
+    def finish(self) -> None:
+        self.run.finish()

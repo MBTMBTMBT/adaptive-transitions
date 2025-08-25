@@ -37,6 +37,7 @@ from customised_toy_text_envs.customised_frozenlake import (
     plot_frozenlake_scalar_overlay,          # generic scalar overlay (for occupancy or V(s))
     plot_frozenlake_scalar_diff_overlay,     # generic scalar diff overlay
 )
+from experiment_utils.utils import ensure_dir
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import create_random_policy, q_table_to_policy
 from mdp_network.solvers import (
@@ -207,7 +208,7 @@ def process_one_mdp_bundle(
     - Cross-eval occupancy on native, and diff vs native random
     - Value diff vs native (opt-greedy(loop) − opt-greedy(native))
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(out_dir)
 
     # (1) Transition overlays
     plot_frozenlake_transition_overlays(
@@ -328,7 +329,7 @@ def process_one_mdp_bundle(
 def main():
     json_dir = JSON_DIR.expanduser().resolve()
     output_dir = OUTPUT_DIR.expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(output_dir)
 
     env = ensure_env(MAP_NAME, IS_SLIPPERY)
     nS = env.nrow * env.ncol

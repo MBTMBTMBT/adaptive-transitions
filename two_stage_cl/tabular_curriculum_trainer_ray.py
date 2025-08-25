@@ -2,83 +2,156 @@
 # English only.
 
 from __future__ import annotations
+
+import asyncio
 import os, time, json
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import ray
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList
+from simple_agents.apis import FunctionCallback
 from ray.actor import ActorHandle
 
 from experiment_utils.utils import _import, ensure_dir
 from experiment_utils.save_media import save_policy_media
 from experiment_utils.env_factories import make_env
 
+from two_stage_cl.utils import plot_pairwise, save_csv
+
 
 @ray.remote
 class Collector:
+    """
+    Strictly-ordered aggregator for online evaluations.
+    Logging policy:
+      - Define metric so that the chart x-axis for "online/*" is "cl/step".
+      - Do NOT pass `step=` to W&B; include "cl/step" in the payload.
+      - Per-(label, eval_name, step) we aggregate across seeds to mean/std.
+      - If an out-of-order (non-monotonic) step arrives, we DROP it.
+    """
     def __init__(self,
                  seeds: List[int],
                  keep_intermediate: bool = True,
-                 wandb_actor: Optional[ActorHandle] = None):
-        """
-        - keep_intermediate=False: no timeline snapshotting.
-        - keep_intermediate=True: keep per-seed timeline (driver may dump locally if output_dir exists).
-        - wandb_actor: external WandbWriter actor handle; if provided, Collector pushes online scalars to it.
-        """
+                 wandb_actor: Optional[ActorHandle] = None,
+                 step_base: int = 0,
+                 flush_interval_s: float = 0.5,
+                 max_queue: int = 65536):
         self.seeds = list(map(int, seeds))
         self.keep = bool(keep_intermediate)
-        self._bucket: Dict[Tuple[str, str, int], Dict[int, Tuple[float, float]]] = {}
-        self._timeline: Dict[int, List[Dict[str, Any]]] = {s: [] for s in self.seeds}
         self._wb = wandb_actor
+        self._step_base = int(step_base)
 
-    def report(self, e: Dict[str, Any]):
-        """
-        e = {seed, label, eval_name, step, greedy, train, wall_time}
-        """
-        key = (str(e["label"]), str(e["eval_name"]), int(e["step"]))
-        b = self._bucket.setdefault(key, {})
-        b[int(e["seed"])] = (float(e["greedy"]), float(e["train"]))
-        if self.keep:
-            self._timeline[int(e["seed"])].append(e)
+        # Optional per-seed raw timeline (for local debugging)
+        self._timeline: Dict[int, List[Dict[str, Any]]] = {s: [] for s in self.seeds}
 
-        # Aggregate when all seeds reached the same (label, eval, step)
-        if len(b) == len(self.seeds):
-            g = np.array([v[0] for v in b.values()], dtype=np.float64)
-            t = np.array([v[1] for v in b.values()], dtype=np.float64)
-            row = {
-                "label": key[0], "eval_name": key[1], "step": key[2],
-                "greedy_mean": float(g.mean()), "greedy_std": float(g.std()),
-                "train_mean":  float(t.mean()), "train_std":  float(t.std()),
-            }
-            if self._wb is not None:
-                prefix = f"online/{row['label']}/{row['eval_name']}"
-                try:
-                    self._wb.log.remote({
-                        f"{prefix}/greedy_mean": row["greedy_mean"],
-                        f"{prefix}/greedy_std":  row["greedy_std"],
-                        f"{prefix}/train_mean":  row["train_mean"],
-                        f"{prefix}/train_std":   row["train_std"],
-                    }, step=int(row["step"]))
-                except Exception as ex:
-                    print(f"[Collector] wandb.log failed: {ex}")
+        # In-flight buckets: (label, eval, step) -> {seed: (greedy, train)}
+        self._bucket: Dict[Tuple[str, str, int], Dict[int, Tuple[float, float]]] = {}
 
-            # free memory
+        # NEW: last accepted cl/step per (label, eval_name), AFTER adding step_base
+        # This is used to enforce strictly increasing step sequence per series.
+        self._last_step: Dict[Tuple[str, str], int] = {}
+
+        # Async queue decouples producers and aggregator
+        self._q: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=int(max_queue))
+        self._flush_interval_s = float(flush_interval_s)
+
+        # ---- Bind axis: "online/*" uses cl/step as its x-axis ----
+        if self._wb is not None:
             try:
-                del self._bucket[key]
+                self._wb.define_metric.remote("online/*", step_metric="cl/step")
             except Exception:
                 pass
 
+        # Start background consumer
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        loop.create_task(self._drain_loop())
+
+    async def _drain_loop(self) -> None:
+        """
+        Consume queue, fill per-(label, eval, step) buckets, and emit to W&B
+        once all seeds are present. The x-axis is "cl/step"; we do NOT use `step=`.
+        We also drop any bucket whose computed cl/step is not strictly larger
+        than the last accepted cl/step for the same (label, eval) series.
+        """
+        last_yield = time.time()
+        while True:
+            e = await self._q.get()
+
+            key = (str(e["label"]), str(e["eval_name"]), int(e["step"]))
+            seed = int(e["seed"])
+            g, t = float(e["greedy"]), float(e["train"])
+            bucket = self._bucket.setdefault(key, {})
+            bucket[seed] = (g, t)
+
+            if len(bucket) == len(self.seeds) and self._wb is not None:
+                label, eval_name, real_step = key
+                out_step = int(real_step + self._step_base)  # the cl/step we will log
+                series_key = (label, eval_name)
+
+                # Monotonicity guard: require strictly increasing cl/step per series
+                last_ok = self._last_step.get(series_key, None)
+                if last_ok is not None and out_step <= last_ok:
+                    # Drop this bucket silently (well, with a lightweight warning)
+                    try:
+                        print(f"[Collector] drop non-monotonic step for online/{label}/{eval_name}: "
+                              f"{out_step} <= last {last_ok}")
+                    except Exception:
+                        pass
+                    # Free the bucket and continue
+                    del self._bucket[key]
+                else:
+                    # Compute mean/std across seeds and emit
+                    g_arr = np.array([v[0] for v in bucket.values()], dtype=np.float64)
+                    t_arr = np.array([v[1] for v in bucket.values()], dtype=np.float64)
+                    series = f"online/{label}/{eval_name}"
+                    payload = {
+                        f"{series}/greedy_mean": float(g_arr.mean()),
+                        f"{series}/greedy_std":  float(g_arr.std()),
+                        f"{series}/train_mean":  float(t_arr.mean()),
+                        f"{series}/train_std":   float(t_arr.std()),
+                        "cl/step": out_step,  # drives the x-axis
+                    }
+                    del self._bucket[key]
+                    try:
+                        # Crucial: no explicit 'step' kwarg.
+                        self._wb.log.remote(payload)
+                        # Update last accepted step for this series
+                        self._last_step[series_key] = out_step
+                    except Exception:
+                        pass
+
+            # Cooperative yield
+            if (time.time() - last_yield) >= self._flush_interval_s:
+                await asyncio.sleep(0)
+                last_yield = time.time()
+
+    async def report(self, e: Dict[str, Any]) -> None:
+        """Non-blocking producer API; drops on full queue."""
+        if self.keep:
+            self._timeline[int(e["seed"])].append(e)
+        try:
+            self._q.put_nowait(e)
+        except asyncio.QueueFull:
+            return
+
     def timeline(self) -> Dict[int, List[Dict[str, Any]]]:
+        """Return raw per-seed timeline (if keep_intermediate=True)."""
         return self._timeline if self.keep else {}
 
 
-class PeriodicEvalCallbackSB3(BaseCallback):
+class PeriodicEvalCallback:
     """
-    SB3 BaseCallback that evaluates at step 0, every eval_every, and training end.
-    It appends results into the shared logs and (optionally) reports to Collector.
+    Lightweight callback (not SB3 BaseCallback).
+    - Evaluate at step 0, every `eval_every` steps, and at training end.
+    - Keeps per-eval logs and optionally reports to a Collector actor.
+    - Must be driven by FunctionCallback: call on_training_start(model) once per phase,
+      then repeatedly call on_step() inside learn(), and finally on_training_end().
     """
     def __init__(self, *,
                  eval_env,
@@ -92,9 +165,10 @@ class PeriodicEvalCallbackSB3(BaseCallback):
                  eval_name: str,
                  collector: Optional[ActorHandle] = None,
                  seed_id: Optional[int] = None):
-        super().__init__()
+        self.model = None
         self.eval_env = eval_env
         self.eval_every = int(eval_every)
+        assert self.eval_every > 0, "eval_every must be > 0"
         self.n_eval = int(n_eval_episodes)
         self.steps_log = steps_log
         self.greedy_log = greedy_log
@@ -141,16 +215,20 @@ class PeriodicEvalCallbackSB3(BaseCallback):
         self._last_eval_step = step
         self._eval_count += 1
 
-    def _on_training_start(self) -> None:
-        self._do_eval(tag="start")
+    def on_training_start(self, model):
+        self.model = model
+        s = int(self.model.num_timesteps)
+        # If previous phase ended at step s, don't double-log at the start of this phase.
+        if self._last_eval_step != s:
+            self._do_eval(tag="start")
 
-    def _on_step(self) -> bool:
+    def on_step(self) -> bool:
         s = int(self.model.num_timesteps)
         if s > 0 and s % self.eval_every == 0 and self._last_eval_step != s:
             self._do_eval(tag="periodic")
         return True
 
-    def _on_training_end(self) -> None:
+    def on_training_end(self) -> None:
         s = int(self.model.num_timesteps)
         if self._last_eval_step != s:
             self._do_eval(tag="end")
@@ -201,6 +279,14 @@ class SeedTrainer:
         self.mo_target_size = mo.get("target_size", None)      # e.g. (256,256)
         self.mo_bgr_to_rgb = bool(mo.get("bgr_to_rgb", False)) # set True if renderer outputs BGR
 
+    # Resolve env spec from registry (supports nested envs["items"])
+    def _env_spec(self, key: str) -> Dict[str, Any]:
+        if key == "target" and "target" in self.envs:
+            return self.envs["target"]
+        if "items" in self.envs and key in self.envs["items"]:
+            return self.envs["items"][key]
+        return self.envs[key]  # fallback if you ever pass a flat registry
+
     # --- eval helper ---
     def _eval_once(self, model, env, det: bool, seed_base: int) -> float:
         env.reset(seed=seed_base)
@@ -211,10 +297,10 @@ class SeedTrainer:
     def _save_media(self, label: str, eval_name: str, env_key: str, suffix: str, agent) -> Optional[str]:
         if not self.media_on:
             return None
-        env = make_env(self.envs[env_key], seed=self.seed + self.mo_start_seed_base)
+        env = make_env(self._env_spec(env_key), seed=self.seed + self.mo_start_seed_base)
         # subdir: <media_root>/seed_<id>/<label>/
         subdir = os.path.join(self.media_root, f"seed_{self.seed}", label)
-        ensure_dir(subdir)
+        ensure_dir(Path(subdir))
         fmt = self.mo_fmt.lower()
         out_path = os.path.join(subdir, f"{eval_name}{suffix}.{fmt if fmt in ('gif','mp4') else 'gif'}")
         try:
@@ -264,90 +350,104 @@ class SeedTrainer:
     def _run_schedule(self, label: str,
                       phases: List[Dict[str, Any]],
                       evals: List[Dict[str, Any]]) -> Dict[str, Any]:
-        # train env + agent
-        train_env = DummyVecEnv([lambda: make_env(self.envs[phases[0]["env"]], seed=self.seed)])
+        # Build training env & agent on phase-0 env
+        train_env = DummyVecEnv([lambda: make_env(self._env_spec(phases[0]["env"]), seed=self.seed)])
         agent_cls = _import(self.agent_ctor_path)
         agent = agent_cls(env=train_env, seed=self.seed, **self.agent_kwargs)
 
-        # fixed eval envs (for periodic evals inside callback)
-        eval_envs = {e["name"]: make_env(self.envs[e["env"]], seed=12345) for e in evals}
-        steps_log = {nm: [] for nm in eval_envs}
-        greedy_log = {nm: [] for nm in eval_envs}
-        trainp_log = {nm: [] for nm in eval_envs}
+        # Fixed eval envs + storages
+        eval_envs: Dict[str, Any] = {es["name"]: make_env(self._env_spec(es["env"]), seed=12345) for es in evals}
+        steps_log: Dict[str, List[int]] = {nm: [] for nm in eval_envs}
+        greedy_log: Dict[str, List[float]] = {nm: [] for nm in eval_envs}
+        trainp_log: Dict[str, List[float]] = {nm: [] for nm in eval_envs}
+
+        # One callback per eval env
+        per_eval_cbs: List[PeriodicEvalCallback] = []
+        for es in evals:
+            nm = es["name"]
+            per_eval_cbs.append(PeriodicEvalCallback(
+                eval_env=eval_envs[nm],
+                eval_every=self.eval_every,
+                n_eval_episodes=self.n_eval,
+                steps_log=steps_log[nm],
+                greedy_log=greedy_log[nm],
+                train_log=trainp_log[nm],
+                seed_base=int(es.get("seed_base", self.mo_start_seed_base)),
+                label=label,
+                eval_name=nm,
+                collector=self.collector if self.collect_on else None,
+                seed_id=self.seed,
+            ))
 
         boundary_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
+        # --- Start-of-schedule evals at global step 0 (only once) ---
+        for cb in per_eval_cbs:
+            cb.on_training_start(agent)
+
+        # --- Iterate phases; keep global timesteps continuous ---
         for i, ph in enumerate(phases):
-            # build a fresh CallbackList for this phase (so step-0 eval happens per phase)
-            cbs = []
-            for e in evals:
-                nm = e["name"]
-                cb = PeriodicEvalCallbackSB3(
-                    eval_env=eval_envs[nm],
-                    eval_every=self.eval_every,
-                    n_eval_episodes=self.n_eval,
-                    steps_log=steps_log[nm],
-                    greedy_log=greedy_log[nm],
-                    train_log=trainp_log[nm],
-                    seed_base=int(e.get("seed_base", self.mo_start_seed_base)),
-                    label=label,
-                    eval_name=nm,
-                    collector=self.collector if self.collect_on else None,
-                    seed_id=self.seed,
-                )
-                cbs.append(cb)
-            cb_list = CallbackList(cbs)
+            # Periodic evals during learning
+            step_cb = FunctionCallback(lambda model: all(cb.on_step() for cb in per_eval_cbs))
+            if not hasattr(step_cb, "n_episodes"):
+                step_cb.n_episodes = 0
 
-            # single learn call for this phase (NO chunking)
             phase_steps = int(ph["steps"])
-            agent.learn(total_timesteps=phase_steps, reset_num_timesteps=False, callback=cb_list, progress_bar=False)
+            s0 = int(agent.num_timesteps)
+            agent.learn(total_timesteps=phase_steps,
+                        reset_num_timesteps=False,
+                        callback=step_cb,
+                        progress_bar=False)
+            s1 = int(agent.num_timesteps)
+            if s1 - s0 != phase_steps:
+                print(f"[warn] num_timesteps advanced {s1 - s0} (expect {phase_steps}) at phase {i}.")
 
-            # ---- phase boundary evals (ALWAYS) right AFTER this phase ----
+            # End-of-phase evals at the boundary step
+            for cb in per_eval_cbs:
+                cb.on_training_end()
+
+            # Boundary tests immediately AFTER phase i (not sent to W&B)
             bkey = f"phase_{i}"
             boundary_cache.setdefault(bkey, {})
-            for e in evals:
-                name = e["name"]
-                test_env = make_env(self.envs[e["env"]], seed=self.seed + 1000 + i)
-                try:
-                    test_env.reset(seed=self.seed + 1000 + i)
-                    g_mean, _ = evaluate_policy(agent, test_env, self.n_eval, deterministic=True, render=False,
-                                                warn=False)
-                    test_env.reset(seed=self.seed + 1001 + i)
-                    t_mean, _ = evaluate_policy(agent, test_env, self.n_eval, deterministic=False, render=False,
-                                                warn=False)
-                finally:
-                    try:
-                        test_env.close()
-                    except Exception:
-                        pass
+            for es in evals:
+                name = es["name"]
+                test_env = make_env(self._env_spec(es["env"]), seed=self.seed + 1000 + i)
+
+                test_env.reset(seed=self.seed + 1000 + i)
+                g_mean, _ = evaluate_policy(agent, test_env, self.n_eval,
+                                            deterministic=True, render=False, warn=False)
+                test_env.reset(seed=self.seed + 1001 + i)
+                t_mean, _ = evaluate_policy(agent, test_env, self.n_eval,
+                                            deterministic=False, render=False, warn=False)
+                test_env.close()
 
                 boundary_cache[bkey].setdefault(name, {})
                 boundary_cache[bkey][name]["greedy"] = float(g_mean)
                 boundary_cache[bkey][name]["train"] = float(t_mean)
 
-            # boundary media (ALWAYS if media_root is set)
+            # Optional boundary media
             if self.media_on:
                 media_map = self._boundary_media_all(label, evals, agent, phase_idx=i)
                 for nm, path in media_map.items():
                     boundary_cache[bkey][nm]["media_path"] = path
 
-            # switch to next phase env
+            # Switch env for next phase (do NOT call on_training_start again)
             if i < len(phases) - 1:
-                next_env = DummyVecEnv([lambda: make_env(self.envs[phases[i + 1]["env"]], seed=self.seed)])
+                next_env = DummyVecEnv([lambda: make_env(self._env_spec(phases[i + 1]["env"]), seed=self.seed)])
                 agent.set_env(next_env)
 
-        # final media (ALWAYS if media_root is set)
+        # End-of-training media
         media_paths = self._final_media_all(label, evals, agent) if self.media_on else {}
 
-        # pack
-        out = {"steps": steps_log, "boundary": boundary_cache, "media": media_paths}
+        # Pack outputs
+        out: Dict[str, Any] = {"steps": steps_log, "boundary": boundary_cache, "media": media_paths}
         for nm in eval_envs:
             out[nm] = {"greedy": greedy_log[nm], "train": trainp_log[nm]}
+
+        # Close eval envs
         for v in eval_envs.values():
-            try:
-                v.close()
-            except Exception:
-                pass
+            v.close()
+
         return out
 
     def run(self) -> Dict[str, Any]:
@@ -370,6 +470,7 @@ class RayCurriculumTrainer:
                  n_eval_episodes: int,
                  output_dir: Optional[str],
                  *,
+                 wandb_step_base: int = 0,
                  max_concurrency: Optional[int] = None,
                  save_intermediate: bool = True,
                  wandb_actor: Optional[ActorHandle] = None,
@@ -377,8 +478,8 @@ class RayCurriculumTrainer:
         """
         - output_dir governs ALL local writes; None => write nothing locally (including media).
         - wandb_actor governs ALL W&B uploads; None => upload nothing to W&B.
-        - save_intermediate controls whether the Collector keeps the online timeline (dumped only if output_dir exists).
-        - media_opts provides lightweight numeric/format knobs for media recording; if omitted, defaults are used.
+        - save_intermediate controls whether the Collector keeps the online timeline.
+        - wandb_step_base is added to every logged step inside Collector.report.
         """
         self.agent_ctor_path = agent_ctor_path
         self.agent_kwargs = dict(agent_kwargs)
@@ -390,7 +491,8 @@ class RayCurriculumTrainer:
         self.wb = wandb_actor  # may be None
         self.media_opts = dict(media_opts or {})
         if self.outdir is not None:
-            ensure_dir(self.outdir)
+            ensure_dir(Path(self.outdir))
+        self.wandb_step_base = int(wandb_step_base)
 
     def run(self,
             seeds: List[int],
@@ -403,22 +505,27 @@ class RayCurriculumTrainer:
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
 
-        collector = Collector.remote(
-            seeds=list(map(int, seeds)),
+        seeds = list(map(int, seeds))
+
+        # Single shared collector (binds Step->cl/step inside)
+        collector = Collector.options(max_concurrency=1).remote(
+            seeds=seeds,
             keep_intermediate=self.save_intermediate,
             wandb_actor=self.wb,
+            step_base=int(self.wandb_step_base),
+            flush_interval_s=0.2,
+            max_queue=16384,
         )
 
-        seeds = list(map(int, seeds))
+        # Launch actors
         maxc = self.max_conc or min(len(seeds), os.cpu_count() or 1)
         pending = list(seeds)
         in_flight: Dict[Any, int] = {}
         results: List[Dict[str, Any]] = []
 
-        # media_root is simply under output_dir (if any). No extra switches.
         media_root = os.path.join(self.outdir, "media") if self.outdir is not None else None
         if media_root is not None:
-            ensure_dir(media_root)
+            ensure_dir(Path(media_root))
 
         def submit():
             s = pending.pop(0)
@@ -449,7 +556,7 @@ class RayCurriculumTrainer:
                 if pending and len(in_flight) < maxc:
                     submit()
 
-        # optional local dump of Collector timeline (only if output_dir exists)
+        # Optional timeline dump
         if self.outdir is not None and self.save_intermediate:
             try:
                 tl = ray.get(collector.timeline.remote())
@@ -458,10 +565,10 @@ class RayCurriculumTrainer:
             except Exception as e:
                 print(f"[driver] dump timeline failed: {e}")
 
-        # aggregate
+        # Aggregate seeds -> summary
         summary = self._aggregate(results, item_phases_map)
 
-        # local save: per-seed raw + final summary (only if output_dir exists)
+        # Save raw JSONs
         if self.outdir is not None:
             ensure_dir(self.outdir)
             with open(os.path.join(self.outdir, "final_summary.json"), "w") as f:
@@ -473,20 +580,23 @@ class RayCurriculumTrainer:
                 with open(os.path.join(seeds_dir, f"seed_{sid}.json"), "w") as f:
                     json.dump(r, f)
 
-        # W&B: upload ALL media if a WandbWriter is provided (independent of local writes)
+        # Upload videos (independent of the collector)
         if self.wb is not None and media_root is not None:
             to_log = []
 
             def _enqueue(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
-                if not isinstance(media_map, dict): return
+                if not isinstance(media_map, dict):
+                    return
                 for name, path in media_map.items():
                     if path:
                         to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
 
             def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
-                if not isinstance(boundary_map, dict): return
+                if not isinstance(boundary_map, dict):
+                    return
                 for phase_key, per_eval in boundary_map.items():
-                    if not isinstance(per_eval, dict): continue
+                    if not isinstance(per_eval, dict):
+                        continue
                     for eval_name, rec in per_eval.items():
                         p = (rec or {}).get("media_path", None)
                         if p:
@@ -504,11 +614,131 @@ class RayCurriculumTrainer:
 
             fps = int(self.media_opts.get("fps", 8))
             for key, path in to_log:
+                if not (path and os.path.isfile(path)):
+                    print(f"[W&B] skip missing video: {path}")
+                    continue
                 try:
                     fmt = "gif" if str(path).lower().endswith(".gif") else None
                     self.wb.log_video.remote(key, path, fps=fps, fmt=fmt)
                 except Exception as e:
                     print(f"[W&B] schedule video upload failed for {key}: {e}")
+
+        # ===== CSV export + pairwise plots (with step alignment) =====
+        if self.outdir is not None:
+            steps_base = np.asarray(summary["steps"], dtype=int)  # baseline steps
+
+            # compute phase boundaries from baseline phases (cumulative except final)
+            baseline_boundaries: List[int] = []
+            acc = 0
+            for ph in baseline_phases[:-1]:
+                acc += int(ph["steps"])
+                baseline_boundaries.append(acc)
+            boundaries_str = "-".join(str(b) for b in baseline_boundaries) if baseline_boundaries else "none"
+
+            # baseline curves (the only key under summary["baseline"])
+            base_key = next(iter(summary["baseline"].keys()))
+            base = summary["baseline"][base_key]
+            base_g_mean = np.asarray(base["greedy_mean"], dtype=float)
+            base_g_std = np.asarray(base["greedy_std"], dtype=float)
+            base_t_mean = np.asarray(base["train_mean"], dtype=float)
+            base_t_std = np.asarray(base["train_std"], dtype=float)
+
+            def _interp_to(x_old: np.ndarray,
+                           mean: np.ndarray,
+                           std: np.ndarray,
+                           x_new: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+                """Linear interpolation onto a common x-axis."""
+                mean_i = np.interp(x_new, x_old, mean)
+                std_i = np.interp(x_new, x_old, std)
+                return mean_i, std_i
+
+            for lb, dd in summary["items"].items():
+                item_dir = os.path.join(self.outdir, str(lb))
+                ensure_dir(Path(item_dir))
+
+                # --- choose target eval (prefer "Target")
+                if "Target" in dd:
+                    tgt = dd["Target"]
+                else:
+                    first_key = next(iter(dd.keys()))
+                    tgt = dd[first_key]
+
+                # Collect step grids
+                steps_tgt = np.asarray(tgt.get("steps", steps_base), dtype=int)
+                # Build union x-axis; if a source-like eval exists, include its steps as well.
+                src_name = next((k for k in dd.keys() if k.lower().startswith("source")), None)
+                X = np.union1d(steps_base, steps_tgt)
+                if src_name is not None and "steps" in dd[src_name]:
+                    X = np.union1d(X, np.asarray(dd[src_name]["steps"], dtype=int))
+
+                # Interp baseline -> X
+                base_g_mean_i, base_g_std_i = _interp_to(steps_base, base_g_mean, base_g_std, X)
+                base_t_mean_i, base_t_std_i = _interp_to(steps_base, base_t_mean, base_t_std, X)
+
+                # Interp target -> X
+                tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
+                tgt_g_std = np.asarray(tgt["greedy_std"], dtype=float)
+                tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
+                tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
+
+                tgt_g_mean_i, tgt_g_std_i = _interp_to(steps_tgt, tgt_g_mean, tgt_g_std, X)
+                tgt_t_mean_i, tgt_t_std_i = _interp_to(steps_tgt, tgt_t_mean, tgt_t_std, X)
+
+                # Optional: source curve -> X
+                curves_source_i = None
+                if src_name is not None:
+                    src = dd[src_name]
+                    steps_src = np.asarray(src.get("steps", X), dtype=int)
+                    src_g_mean = np.asarray(src["greedy_mean"], dtype=float)
+                    src_g_std = np.asarray(src["greedy_std"], dtype=float)
+                    src_t_mean = np.asarray(src["train_mean"], dtype=float)
+                    src_t_std = np.asarray(src["train_std"], dtype=float)
+                    src_g_mean_i, src_g_std_i = _interp_to(steps_src, src_g_mean, src_g_std, X)
+                    src_t_mean_i, src_t_std_i = _interp_to(steps_src, src_t_mean, src_t_std, X)
+                    curves_source_i = {
+                        "greedy_mean": src_g_mean_i, "greedy_std": src_g_std_i,
+                        "train_mean": src_t_mean_i, "train_std": src_t_std_i,
+                    }
+
+                # Save CSVs on the original baseline/target grids (optional but useful)
+                save_csv(os.path.join(item_dir, f"baseline_target_phase_{boundaries_str}.csv"),
+                         steps_base, base_g_mean, base_g_std, header="greedy")
+                save_csv(os.path.join(item_dir, f"baseline_target_train_phase_{boundaries_str}.csv"),
+                         steps_base, base_t_mean, base_t_std, header="train")
+                save_csv(os.path.join(item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
+                         steps_tgt, tgt_g_mean, tgt_g_std, header="greedy")
+                save_csv(os.path.join(item_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
+                         steps_tgt, tgt_t_mean, tgt_t_std, header="train")
+                if src_name is not None:
+                    save_csv(os.path.join(item_dir, f"curriculum_eval_source_phase_{boundaries_str}.csv"),
+                             steps_src, src_g_mean, src_g_std, header="greedy")
+                    save_csv(os.path.join(item_dir, f"curriculum_eval_source_train_phase_{boundaries_str}.csv"),
+                             steps_src, src_t_mean, src_t_std, header="train")
+
+                # --- Pairwise plot on the aligned grid X ---
+                png_path = os.path.join(item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
+                plot_pairwise(
+                    out_png_path=png_path,
+                    checkpoints=X,
+                    phase_boundaries=baseline_boundaries,
+                    title_prefix=f"Pairwise for '{lb}'",
+                    baseline={
+                        "greedy_mean": base_g_mean_i, "greedy_std": base_g_std_i,
+                        "train_mean": base_t_mean_i, "train_std": base_t_std_i,
+                    },
+                    curves_target={
+                        "greedy_mean": tgt_g_mean_i, "greedy_std": tgt_g_std_i,
+                        "train_mean": tgt_t_mean_i, "train_std": tgt_t_std_i,
+                    },
+                    curves_source=curves_source_i,
+                )
+
+                if self.wb is not None:
+                    self.wb.log_image.remote(
+                        key=f"images/pairwise_{lb}_phase_{boundaries_str}",
+                        path=png_path,
+                        caption=f"pairwise {lb} (boundaries: {boundaries_str})"
+                    )
 
         return summary
 
@@ -575,19 +805,17 @@ def run_curriculum(
     agent_kwargs: Dict[str, Any],
     eval_every: int,
     n_eval_episodes: int,
-    output_dir: Optional[str],
+    output_dir: Optional[str] = None,            # give default or place before wandb_step_base
     max_concurrency: Optional[int] = None,
     save_intermediate: bool = True,
     wandb_actor: Optional[ActorHandle] = None,
     media_opts: Optional[Dict[str, Any]] = None,
+    wandb_step_base: int = 0,                    # put this at the end
 ) -> Dict[str, Any]:
     """
     - Pure dicts for phases/evals/envs.
     - Local writes happen iff output_dir is not None.
     - W&B uploads happen iff you pass a WandbWriter actor (independent of local writes).
-    - Example WandbWriter creation:
-        wb = WandbWriter.remote({'project': 'my-proj', 'name': 'exp-1', 'config': {...}})
-      Then pass wandb_actor=wb.
     """
     trainer = RayCurriculumTrainer(
         agent_ctor_path=agent_ctor_path,
@@ -599,6 +827,7 @@ def run_curriculum(
         save_intermediate=save_intermediate,
         wandb_actor=wandb_actor,
         media_opts=media_opts,
+        wandb_step_base=wandb_step_base,         # <<< IMPORTANT: forward the base here
     )
     return trainer.run(
         seeds=seeds,

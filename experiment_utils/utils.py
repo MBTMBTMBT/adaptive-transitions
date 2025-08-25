@@ -5,11 +5,16 @@ import datetime
 import importlib
 import json
 from pathlib import Path
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Union
 
 
-def ensure_dir(p: Path):
-    p.mkdir(parents=True, exist_ok=True)
+def ensure_dir(p: Union[str, Path]) -> Path:
+    """
+    Accept str or pathlib.Path; always return a pathlib.Path.
+    """
+    path = Path(p)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def str2bool(v: str) -> bool:
