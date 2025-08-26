@@ -486,7 +486,7 @@ def main():
                 "perf_theta": args.ga_perf_theta,
                 "perf_max_iterations": args.ga_perf_max_iters,
             }
-            score = {"fns": [{"name": "obj_multi_perf", "params": {"blend_weight": args.ga_blend_weight}}]}
+            score = ("obj_multi_perf", {"blend_weight": args.ga_blend_weight})
 
             workers = _auto_workers(args.ga_workers)
 

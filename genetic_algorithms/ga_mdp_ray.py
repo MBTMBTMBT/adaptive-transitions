@@ -3,476 +3,41 @@
 # - No GAConfig dataclass; top-level GA params + grouped dicts.
 # - Stable seeding (deterministic w.r.t. master seed & tags), independent of concurrency.
 # - One GAWorker actor type (mutate + score); driver orchestrates selection/offspring/eval.
-# - Score interface unified: fn(mdp, shared, **params) -> Sequence[float]
-# - Optional saving and W&B are controlled externally by the caller.
+# - Score interface: fn(mdp, shared, **params) -> Sequence[float]
+# - W&B and saving are controlled by the caller.
 
 from __future__ import annotations
 
 import hashlib
-import math
-import os
 import sys
 import time
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
-import networkx as nx
 import ray
-
-import wandb
 from ray.actor import ActorHandle
 
 from experiment_utils.utils import ensure_dir
+from genetic_algorithms.mdp_ops import EdgeTriple, _list_all_triples, _prune_low_prob_transitions, _mutation_add_edge, \
+    _mutation_prob_pairwise, _mutation_reward_smallstep, _crossover_action_block
+from genetic_algorithms.score_fns import _normalize_score_spec, SCORE_FNS
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
     q_table_to_policy,
-    PolicyTable,
-    ValueTable,
-    create_random_policy,
-    blend_policies,
 )
-from mdp_network.metrics import kl_policies, performance_curve_and_integral
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 
 
 def _derive_seed(master_seed: int, *tags: Any) -> int:
-    """
-    Deterministic 64-bit seed derived from (master_seed, tags*).
-    Independent of task ordering/concurrency.
-    """
+    """Deterministic 64-bit seed derived from (master_seed, tags*)."""
     h = hashlib.sha256()
     h.update(str(int(master_seed)).encode())
     for t in tags:
         h.update(b"::")
         h.update(str(t).encode())
     return int.from_bytes(h.digest()[:8], "little", signed=False)
-
-
-ScoreFn = Callable[[MDPNetwork, Dict[str, Any]], Sequence[float]]  # but we add **params via wrapper
-
-_SCORE_REGISTRY: Dict[str, Callable[[MDPNetwork, Dict[str, Any], Dict[str, Any]], Sequence[float]]] = {}
-
-
-def register_score_fn(name: str, fn: Callable[[MDPNetwork, Dict[str, Any], Any], Sequence[float]]) -> None:
-    """
-    Register a score function with unified signature:
-        fn(mdp, shared, **params) -> Sequence[float]
-    - shared: {"precomputed": [portable...], "solver": {...}, ...}
-    - params: per-function params from score spec
-    """
-    _S = str(name)
-    if _S in _SCORE_REGISTRY:
-        raise ValueError(f"Score function '{_S}' already registered.")
-    # Wrap to ensure **params dict passing
-    def _wrapped(mdp: MDPNetwork, shared: Dict[str, Any], params: Dict[str, Any]) -> Sequence[float]:
-        return fn(mdp, shared, **(params or {}))
-    _SCORE_REGISTRY[_S] = _wrapped
-
-
-def get_score_fn(name: str):
-    if name not in _SCORE_REGISTRY:
-        raise KeyError(f"Score function '{name}' is not registered.")
-    return _SCORE_REGISTRY[name]
-
-
-# =========================================================
-# Graph helpers & mutation ops (dict-based config)
-# =========================================================
-
-State = int
-Action = int
-EdgeTriple = Tuple[State, Action, State]
-
-
-def _directed_prob_distance(
-    mdp: MDPNetwork,
-    s: int,
-    sp: int,
-    *,
-    max_hops: Optional[int],
-    node_cap: Optional[int],
-    weight_eps: float,
-    unreachable: float,
-) -> float:
-    """Dijkstra on directed graph with edge weight w(u->v)=max(weight_eps, 2 - max_a P(v|u,a))."""
-    if s == sp:
-        return 0.0
-    G = mdp.graph
-
-    # Reachable scope
-    if max_hops is not None:
-        hop_dist = nx.single_source_shortest_path_length(G, source=s, cutoff=max_hops)
-        allowed = set(hop_dist.keys())
-    else:
-        allowed = {s}
-        q = [s]
-        while q and (node_cap is None or len(allowed) < node_cap):
-            u = q.pop(0)
-            for v in G.successors(u):
-                if v not in allowed:
-                    allowed.add(v)
-                    q.append(v)
-
-    if node_cap is not None and len(allowed) > node_cap:
-        if "hop_dist" in locals():
-            kept = sorted(allowed, key=lambda x: hop_dist.get(x, 10**9))[:node_cap]
-            allowed = set(kept)
-        else:
-            allowed = set(list(allowed)[:node_cap])
-
-    if sp not in allowed:
-        return float(unreachable)
-
-    import heapq
-    INF = float("inf")
-    dist: Dict[int, float] = {s: 0.0}
-    heap: List[Tuple[float, int]] = [(0.0, s)]
-    while heap:
-        du, u = heapq.heappop(heap)
-        if du > dist.get(u, INF):
-            continue
-        if u == sp:
-            return float(du)
-        for v in G.successors(u):
-            if v not in allowed:
-                continue
-            edata = G[u][v]
-            if "transitions" not in edata or not edata["transitions"]:
-                continue
-            pmax = 0.0
-            for _a, ar in edata["transitions"].items():
-                pmax = max(pmax, float(ar["p"]))
-            w = max(weight_eps, 2.0 - pmax)
-            nd = du + w
-            if nd < dist.get(v, INF):
-                dist[v] = nd
-                heapq.heappush(heap, (nd, v))
-    return float(unreachable)
-
-
-def _get_outgoing_for_action(mdp: MDPNetwork, s: int, a: int) -> Dict[int, Tuple[float, float]]:
-    out: Dict[int, Tuple[float, float]] = {}
-    for sp in mdp.graph.successors(s):
-        edata = mdp.graph[s][sp]
-        if "transitions" in edata and a in edata["transitions"]:
-            p = float(edata["transitions"][a]["p"])
-            r = float(edata["transitions"][a]["r"])
-            out[int(sp)] = (p, r)
-    return out
-
-
-def _set_outgoing_for_action(
-    mdp: MDPNetwork,
-    s: int,
-    a: int,
-    new_map: Dict[int, Tuple[float, float]],
-    *,
-    whitelist: Optional[Set[EdgeTriple]] = None,
-    prob_floor: float = 1e-6,
-):
-    # Collect currently existing (s,a,*) to preserve protected ones
-    existing = _get_outgoing_for_action(mdp, s, a)
-    final_map = dict(new_map)
-
-    if whitelist:
-        for sp, (p_cur, r_cur) in existing.items():
-            if (s, a, sp) in whitelist and sp not in final_map:
-                final_map[sp] = (max(prob_floor, float(p_cur)), float(r_cur))
-
-    # Drop all (s,a,*) and rebuild from final_map
-    for sp in list(mdp.graph.successors(s)):
-        edata = mdp.graph[s][sp]
-        if "transitions" in edata and a in edata["transitions"]:
-            del edata["transitions"][a]
-            if not edata["transitions"]:
-                mdp.graph.remove_edge(s, sp)
-
-    for sp, (p, r) in final_map.items():
-        mdp.add_transition(s, int(sp), a, probability=float(p), reward=float(r))
-
-    mdp.renormalize_action(s, a)
-
-def _list_all_action_pairs(mdp: MDPNetwork) -> List[Tuple[int, int]]:
-    pairs: List[Tuple[int, int]] = []
-    for s in mdp.states:
-        if s in mdp.terminal_states:
-            continue
-        for a in range(mdp.num_actions):
-            pairs.append((int(s), int(a)))
-    return pairs
-
-
-def _list_all_triples(mdp: MDPNetwork) -> List[EdgeTriple]:
-    triples: List[EdgeTriple] = []
-    for s in mdp.states:
-        for sp in mdp.graph.successors(s):
-            edata = mdp.graph[s][sp]
-            if "transitions" not in edata:
-                continue
-            for a in edata["transitions"].keys():
-                triples.append((int(s), int(a), int(sp)))
-    return triples
-
-
-def _allowed_nodes_within_scope(base_ref: MDPNetwork, s: int, distance_cfg: Dict[str, Any]) -> Set[int]:
-    if distance_cfg.get("max_hops") is None:
-        return set(base_ref.states)
-    hop_dist = nx.single_source_shortest_path_length(base_ref.graph, source=s, cutoff=int(distance_cfg["max_hops"]))
-    allowed = set(hop_dist.keys())
-    node_cap = distance_cfg.get("node_cap", None)
-    if node_cap is not None and len(allowed) > int(node_cap):
-        kept = sorted(allowed, key=lambda x: hop_dist.get(x, 10**9))[: int(node_cap)]
-        allowed = set(kept)
-    return allowed
-
-
-def _prune_low_prob_transitions(
-    mdp: MDPNetwork,
-    threshold: float,
-    *,
-    whitelist: Optional[Set[EdgeTriple]] = None,
-    prob_floor: float = 1e-6,
-):
-    """
-    Remove (s,a,sp) with p < threshold, EXCEPT those in whitelist.
-    Whitelisted edges are kept as-is (we do NOT bump to threshold; only clamp by prob_floor on re-write paths).
-    """
-    thr = float(threshold)
-    for s in mdp.states:
-        if s in mdp.terminal_states:
-            continue
-        for a in range(mdp.num_actions):
-            out_map = _get_outgoing_for_action(mdp, s, a)
-            if not out_map:
-                continue
-            kept: Dict[int, Tuple[float, float]] = {}
-            for sp, (p, r) in out_map.items():
-                if p >= thr or (whitelist and (s, a, sp) in whitelist):
-                    kept[sp] = (p, r)
-            # Use protected setter so that any present whitelisted edges are preserved even if missing in `kept`
-            _set_outgoing_for_action(
-                mdp, s, a, kept,
-                whitelist=whitelist,
-                prob_floor=prob_floor,
-            )
-
-
-def _mutation_add_edge(
-    mdp: MDPNetwork,
-    rng: np.random.Generator,
-    base_ref: MDPNetwork,
-    ops: Dict[str, Any],
-    distance_cfg: Dict[str, Any],
-    *,
-    whitelist: Optional[Set[EdgeTriple]] = None,
-):
-    # ---- Read operator knobs (with defaults) ----
-    max_out_degree = int(ops.get("max_out_degree", 8))
-    allow_self_loops = bool(ops.get("allow_self_loops", True))
-    add_edge_allow_out_of_scope = bool(ops.get("add_edge_allow_out_of_scope", True))
-    epsilon_new_prob = float(ops.get("epsilon_new_prob", 0.02))
-    gamma_sample = float(ops.get("gamma_sample", 1.0))
-    gamma_prob = float(ops.get("gamma_prob", 0.0))
-    prob_floor = float(ops.get("prob_floor", 1e-6))
-
-    # ---- Pick a (s, a) that still has room to add a successor ----
-    candidates_sa = [
-        (s, a)
-        for (s, a) in _list_all_action_pairs(mdp)
-        if sum(1 for _sp in _get_outgoing_for_action(mdp, s, a)) < max_out_degree
-    ]
-    if not candidates_sa:
-        return  # nothing to do
-
-    s, a = candidates_sa[rng.integers(0, len(candidates_sa))]
-    existing_succ = set(_get_outgoing_for_action(mdp, s, a).keys())
-
-    # ---- Build sp candidate list ----
-    sp_candidates = [
-        sp for sp in mdp.states
-        if (allow_self_loops or sp != s) and (sp not in existing_succ)
-    ]
-    if not sp_candidates:
-        return
-
-    # Restrict to allowed scope if requested (based on base_ref's topology)
-    if not add_edge_allow_out_of_scope:
-        allowed = _allowed_nodes_within_scope(base_ref, s, distance_cfg)
-        sp_candidates = [sp for sp in sp_candidates if sp in allowed]
-        if not sp_candidates:
-            return
-
-    # ---- Per-call distance cache to avoid repeated shortest-path solves ----
-    dist_cache: Dict[int, float] = {}
-
-    def dist_cached(src: int, dst: int) -> float:
-        """
-        Memoized directed distance on base_ref with edge weight:
-            w(u->v) = max(weight_eps, 2 - max_a P(v | u, a)).
-        Distances are computed from 'src' to individual 'dst' states.
-        """
-        if dst in dist_cache:
-            return dist_cache[dst]
-        d = _directed_prob_distance(
-            base_ref, src, dst,
-            max_hops=distance_cfg.get("max_hops", None),
-            node_cap=distance_cfg.get("node_cap", None),
-            weight_eps=float(distance_cfg.get("weight_eps", 1e-9)),
-            unreachable=float(distance_cfg.get("unreachable", 1e6)),
-        )
-        dist_cache[dst] = d
-        return d
-
-    # ---- Compute sampling weights over sp candidates ----
-    if gamma_sample <= 0.0:
-        # Uniform weights if no sampling bias
-        weights = np.full(len(sp_candidates), 1.0 / float(len(sp_candidates)), dtype=float)
-    else:
-        # Softmax over negative distances (closer nodes get larger weights)
-        raw = np.asarray(
-            [math.exp(-gamma_sample * dist_cached(s, sp)) for sp in sp_candidates],
-            dtype=float
-        )
-        total = float(raw.sum())
-        if total <= 0.0 or not np.isfinite(total):
-            return  # degenerate; skip this mutation
-        weights = raw / total
-
-    # ---- Sample a new successor sp_new ----
-    sp_new = int(rng.choice(sp_candidates, p=weights))
-
-    # Distance for probability shaping (cached if already computed above)
-    d_new = dist_cached(s, sp_new)
-
-    # ---- Convert epsilon mass into the new branch probability ----
-    if gamma_prob <= 0.0:
-        p_new = epsilon_new_prob
-    else:
-        # Distance-aware shrink: closer destinations get probability closer to epsilon_new_prob
-        p_new = min(epsilon_new_prob, epsilon_new_prob * math.exp(-gamma_prob * d_new))
-
-    # ---- Heuristic reward for the new edge: inbound-mean fallback ----
-    def inbound_reward_mean(sp: int, fallback: float) -> float:
-        vals: List[float] = []
-        for ss in mdp.graph.predecessors(sp):
-            edata = mdp.graph[ss][sp]
-            if "transitions" not in edata:
-                continue
-            for _a, ar in edata["transitions"].items():
-                vals.append(float(ar["r"]))
-        return float(np.mean(vals)) if vals else float(fallback)
-
-    r_new = inbound_reward_mean(sp_new, fallback=mdp.default_reward)
-
-    # ---- Rebuild the (s, a) outgoing map with multiplicative shrink + new branch ----
-    out_map = _get_outgoing_for_action(mdp, s, a)
-
-    # Shrink all existing probabilities to free mass for the new branch
-    if out_map:
-        for k in list(out_map.keys()):
-            p_k, r_k = out_map[k]
-            out_map[k] = (max(prob_floor, p_k * (1.0 - p_new)), r_k)
-
-    # Add the new branch
-    out_map[sp_new] = (max(prob_floor, p_new), r_new)
-
-    # Use the protected setter to preserve whitelisted edges and clamp by prob_floor.
-    _set_outgoing_for_action(
-        mdp, s, a, out_map,
-        whitelist=whitelist,
-        prob_floor=prob_floor,
-    )
-
-
-def _mutation_prob_pairwise(
-    mdp: MDPNetwork,
-    rng: np.random.Generator,
-    ops: Dict[str, Any],
-    *,
-    whitelist: Optional[Set[EdgeTriple]] = None,
-):
-    k_actions = int(ops.get("prob_tweak_actions_per_child", 20))
-    step = float(ops.get("prob_pairwise_step", 0.02))
-    prob_floor = float(ops.get("prob_floor", 1e-6))
-    pairs_sa = _list_all_action_pairs(mdp)
-    if not pairs_sa:
-        return
-    for _ in range(k_actions):
-        s, a = pairs_sa[rng.integers(0, len(pairs_sa))]
-        out_map = _get_outgoing_for_action(mdp, s, a)
-        if len(out_map) < 2:
-            continue
-        succs = list(out_map.keys())
-        i, j = rng.choice(len(succs), size=2, replace=False)
-        sp_i, sp_j = int(succs[i]), int(succs[j])
-        p_i, r_i = out_map[sp_i]
-        p_j, r_j = out_map[sp_j]
-        delta_max = min(step, max(0.0, p_j - prob_floor))
-        if delta_max <= 0:
-            continue
-        delta = rng.uniform(0.0, delta_max)
-        out_map[sp_i] = (p_i + delta, r_i)
-        out_map[sp_j] = (p_j - delta, r_j)
-
-        # Renormalize by setter (we clamp by prob_floor when rebuilding)
-        _set_outgoing_for_action(
-            mdp, s, a, out_map,
-            whitelist=whitelist,
-            prob_floor=prob_floor,
-        )
-
-
-def _mutation_reward_smallstep(mdp: MDPNetwork, rng: np.random.Generator, ops: Dict[str, Any]):
-    n_edges = int(ops.get("reward_tweak_edges_per_child", 50))
-    k_percent = float(ops.get("reward_k_percent", 0.02))
-    ref_floor = float(ops.get("reward_ref_floor", 1e-3))
-    rmin = ops.get("reward_min", None)
-    rmax = ops.get("reward_max", None)
-    triples = _list_all_triples(mdp)
-    if not triples:
-        return
-    for _ in range(n_edges):
-        s, a, sp = triples[rng.integers(0, len(triples))]
-        r_cur = mdp.get_transition_reward(s, a, sp)
-        delta_max = k_percent * max(abs(r_cur), ref_floor)
-        delta = rng.uniform(-delta_max, +delta_max)
-        r_new = r_cur + delta
-        if rmin is not None:
-            r_new = max(float(rmin), r_new)
-        if rmax is not None:
-            r_new = min(float(rmax), r_new)
-        mdp.update_transition_reward(s, a, sp, float(r_new))
-
-
-def _crossover_action_block(
-    pa: MDPNetwork,
-    pb: MDPNetwork,
-    rng: np.random.Generator,
-    *,
-    whitelist: Optional[Set[EdgeTriple]] = None,
-    prob_floor: float = 1e-6,
-) -> MDPNetwork:
-    """
-    For each (s,a) copy the entire outgoing map from either parent,
-    but do NOT drop any (s,a,sp) that is already present in the child and is whitelisted.
-    """
-    child = pa.clone()
-    for s in child.states:
-        if s in child.terminal_states:
-            continue
-        for a in range(child.num_actions):
-            src = pa if (rng.random() < 0.5) else pb
-            src_map = _get_outgoing_for_action(src, s, a)
-            if not src_map:
-                continue
-            _set_outgoing_for_action(
-                child, s, a, src_map,
-                whitelist=whitelist,
-                prob_floor=prob_floor,
-            )
-    return child
 
 
 # =========================================================
@@ -618,20 +183,12 @@ class GAWorker:
 
         return ind.to_portable()
 
-    def score_batch(self, portables: List[Dict[str, Any]], score_spec: Dict[str, Any]) -> List[List[float]]:
+    def score_batch(self, portables: List[Dict[str, Any]], score_spec: Any) -> List[List[float]]:
         """
-        Evaluate a batch of portable MDPs with the unified score spec:
-          score_spec = {"fns": [{"name": str, "params": dict}, ...]}
-        Returns: list of objective vectors (concatenated across fns).
+        Evaluate a batch of MDPs.
+        Concatenate outputs in the given order.
         """
-        # Compile score functions once
-        fns_spec = (score_spec or {}).get("fns") or [{"name": "obj_multi_perf", "params": {}}]
-        compiled = []
-        for spec in fns_spec:
-            name = spec.get("name")
-            params = dict(spec.get("params") or {})
-            fn = get_score_fn(name)  # uses the registry defined in this module
-            compiled.append((fn, params))
+        fns_spec = _normalize_score_spec(score_spec)
 
         shared = {
             "solver": self.solver,
@@ -642,8 +199,9 @@ class GAWorker:
         for p in portables:
             mdp = MDPNetwork.from_portable(p)
             obj: List[float] = []
-            for fn, params in compiled:
-                vals = fn(mdp, shared, params)  # wrapper returns Sequence[float]
+            for name, params in fns_spec:
+                fn = SCORE_FNS[name]
+                vals = fn(mdp, shared, **params)
                 obj.extend([float(x) for x in vals])
             results.append(obj)
         return results
@@ -684,18 +242,24 @@ def run_ga(
     ops: Optional[Dict[str, Any]] = None,
     distance: Optional[Dict[str, Any]] = None,
     solver: Optional[Dict[str, Any]] = None,
-    score: Optional[Dict[str, Any]] = None,
+    score: Any = None,  # <-- changed: accept simplified shapes
 ) -> Tuple[List[MDPNetwork], List[List[float]], List[MDPNetwork], List[List[float]]]:
     """
     Genetic Algorithm driver.
-    Key W&B logging policy:
+    W&B policy:
       - Bind all "ga/*" series to x-axis "ga/gen".
-      - Do NOT pass an explicit `step` to wandb; include "ga/gen" in the payload.
+      - Do NOT pass an explicit `step`; include "ga/gen" in the payload.
+
+    score accepts:
+      - None -> defaults to "obj_multi_perf"
+      - "name"
+      - ("name", {params})
+      - ["name", ("name", {params}), ...]
     """
     ops = dict(ops or {})
     distance = dict(distance or {})
     solver = dict(solver or {})
-    score = dict(score or {"fns": [{"name": "obj_multi_perf", "params": {}}]})
+    score = score or "obj_multi_perf"  # <-- changed: default in the new format
 
     # logger setup
     logger = logging.getLogger("ga")
@@ -712,8 +276,6 @@ def run_ga(
     # --- W&B axis binding for GA (MOST-SPECIFIC RULE) ---
     if wandb_writer is not None:
         try:
-            # All "ga/*" metrics use the custom x-axis "ga/gen".
-            # This specific rule overrides any generic "*" step rules applied elsewhere.
             wandb_writer.define_metric.remote("ga/*", step_metric="ga/gen")
         except Exception:
             pass
@@ -741,8 +303,6 @@ def run_ga(
     t1 = time.perf_counter()
 
     if wandb_writer is not None:
-        # Log a "precompute" row at a special generation value (-1).
-        # No explicit `step` argument; the chart x-axis is "ga/gen".
         try:
             wandb_writer.log.remote({"ga/time/precompute_sec": float(t1 - t0), "ga/gen": -1})
         except Exception:
@@ -777,7 +337,7 @@ def run_ga(
 
     # ===== Evaluate population =====
     def _score_portables(portables: List[Dict[str, Any]]) -> List[List[float]]:
-        """Parallel scoring helper (keeps order)."""
+        """Parallel scoring helper (preserves order)."""
         W = len(pool)
         if W == 0:
             return []
@@ -814,7 +374,6 @@ def run_ga(
         ) or "NA",
     )
     if wandb_writer is not None:
-        # Generation 0 snapshot (no explicit `step`)
         payload = {"ga/init/pop_size": int(len(pop)), "ga/gen": 0}
         M = len(objs[0]) if objs else 0
         for m in range(M):
@@ -945,7 +504,7 @@ def run_ga(
                 payload[f"ga/pop/obj{m}_mean"] = gen_stats.get(f"mean_{m}", float("nan"))
                 payload[f"ga/pop/obj{m}_max"]  = gen_stats.get(f"max_{m}", float("nan"))
             try:
-                wandb_writer.log.remote(payload)  # no explicit step
+                wandb_writer.log.remote(payload)
             except Exception:
                 pass
 
@@ -965,7 +524,6 @@ def run_ga(
             m.export_to_json(str(p))
             logger.info("[GA] Saved PF[%d] -> %s", i, p.name)
 
-    # final W&B row
     if wandb_writer is not None:
         payload = {"ga/final/F1_size": int(len(F1)), "ga/gen": int(generations)}
         M = len(objs[0]) if objs else 0
@@ -975,109 +533,8 @@ def run_ga(
             payload[f"ga/final/obj{m}_mean"] = fstats.get(f"mean_{m}", float("nan"))
             payload[f"ga/final/obj{m}_max"]  = fstats.get(f"max_{m}", float("nan"))
         try:
-            wandb_writer.log.remote(payload)  # no explicit step
+            wandb_writer.log.remote(payload)
         except Exception:
             pass
 
     return pareto_mdps, pareto_objs, pop, objs
-
-
-# =========================================================
-# Example score functions (new unified signature)
-# =========================================================
-
-def obj_multi_kl_and_perf(mdp: MDPNetwork, shared: Dict[str, Any], *,
-                          kl_delta: float = 1e-3) -> Sequence[float]:
-    """
-    Returns [ -KL(baseline || current), performance_integral ].
-    Uses shared['solver'] defaults and shared['precomputed'] = [base_policy, base_occupancy].
-    """
-    solver = shared.get("solver", {})
-    gamma = float(solver.get("vi_gamma", 0.99))
-    theta = float(solver.get("vi_theta", 1e-6))
-    max_iter = int(solver.get("vi_max_iterations", 1000))
-    temperature = float(solver.get("policy_temperature", 1.0))
-    mixing = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
-    tie_tol = float(solver.get("policy_tie_tol", 1e-6))
-
-    pgamma = float(solver.get("perf_gamma", gamma))
-    ptheta = float(solver.get("perf_theta", theta))
-    pmax_iter = int(solver.get("perf_max_iterations", max_iter))
-    numpoints = int(solver.get("perf_numpoints", 100))
-
-    pre = shared.get("precomputed", None) or []
-    base_policy = PolicyTable.from_portable(pre[0]) if len(pre) >= 1 else None
-    base_occupancy = ValueTable.from_portable(pre[1]) if len(pre) >= 2 else None
-
-    _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
-    policy2: PolicyTable = q_table_to_policy(
-        Q2, states=list(mdp.states), num_actions=mdp.num_actions,
-        mixing=mixing, temperature=temperature, tie_tol=tie_tol,
-    )
-    occupancy2: ValueTable = compute_occupancy_measure(mdp, policy=policy2, gamma=gamma, theta=theta, max_iterations=max_iter)
-
-    if base_policy is not None and base_occupancy is not None:
-        kl = kl_policies(policy1=base_policy, occupancy1=base_occupancy,
-                         policy2=policy2, occupancy2=occupancy2, delta=float(kl_delta))
-        obj1 = -float(kl)
-    else:
-        obj1 = 0.0
-
-    prior = create_random_policy(mdp)
-    _curve, integral = performance_curve_and_integral(
-        prior_policy=prior, target_policy=policy2, mdp_network=mdp,
-        numpoints=numpoints, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
-    )
-    return [obj1, float(integral)]
-
-
-def obj_multi_perf(mdp: MDPNetwork, shared: Dict[str, Any], *,
-                   blend_weight: float = 0.8) -> Sequence[float]:
-    """
-    Returns two integrals:
-      1) integral( prior = blend(policy2, random, w), target = baseline_policy )
-      2) integral( prior = random, target = policy2 )
-    """
-    solver = shared.get("solver", {})
-    gamma = float(solver.get("vi_gamma", 0.99))
-    theta = float(solver.get("vi_theta", 1e-6))
-    max_iter = int(solver.get("vi_max_iterations", 1000))
-    temperature = float(solver.get("policy_temperature", 1.0))
-    mixing = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
-    tie_tol = float(solver.get("policy_tie_tol", 1e-6))
-
-    pgamma = float(solver.get("perf_gamma", gamma))
-    ptheta = float(solver.get("perf_theta", theta))
-    pmax_iter = int(solver.get("perf_max_iterations", max_iter))
-    numpoints = int(solver.get("perf_numpoints", 100))
-
-    pre = shared.get("precomputed", None) or []
-    base_policy = PolicyTable.from_portable(pre[0]) if len(pre) >= 1 else None
-
-    _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
-    policy2: PolicyTable = q_table_to_policy(
-        Q2, states=list(mdp.states), num_actions=mdp.num_actions,
-        mixing=mixing, temperature=temperature, tie_tol=tie_tol,
-    )
-
-    prior_rand = create_random_policy(mdp)
-    blended = blend_policies(policy2, prior_rand, weight=float(blend_weight))
-
-    if base_policy is not None:
-        _curve, integral1 = performance_curve_and_integral(
-            prior_policy=blended, target_policy=base_policy, mdp_network=mdp,
-            numpoints=numpoints, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
-        )
-    else:
-        integral1 = 0.0
-
-    _curve, integral2 = performance_curve_and_integral(
-        prior_policy=prior_rand, target_policy=policy2, mdp_network=mdp,
-        numpoints=numpoints, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
-    )
-    return [float(integral1), float(integral2)]
-
-
-# Default registrations
-register_score_fn("obj_multi_kl_and_perf", obj_multi_kl_and_perf)
-register_score_fn("obj_multi_perf", obj_multi_perf)
