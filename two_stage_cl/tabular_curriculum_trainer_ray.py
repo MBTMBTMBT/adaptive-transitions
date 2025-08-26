@@ -25,12 +25,12 @@ from two_stage_cl.utils import plot_pairwise, save_csv
 @ray.remote
 class Collector:
     """
-    Strictly-ordered aggregator for online evaluations.
-    Logging policy:
-      - Define metric so that the chart x-axis for "online/*" is "cl/step".
-      - Do NOT pass `step=` to W&B; include "cl/step" in the payload.
-      - Per-(label, eval_name, step) we aggregate across seeds to mean/std.
-      - If an out-of-order (non-monotonic) step arrives, we DROP it.
+    Per-series step binding for online evaluations.
+    - For each series (label, eval_name) we call:
+        define_metric("online/{label}/{eval_name}/*", step_metric="online/{label}/{eval_name}/series_step")
+      so each curve has its own x-axis field.
+    - We do NOT log a global 'cl/step' anymore, avoiding cross-series resets.
+    - If a series receives a non-monotonic step (after step_base), we drop it.
     """
     def __init__(self,
                  seeds: List[int],
@@ -44,28 +44,26 @@ class Collector:
         self._wb = wandb_actor
         self._step_base = int(step_base)
 
-        # Optional per-seed raw timeline (for local debugging)
+        # optional raw timeline for debugging
         self._timeline: Dict[int, List[Dict[str, Any]]] = {s: [] for s in self.seeds}
 
-        # In-flight buckets: (label, eval, step) -> {seed: (greedy, train)}
+        # in-flight buckets: (label, eval, step) -> {seed: (greedy, train)}
         self._bucket: Dict[Tuple[str, str, int], Dict[int, Tuple[float, float]]] = {}
 
-        # NEW: last accepted cl/step per (label, eval_name), AFTER adding step_base
-        # This is used to enforce strictly increasing step sequence per series.
+        # last accepted step (after base) per series to enforce monotonicity
         self._last_step: Dict[Tuple[str, str], int] = {}
 
-        # Async queue decouples producers and aggregator
+        # which series we have already bound with define_metric
+        self._defined_series: set[Tuple[str, str]] = set()
+
+        # async queue
         self._q: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=int(max_queue))
         self._flush_interval_s = float(flush_interval_s)
 
-        # ---- Bind axis: "online/*" uses cl/step as its x-axis ----
-        if self._wb is not None:
-            try:
-                self._wb.define_metric.remote("online/*", step_metric="cl/step")
-            except Exception:
-                pass
+        # NOTE: intentionally NO global define_metric("online/*", step_metric=...)
+        # We bind step per-series on first emit.
 
-        # Start background consumer
+        # start background consumer
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -74,10 +72,9 @@ class Collector:
 
     async def _drain_loop(self) -> None:
         """
-        Consume queue, fill per-(label, eval, step) buckets, and emit to W&B
-        once all seeds are present. The x-axis is "cl/step"; we do NOT use `step=`.
-        We also drop any bucket whose computed cl/step is not strictly larger
-        than the last accepted cl/step for the same (label, eval) series.
+        Consume queue, aggregate across seeds, and emit a row when a bucket is complete.
+        Each series has its own step field 'online/{label}/{eval}/series_step'.
+        Non-monotonic steps for a series are dropped.
         """
         last_yield = time.time()
         while True:
@@ -91,42 +88,46 @@ class Collector:
 
             if len(bucket) == len(self.seeds) and self._wb is not None:
                 label, eval_name, real_step = key
-                out_step = int(real_step + self._step_base)  # the cl/step we will log
+                out_step = int(real_step + self._step_base)
                 series_key = (label, eval_name)
+                series_prefix = f"online/{label}/{eval_name}"
 
-                # Monotonicity guard: require strictly increasing cl/step per series
-                last_ok = self._last_step.get(series_key, None)
+                # per-series monotonicity
+                last_ok = self._last_step.get(series_key)
                 if last_ok is not None and out_step <= last_ok:
-                    # Drop this bucket silently (well, with a lightweight warning)
-                    try:
-                        print(f"[Collector] drop non-monotonic step for online/{label}/{eval_name}: "
-                              f"{out_step} <= last {last_ok}")
-                    except Exception:
-                        pass
-                    # Free the bucket and continue
+                    # drop and free bucket
+                    print(f"[Collector] drop non-monotonic step for {series_prefix}: {out_step} <= {last_ok}")
                     del self._bucket[key]
                 else:
-                    # Compute mean/std across seeds and emit
+                    # per-series define_metric on first emission
+                    if series_key not in self._defined_series:
+                        try:
+                            self._wb.define_metric.remote(f"{series_prefix}/*",
+                                                          step_metric=f"{series_prefix}/series_step")
+                            self._defined_series.add(series_key)
+                        except Exception:
+                            pass
+
+                    # aggregate and emit
                     g_arr = np.array([v[0] for v in bucket.values()], dtype=np.float64)
                     t_arr = np.array([v[1] for v in bucket.values()], dtype=np.float64)
-                    series = f"online/{label}/{eval_name}"
                     payload = {
-                        f"{series}/greedy_mean": float(g_arr.mean()),
-                        f"{series}/greedy_std":  float(g_arr.std()),
-                        f"{series}/train_mean":  float(t_arr.mean()),
-                        f"{series}/train_std":   float(t_arr.std()),
-                        "cl/step": out_step,  # drives the x-axis
+                        f"{series_prefix}/greedy_mean": float(g_arr.mean()),
+                        f"{series_prefix}/greedy_std":  float(g_arr.std()),
+                        f"{series_prefix}/train_mean":  float(t_arr.mean()),
+                        f"{series_prefix}/train_std":   float(t_arr.std()),
+                        # series-specific x-axis
+                        f"{series_prefix}/series_step": out_step,
                     }
                     del self._bucket[key]
                     try:
-                        # Crucial: no explicit 'step' kwarg.
+                        # no explicit step kwarg; axis is taken from series_step
                         self._wb.log.remote(payload)
-                        # Update last accepted step for this series
                         self._last_step[series_key] = out_step
                     except Exception:
                         pass
 
-            # Cooperative yield
+            # cooperative yield
             if (time.time() - last_yield) >= self._flush_interval_s:
                 await asyncio.sleep(0)
                 last_yield = time.time()
@@ -393,14 +394,14 @@ class SeedTrainer:
                 step_cb.n_episodes = 0
 
             phase_steps = int(ph["steps"])
-            s0 = int(agent.num_timesteps)
+            # s0 = int(agent.num_timesteps)
             agent.learn(total_timesteps=phase_steps,
                         reset_num_timesteps=False,
                         callback=step_cb,
                         progress_bar=False)
-            s1 = int(agent.num_timesteps)
-            if s1 - s0 != phase_steps:
-                print(f"[warn] num_timesteps advanced {s1 - s0} (expect {phase_steps}) at phase {i}.")
+            # s1 = int(agent.num_timesteps)
+            # if s1 - s0 != phase_steps:
+            #     print(f"[warn] num_timesteps advanced {s1 - s0} (expect {phase_steps}) at phase {i}.")
 
             # End-of-phase evals at the boundary step
             for cb in per_eval_cbs:
@@ -514,12 +515,13 @@ class RayCurriculumTrainer:
             wandb_actor=self.wb,
             step_base=int(self.wandb_step_base),
             flush_interval_s=0.2,
-            max_queue=16384,
+            max_queue=int(1e9),
         )
 
         # Launch actors
         maxc = self.max_conc or min(len(seeds), os.cpu_count() or 1)
         pending = list(seeds)
+        sorted(pending)
         in_flight: Dict[Any, int] = {}
         results: List[Dict[str, Any]] = []
 
@@ -527,24 +529,41 @@ class RayCurriculumTrainer:
         if media_root is not None:
             ensure_dir(Path(media_root))
 
-        def submit():
-            s = pending.pop(0)
-            actor = SeedTrainer.options(num_cpus=1).remote(
-                seed=s, envs=envs,
-                baseline_phases=baseline_phases, baseline_evals=baseline_evals,
-                item_phases_map=item_phases_map, evals_map=evals_map,
-                agent_ctor_path=self.agent_ctor_path, agent_kwargs=self.agent_kwargs,
-                eval_every=self.eval_every, n_eval_episodes=self.n_eval,
-                collector=collector if self.save_intermediate else None,
-                collect_intermediate=self.save_intermediate,
-                media_root=media_root,
-                media_opts=self.media_opts,
-            )
+        def submit(seed: int, save_media: bool):
+            if save_media:
+                actor = SeedTrainer.options(num_cpus=1).remote(
+                    seed=seed, envs=envs,
+                    baseline_phases=baseline_phases, baseline_evals=baseline_evals,
+                    item_phases_map=item_phases_map, evals_map=evals_map,
+                    agent_ctor_path=self.agent_ctor_path, agent_kwargs=self.agent_kwargs,
+                    eval_every=self.eval_every, n_eval_episodes=self.n_eval,
+                    collector=collector if self.save_intermediate else None,
+                    collect_intermediate=self.save_intermediate,
+                    media_root=media_root,
+                    media_opts=self.media_opts,
+                )
+            else:
+                actor = SeedTrainer.options(num_cpus=1).remote(
+                    seed=seed, envs=envs,
+                    baseline_phases=baseline_phases, baseline_evals=baseline_evals,
+                    item_phases_map=item_phases_map, evals_map=evals_map,
+                    agent_ctor_path=self.agent_ctor_path, agent_kwargs=self.agent_kwargs,
+                    eval_every=self.eval_every, n_eval_episodes=self.n_eval,
+                    collector=collector if self.save_intermediate else None,
+                    collect_intermediate=self.save_intermediate,
+                    media_root=None,
+                    media_opts=self.media_opts,
+                )
             fut = actor.run.remote()
-            in_flight[fut] = s
+            in_flight[fut] = seed
 
+        s = pending.pop(0)
+        print(f"[seed {s}] submit.")
+        submit(s, True)
         while pending and len(in_flight) < maxc:
-            submit()
+            s = pending.pop(0)
+            print(f"[seed {s}] submit.")
+            submit(s, False)
 
         while in_flight:
             done, _ = ray.wait(list(in_flight.keys()), timeout=None, num_returns=1)
@@ -554,7 +573,9 @@ class RayCurriculumTrainer:
                 results.append(res)
                 print(f"[seed {s}] done.")
                 if pending and len(in_flight) < maxc:
-                    submit()
+                    s = pending.pop(0)
+                    print(f"[seed {s}] submit.")
+                    submit(s, False)
 
         # Optional timeline dump
         if self.outdir is not None and self.save_intermediate:
