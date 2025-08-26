@@ -25,12 +25,13 @@ from two_stage_cl.utils import plot_pairwise, save_csv
 @ray.remote
 class Collector:
     """
-    Per-series step binding for online evaluations.
-    - For each series (label, eval_name) we call:
-        define_metric("online/{label}/{eval_name}/*", step_metric="online/{label}/{eval_name}/series_step")
-      so each curve has its own x-axis field.
-    - We do NOT log a global 'cl/step' anymore, avoiding cross-series resets.
-    - If a series receives a non-monotonic step (after step_base), we drop it.
+    Minimal & robust aggregator.
+
+    - Baseline and CL are handled independently (separate buckets/state).
+    - Aggregate by (series = label, eval_name, eval_idx) across seeds.
+    - Each series binds its own x-axis to 'online/{label}/{eval}/series_step'.
+    - Monotonic guard per series on eval_idx; drop if not strictly increasing.
+    - 'series_step' = min(real_step) + step_base over seeds in the bucket (monotone enough).
     """
     def __init__(self,
                  seeds: List[int],
@@ -38,102 +39,120 @@ class Collector:
                  wandb_actor: Optional[ActorHandle] = None,
                  step_base: int = 0,
                  flush_interval_s: float = 0.5,
-                 max_queue: int = 65536):
+                 max_queue: int = 16384):
         self.seeds = list(map(int, seeds))
         self.keep = bool(keep_intermediate)
         self._wb = wandb_actor
         self._step_base = int(step_base)
 
-        # optional raw timeline for debugging
+        # Optional raw timeline for debugging
         self._timeline: Dict[int, List[Dict[str, Any]]] = {s: [] for s in self.seeds}
 
-        # in-flight buckets: (label, eval, step) -> {seed: (greedy, train)}
-        self._bucket: Dict[Tuple[str, str, int], Dict[int, Tuple[float, float]]] = {}
+        # Separate in-flight buckets for baseline vs curriculum(CL)
+        # key: (label, eval_name, eval_idx) -> {seed: (greedy, train, step)}
+        self._bucket_base: Dict[Tuple[str, str, int], Dict[int, Tuple[float, float, int]]] = {}
+        self._bucket_cl:   Dict[Tuple[str, str, int], Dict[int, Tuple[float, float, int]]] = {}
 
-        # last accepted step (after base) per series to enforce monotonicity
-        self._last_step: Dict[Tuple[str, str], int] = {}
+        # Per-series last eval_idx accepted (monotonic)
+        self._last_idx_base: Dict[Tuple[str, str], int] = {}
+        self._last_idx_cl:   Dict[Tuple[str, str], int] = {}
 
-        # which series we have already bound with define_metric
+        # Per-series define_metric guard
         self._defined_series: set[Tuple[str, str]] = set()
 
-        # async queue
+        # Async queue
         self._q: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=int(max_queue))
         self._flush_interval_s = float(flush_interval_s)
 
-        # NOTE: intentionally NO global define_metric("online/*", step_metric=...)
-        # We bind step per-series on first emit.
+        # No global define_metric here; bind per series on first emit.
 
-        # start background consumer
+        # Start background consumer
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = asyncio.get_event_loop()
         loop.create_task(self._drain_loop())
 
+    def _pick_tables(self, label: str):
+        """Choose state tables for baseline vs CL by label string."""
+        if label == "baseline":
+            return self._bucket_base, self._last_idx_base
+        else:
+            return self._bucket_cl, self._last_idx_cl
+
     async def _drain_loop(self) -> None:
-        """
-        Consume queue, aggregate across seeds, and emit a row when a bucket is complete.
-        Each series has its own step field 'online/{label}/{eval}/series_step'.
-        Non-monotonic steps for a series are dropped.
-        """
+        """Consume queue; aggregate by (label, eval_name, eval_idx) across seeds; emit when complete."""
         last_yield = time.time()
         while True:
             e = await self._q.get()
 
-            key = (str(e["label"]), str(e["eval_name"]), int(e["step"]))
+            label = str(e["label"])
+            eval_name = str(e["eval_name"])
+            step = int(e["step"])
+            eval_idx = int(e.get("eval_idx", -1))  # sent by PeriodicEvalCallback
             seed = int(e["seed"])
-            g, t = float(e["greedy"]), float(e["train"])
-            bucket = self._bucket.setdefault(key, {})
-            bucket[seed] = (g, t)
+            g = float(e["greedy"])
+            t = float(e["train"])
 
-            if len(bucket) == len(self.seeds) and self._wb is not None:
-                label, eval_name, real_step = key
-                out_step = int(real_step + self._step_base)
+            buckets, last_idx = self._pick_tables(label)
+            key = (label, eval_name, eval_idx)
+            bucket = buckets.setdefault(key, {})
+            bucket[seed] = (g, t, step)
+
+            # When all seeds for this eval_idx arrived -> emit one row
+            if self._wb is not None and len(bucket) == len(self.seeds):
                 series_key = (label, eval_name)
-                series_prefix = f"online/{label}/{eval_name}"
-
-                # per-series monotonicity
-                last_ok = self._last_step.get(series_key)
-                if last_ok is not None and out_step <= last_ok:
-                    # drop and free bucket
-                    print(f"[Collector] drop non-monotonic step for {series_prefix}: {out_step} <= {last_ok}")
-                    del self._bucket[key]
+                prev = last_idx.get(series_key, None)
+                if prev is not None and eval_idx <= prev:
+                    # Non-monotonic eval index for this series -> drop silently
+                    try:
+                        print(f"[Collector] drop non-monotonic idx for online/{label}/{eval_name}: "
+                              f"{eval_idx} <= {prev}")
+                    except Exception:
+                        pass
+                    del buckets[key]
                 else:
-                    # per-series define_metric on first emission
+                    # First time for this series: bind axis to series_step
                     if series_key not in self._defined_series:
                         try:
-                            self._wb.define_metric.remote(f"{series_prefix}/*",
-                                                          step_metric=f"{series_prefix}/series_step")
-                            self._defined_series.add(series_key)
+                            self._wb.define_metric.remote(
+                                f"online/{label}/{eval_name}/*",
+                                step_metric=f"online/{label}/{eval_name}/series_step"
+                            )
                         except Exception:
                             pass
+                        self._defined_series.add(series_key)
 
-                    # aggregate and emit
+                    # Aggregate across seeds
                     g_arr = np.array([v[0] for v in bucket.values()], dtype=np.float64)
                     t_arr = np.array([v[1] for v in bucket.values()], dtype=np.float64)
+                    min_step = int(min(v[2] for v in bucket.values()))
+                    out_step = int(min_step + self._step_base)
+
+                    series = f"online/{label}/{eval_name}"
                     payload = {
-                        f"{series_prefix}/greedy_mean": float(g_arr.mean()),
-                        f"{series_prefix}/greedy_std":  float(g_arr.std()),
-                        f"{series_prefix}/train_mean":  float(t_arr.mean()),
-                        f"{series_prefix}/train_std":   float(t_arr.std()),
-                        # series-specific x-axis
-                        f"{series_prefix}/series_step": out_step,
+                        f"{series}/greedy_mean": float(g_arr.mean()),
+                        f"{series}/greedy_std":  float(g_arr.std()),
+                        f"{series}/train_mean":  float(t_arr.mean()),
+                        f"{series}/train_std":   float(t_arr.std()),
+                        f"{series}/series_step": out_step,
+                        f"{series}/series_idx":  int(eval_idx),
                     }
-                    del self._bucket[key]
+
+                    del buckets[key]
                     try:
-                        # no explicit step kwarg; axis is taken from series_step
-                        self._wb.log.remote(payload)
-                        self._last_step[series_key] = out_step
+                        self._wb.log.remote(payload)  # no explicit step=
+                        last_idx[series_key] = eval_idx
                     except Exception:
                         pass
 
-            # cooperative yield
+            # Cooperative yield
             if (time.time() - last_yield) >= self._flush_interval_s:
                 await asyncio.sleep(0)
                 last_yield = time.time()
 
     async def report(self, e: Dict[str, Any]) -> None:
-        """Non-blocking producer API; drops on full queue."""
+        """Non-blocking producer; drops on full queue."""
         if self.keep:
             self._timeline[int(e["seed"])].append(e)
         try:
@@ -142,7 +161,6 @@ class Collector:
             return
 
     def timeline(self) -> Dict[int, List[Dict[str, Any]]]:
-        """Return raw per-seed timeline (if keep_intermediate=True)."""
         return self._timeline if self.keep else {}
 
 
@@ -205,6 +223,7 @@ class PeriodicEvalCallback:
                     "seed": self.seed_id,
                     "label": self.label,
                     "eval_name": self.eval_name,
+                    "eval_idx": int(self._eval_count),  # <<< add this line
                     "step": step,
                     "greedy": float(g_mean),
                     "train": float(t_mean),
@@ -251,7 +270,8 @@ class SeedTrainer:
                  collector: Optional[Any] = None,
                  collect_intermediate: bool = True,
                  media_root: Optional[str] = None,
-                 media_opts: Optional[Dict[str, Any]] = None):
+                 media_opts: Optional[Dict[str, Any]] = None,
+                 mode: str = "both"):  # "baseline" | "items" | "both"
         self.seed = int(seed)
         self.envs = envs
         self.base_ph = baseline_phases
@@ -264,12 +284,11 @@ class SeedTrainer:
         self.n_eval = int(n_eval_episodes)
         self.collector = collector
         self.collect_on = bool(collect_intermediate)
+        self.mode = str(mode)
 
-        # media: always on if media_root is provided (no extra switches)
-        self.media_root = media_root  # None => do not record anything
+        # media settings
+        self.media_root = media_root
         self.media_on = media_root is not None
-
-        # minimal, flexible options (no booleans to toggle features)
         mo = dict(media_opts or {})
         self.mo_episodes = int(mo.get("episodes", 3))
         self.mo_max_steps = int(mo.get("max_steps", 200))
@@ -277,8 +296,8 @@ class SeedTrainer:
         self.mo_fmt = str(mo.get("fmt", "gif"))
         self.mo_deterministic = bool(mo.get("deterministic", True))
         self.mo_start_seed_base = int(mo.get("start_seed_base", 10_000))
-        self.mo_target_size = mo.get("target_size", None)      # e.g. (256,256)
-        self.mo_bgr_to_rgb = bool(mo.get("bgr_to_rgb", False)) # set True if renderer outputs BGR
+        self.mo_target_size = mo.get("target_size", None)
+        self.mo_bgr_to_rgb = bool(mo.get("bgr_to_rgb", False))
 
     # Resolve env spec from registry (supports nested envs["items"])
     def _env_spec(self, key: str) -> Dict[str, Any]:
@@ -452,12 +471,13 @@ class SeedTrainer:
         return out
 
     def run(self) -> Dict[str, Any]:
-        res = {"seed": self.seed, "baseline": self._run_schedule("baseline", self.base_ph, self.base_evals),
-               "items": {}}
-        # baseline uses baseline_evals directly (often [{"name": "Target", "env": "..."}])
-        for label, phases in self.items_ph.items():
-            res["items"][label] = self._run_schedule(str(label), phases, self.evals_map[label])
-        return res
+        out: Dict[str, Any] = {"seed": self.seed, "baseline": None, "items": {}}
+        if self.mode in ("baseline", "both"):
+            out["baseline"] = self._run_schedule("baseline", self.base_ph, self.base_evals)
+        if self.mode in ("items", "both"):
+            for label, phases in self.items_ph.items():
+                out["items"][label] = self._run_schedule(str(label), phases, self.evals_map[label])
+        return out
 
 
 # ------------------------------
@@ -475,25 +495,23 @@ class RayCurriculumTrainer:
                  max_concurrency: Optional[int] = None,
                  save_intermediate: bool = True,
                  wandb_actor: Optional[ActorHandle] = None,
-                 media_opts: Optional[Dict[str, Any]] = None):
-        """
-        - output_dir governs ALL local writes; None => write nothing locally (including media).
-        - wandb_actor governs ALL W&B uploads; None => upload nothing to W&B.
-        - save_intermediate controls whether the Collector keeps the online timeline.
-        - wandb_step_base is added to every logged step inside Collector.report.
-        """
+                 media_opts: Optional[Dict[str, Any]] = None,
+                 run_baseline: bool = True,   # NEW
+                 run_items: bool = True):     # NEW
         self.agent_ctor_path = agent_ctor_path
         self.agent_kwargs = dict(agent_kwargs)
         self.eval_every = int(eval_every)
         self.n_eval = int(n_eval_episodes)
-        self.outdir = output_dir  # may be None
+        self.outdir = output_dir
         self.max_conc = max_concurrency
         self.save_intermediate = bool(save_intermediate)
-        self.wb = wandb_actor  # may be None
+        self.wb = wandb_actor
         self.media_opts = dict(media_opts or {})
+        self.wandb_step_base = int(wandb_step_base)
+        self.run_baseline = bool(run_baseline)
+        self.run_items = bool(run_items)
         if self.outdir is not None:
             ensure_dir(Path(self.outdir))
-        self.wandb_step_base = int(wandb_step_base)
 
     def run(self,
             seeds: List[int],
@@ -506,78 +524,125 @@ class RayCurriculumTrainer:
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
 
-        seeds = list(map(int, seeds))
+        seeds = sorted(map(int, seeds))
 
-        # Single shared collector (binds Step->cl/step inside)
+        # ===== Normalize baseline total steps to match curriculum total =====
+        def _sum_steps(phs: List[Dict[str, Any]]) -> int:
+            return sum(int(p.get("steps", 0)) for p in phs)
+
+        max_item_total = 0
+        if self.run_items:
+            for _, phs in item_phases_map.items():
+                max_item_total = max(max_item_total, _sum_steps(phs))
+
+        if self.run_baseline and max_item_total > 0:
+            base_total = _sum_steps(baseline_phases)
+            if base_total != max_item_total:
+                delta = max_item_total - base_total
+                new_phases = [dict(p) for p in baseline_phases]
+                if not new_phases:
+                    raise ValueError("baseline_phases is empty; cannot normalize steps.")
+                if delta > 0:
+                    new_phases[-1]["steps"] = int(new_phases[-1].get("steps", 0)) + delta
+                    print(f"[info] baseline steps extended by {delta} to {max_item_total}.")
+                else:
+                    need_cut = -delta
+                    idx = len(new_phases) - 1
+                    while need_cut > 0 and idx >= 0:
+                        cur = int(new_phases[idx].get("steps", 0))
+                        take = min(cur, need_cut)
+                        new_phases[idx]["steps"] = cur - take
+                        need_cut -= take
+                        if new_phases[idx]["steps"] == 0 and idx > 0:
+                            new_phases.pop(idx)
+                        idx -= 1
+                    print(f"[info] baseline steps trimmed by {-delta} to {max_item_total}.")
+                baseline_phases = new_phases
+
+        # ===== Shared collector =====
         collector = Collector.options(max_concurrency=1).remote(
             seeds=seeds,
             keep_intermediate=self.save_intermediate,
             wandb_actor=self.wb,
             step_base=int(self.wandb_step_base),
             flush_interval_s=0.2,
-            max_queue=int(1e9),
+            max_queue=16384,
         )
 
-        # Launch actors
-        maxc = self.max_conc or min(len(seeds), os.cpu_count() or 1)
-        pending = list(seeds)
-        sorted(pending)
-        in_flight: Dict[Any, int] = {}
+        # ===== Submit tasks =====
+        maxc = self.max_conc or min(len(seeds) * (1 + int(self.run_baseline and self.run_items)), os.cpu_count() or 1)
+        pending: List[Tuple[int, str]] = []  # (seed, mode)
+        if self.run_baseline:
+            pending += [(s, "baseline") for s in seeds]
+        if self.run_items:
+            pending += [(s, "items") for s in seeds]
+        in_flight: Dict[Any, Tuple[int, str]] = {}
         results: List[Dict[str, Any]] = []
 
         media_root = os.path.join(self.outdir, "media") if self.outdir is not None else None
         if media_root is not None:
             ensure_dir(Path(media_root))
 
-        def submit(seed: int, save_media: bool):
-            if save_media:
-                actor = SeedTrainer.options(num_cpus=1).remote(
-                    seed=seed, envs=envs,
-                    baseline_phases=baseline_phases, baseline_evals=baseline_evals,
-                    item_phases_map=item_phases_map, evals_map=evals_map,
-                    agent_ctor_path=self.agent_ctor_path, agent_kwargs=self.agent_kwargs,
-                    eval_every=self.eval_every, n_eval_episodes=self.n_eval,
-                    collector=collector if self.save_intermediate else None,
-                    collect_intermediate=self.save_intermediate,
-                    media_root=media_root,
-                    media_opts=self.media_opts,
-                )
-            else:
-                actor = SeedTrainer.options(num_cpus=1).remote(
-                    seed=seed, envs=envs,
-                    baseline_phases=baseline_phases, baseline_evals=baseline_evals,
-                    item_phases_map=item_phases_map, evals_map=evals_map,
-                    agent_ctor_path=self.agent_ctor_path, agent_kwargs=self.agent_kwargs,
-                    eval_every=self.eval_every, n_eval_episodes=self.n_eval,
-                    collector=collector if self.save_intermediate else None,
-                    collect_intermediate=self.save_intermediate,
-                    media_root=None,
-                    media_opts=self.media_opts,
-                )
+        def submit(seed: int, mode: str, save_media: bool):
+            actor = SeedTrainer.options(num_cpus=1).remote(
+                seed=seed, envs=envs,
+                baseline_phases=baseline_phases, baseline_evals=baseline_evals,
+                item_phases_map=item_phases_map, evals_map=evals_map,
+                agent_ctor_path=self.agent_ctor_path, agent_kwargs=self.agent_kwargs,
+                eval_every=self.eval_every, n_eval_episodes=self.n_eval,
+                collector=collector if self.save_intermediate else None,
+                collect_intermediate=self.save_intermediate,
+                media_root=(media_root if save_media else None),
+                media_opts=self.media_opts,
+                mode=mode,
+            )
             fut = actor.run.remote()
-            in_flight[fut] = seed
+            in_flight[fut] = (seed, mode)
 
-        s = pending.pop(0)
-        print(f"[seed {s}] submit.")
-        submit(s, True)
+        # Prime queue
         while pending and len(in_flight) < maxc:
-            s = pending.pop(0)
-            print(f"[seed {s}] submit.")
-            submit(s, False)
+            seed, mode = pending.pop(0)
+            print(f"[seed {seed}] submit ({mode}).")
+            save_media = (len(in_flight) == 0)
+            submit(seed, mode, save_media)
 
+        # Drain
         while in_flight:
             done, _ = ray.wait(list(in_flight.keys()), timeout=None, num_returns=1)
             for fut in done:
-                s = in_flight.pop(fut)
+                seed, mode = in_flight.pop(fut)
                 res = ray.get(fut)
                 results.append(res)
-                print(f"[seed {s}] done.")
+                print(f"[seed {seed}] done ({mode}).")
                 if pending and len(in_flight) < maxc:
-                    s = pending.pop(0)
-                    print(f"[seed {s}] submit.")
-                    submit(s, False)
+                    seed2, mode2 = pending.pop(0)
+                    print(f"[seed {seed2}] submit ({mode2}).")
+                    submit(seed2, mode2, save_media=False)
 
-        # Optional timeline dump
+        # ===== Merge baseline/items per seed =====
+        by_seed: Dict[int, Dict[str, Any]] = {}
+        for r in results:
+            sid = int(r.get("seed", -1))
+            assert sid != -1, "invalid seed in result"
+            tgt = by_seed.setdefault(sid, {"seed": sid, "baseline": None, "items": {}})
+            if r.get("baseline") is not None:
+                assert tgt["baseline"] is None, f"duplicate baseline for seed {sid}"
+                tgt["baseline"] = r["baseline"]
+            if "items" in r and isinstance(r["items"], dict):
+                for lb, dd in r["items"].items():
+                    assert lb not in tgt["items"], f"duplicate items[{lb}] for seed {sid}"
+                    tgt["items"][lb] = dd
+
+        if self.run_baseline:
+            missing = [s for s, v in by_seed.items() if v["baseline"] is None]
+            assert not missing, f"baseline missing for seeds: {missing}"
+        if self.run_items:
+            missing = [s for s, v in by_seed.items() if not v["items"]]
+            assert not missing, f"items missing for seeds: {missing}"
+
+        merged_results: List[Dict[str, Any]] = [by_seed[s] for s in sorted(by_seed.keys())]
+
+        # ===== Optional timeline dump =====
         if self.outdir is not None and self.save_intermediate:
             try:
                 tl = ray.get(collector.timeline.remote())
@@ -586,22 +651,22 @@ class RayCurriculumTrainer:
             except Exception as e:
                 print(f"[driver] dump timeline failed: {e}")
 
-        # Aggregate seeds -> summary
-        summary = self._aggregate(results, item_phases_map)
+        # ===== Aggregate on merged results =====
+        summary = self._aggregate(merged_results, item_phases_map)
 
-        # Save raw JSONs
+        # ===== Save per-seed JSONs =====
         if self.outdir is not None:
             ensure_dir(self.outdir)
             with open(os.path.join(self.outdir, "final_summary.json"), "w") as f:
                 json.dump(summary, f, indent=2)
             seeds_dir = os.path.join(self.outdir, "seeds")
             ensure_dir(seeds_dir)
-            for r in results:
+            for r in merged_results:
                 sid = int(r.get("seed", -1))
                 with open(os.path.join(seeds_dir, f"seed_{sid}.json"), "w") as f:
                     json.dump(r, f)
 
-        # Upload videos (independent of the collector)
+        # ===== Upload videos =====
         if self.wb is not None and media_root is not None:
             to_log = []
 
@@ -623,11 +688,12 @@ class RayCurriculumTrainer:
                         if p:
                             to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", p))
 
-            for r in results:
+            for r in merged_results:
                 sd = int(r.get("seed", 0))
-                base = r.get("baseline", {}) or {}
-                _enqueue(sd, "baseline", base.get("media", {}) or {})
-                _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
+                base = r.get("baseline", None)
+                if base and self.run_baseline:
+                    _enqueue(sd, "baseline", base.get("media", {}) or {})
+                    _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
                 items = r.get("items", {}) or {}
                 for lb, d in items.items():
                     _enqueue(sd, str(lb), (d or {}).get("media", {}) or {})
@@ -644,122 +710,119 @@ class RayCurriculumTrainer:
                 except Exception as e:
                     print(f"[W&B] schedule video upload failed for {key}: {e}")
 
-        # ===== CSV export + pairwise plots (with step alignment) =====
+        # ===== CSV & plots =====
         if self.outdir is not None:
-            steps_base = np.asarray(summary["steps"], dtype=int)  # baseline steps
+            steps_base = None
+            base_curves = None
 
-            # compute phase boundaries from baseline phases (cumulative except final)
-            baseline_boundaries: List[int] = []
-            acc = 0
-            for ph in baseline_phases[:-1]:
-                acc += int(ph["steps"])
-                baseline_boundaries.append(acc)
-            boundaries_str = "-".join(str(b) for b in baseline_boundaries) if baseline_boundaries else "none"
-
-            # baseline curves (the only key under summary["baseline"])
-            base_key = next(iter(summary["baseline"].keys()))
-            base = summary["baseline"][base_key]
-            base_g_mean = np.asarray(base["greedy_mean"], dtype=float)
-            base_g_std = np.asarray(base["greedy_std"], dtype=float)
-            base_t_mean = np.asarray(base["train_mean"], dtype=float)
-            base_t_std = np.asarray(base["train_std"], dtype=float)
-
-            def _interp_to(x_old: np.ndarray,
-                           mean: np.ndarray,
-                           std: np.ndarray,
-                           x_new: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-                """Linear interpolation onto a common x-axis."""
-                mean_i = np.interp(x_new, x_old, mean)
-                std_i = np.interp(x_new, x_old, std)
-                return mean_i, std_i
+            if self.run_baseline and ("baseline" in summary and summary["baseline"]):
+                base_key = next(iter(summary["baseline"].keys()))
+                steps_base = np.asarray(summary["steps"], dtype=int)
+                base = summary["baseline"][base_key]
+                base_curves = {
+                    "greedy_mean": np.asarray(base["greedy_mean"], dtype=float),
+                    "greedy_std": np.asarray(base["greedy_std"], dtype=float),
+                    "train_mean": np.asarray(base["train_mean"], dtype=float),
+                    "train_std": np.asarray(base["train_std"], dtype=float),
+                }
 
             for lb, dd in summary["items"].items():
                 item_dir = os.path.join(self.outdir, str(lb))
                 ensure_dir(Path(item_dir))
 
-                # --- choose target eval (prefer "Target")
+                phs = item_phases_map.get(lb, [])
+                item_boundaries: List[int] = []
+                acc = 0
+                for ph in phs[:-1]:
+                    acc += int(ph.get("steps", 0))
+                    item_boundaries.append(acc)
+                boundaries_str = "-".join(str(b) for b in item_boundaries) if item_boundaries else "none"
+
                 if "Target" in dd:
                     tgt = dd["Target"]
                 else:
-                    first_key = next(iter(dd.keys()))
-                    tgt = dd[first_key]
+                    tgt = dd[next(iter(dd.keys()))]
 
-                # Collect step grids
-                steps_tgt = np.asarray(tgt.get("steps", steps_base), dtype=int)
-                # Build union x-axis; if a source-like eval exists, include its steps as well.
-                src_name = next((k for k in dd.keys() if k.lower().startswith("source")), None)
-                X = np.union1d(steps_base, steps_tgt)
-                if src_name is not None and "steps" in dd[src_name]:
-                    X = np.union1d(X, np.asarray(dd[src_name]["steps"], dtype=int))
+                steps_tgt = np.asarray(
+                    tgt.get("steps", steps_base if steps_base is not None else tgt["steps"]),
+                    dtype=int
+                )
 
-                # Interp baseline -> X
-                base_g_mean_i, base_g_std_i = _interp_to(steps_base, base_g_mean, base_g_std, X)
-                base_t_mean_i, base_t_std_i = _interp_to(steps_base, base_t_mean, base_t_std, X)
-
-                # Interp target -> X
                 tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
                 tgt_g_std = np.asarray(tgt["greedy_std"], dtype=float)
                 tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
                 tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
 
-                tgt_g_mean_i, tgt_g_std_i = _interp_to(steps_tgt, tgt_g_mean, tgt_g_std, X)
-                tgt_t_mean_i, tgt_t_std_i = _interp_to(steps_tgt, tgt_t_mean, tgt_t_std, X)
-
-                # Optional: source curve -> X
-                curves_source_i = None
-                if src_name is not None:
-                    src = dd[src_name]
-                    steps_src = np.asarray(src.get("steps", X), dtype=int)
-                    src_g_mean = np.asarray(src["greedy_mean"], dtype=float)
-                    src_g_std = np.asarray(src["greedy_std"], dtype=float)
-                    src_t_mean = np.asarray(src["train_mean"], dtype=float)
-                    src_t_std = np.asarray(src["train_std"], dtype=float)
-                    src_g_mean_i, src_g_std_i = _interp_to(steps_src, src_g_mean, src_g_std, X)
-                    src_t_mean_i, src_t_std_i = _interp_to(steps_src, src_t_mean, src_t_std, X)
-                    curves_source_i = {
-                        "greedy_mean": src_g_mean_i, "greedy_std": src_g_std_i,
-                        "train_mean": src_t_mean_i, "train_std": src_t_std_i,
-                    }
-
-                # Save CSVs on the original baseline/target grids (optional but useful)
-                save_csv(os.path.join(item_dir, f"baseline_target_phase_{boundaries_str}.csv"),
-                         steps_base, base_g_mean, base_g_std, header="greedy")
-                save_csv(os.path.join(item_dir, f"baseline_target_train_phase_{boundaries_str}.csv"),
-                         steps_base, base_t_mean, base_t_std, header="train")
                 save_csv(os.path.join(item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
                          steps_tgt, tgt_g_mean, tgt_g_std, header="greedy")
                 save_csv(os.path.join(item_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
                          steps_tgt, tgt_t_mean, tgt_t_std, header="train")
+
+                src_name = next((k for k in dd.keys() if k.lower().startswith("source")), None)
                 if src_name is not None:
+                    src = dd[src_name]
+                    steps_src = np.asarray(src.get("steps", steps_tgt), dtype=int)
+                    src_g_mean = np.asarray(src["greedy_mean"], dtype=float)
+                    src_g_std = np.asarray(src["greedy_std"], dtype=float)
+                    src_t_mean = np.asarray(src["train_mean"], dtype=float)
+                    src_t_std = np.asarray(src["train_std"], dtype=float)
                     save_csv(os.path.join(item_dir, f"curriculum_eval_source_phase_{boundaries_str}.csv"),
                              steps_src, src_g_mean, src_g_std, header="greedy")
                     save_csv(os.path.join(item_dir, f"curriculum_eval_source_train_phase_{boundaries_str}.csv"),
                              steps_src, src_t_mean, src_t_std, header="train")
 
-                # --- Pairwise plot on the aligned grid X ---
-                png_path = os.path.join(item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
-                plot_pairwise(
-                    out_png_path=png_path,
-                    checkpoints=X,
-                    phase_boundaries=baseline_boundaries,
-                    title_prefix=f"Pairwise for '{lb}'",
-                    baseline={
-                        "greedy_mean": base_g_mean_i, "greedy_std": base_g_std_i,
-                        "train_mean": base_t_mean_i, "train_std": base_t_std_i,
-                    },
-                    curves_target={
-                        "greedy_mean": tgt_g_mean_i, "greedy_std": tgt_g_std_i,
-                        "train_mean": tgt_t_mean_i, "train_std": tgt_t_std_i,
-                    },
-                    curves_source=curves_source_i,
-                )
+                if self.run_baseline and base_curves is not None and steps_base is not None:
+                    X = np.union1d(steps_base, steps_tgt)
 
-                if self.wb is not None:
-                    self.wb.log_image.remote(
-                        key=f"images/pairwise_{lb}_phase_{boundaries_str}",
-                        path=png_path,
-                        caption=f"pairwise {lb} (boundaries: {boundaries_str})"
+                    def _interp(x_old, mean, std, x_new):
+                        return (np.interp(x_new, x_old, mean),
+                                np.interp(x_new, x_old, std))
+
+                    base_g_mean_i, base_g_std_i = _interp(steps_base, base_curves["greedy_mean"],
+                                                          base_curves["greedy_std"], X)
+                    base_t_mean_i, base_t_std_i = _interp(steps_base, base_curves["train_mean"],
+                                                          base_curves["train_std"], X)
+                    tgt_g_mean_i, tgt_g_std_i = _interp(steps_tgt, tgt_g_mean, tgt_g_std, X)
+                    tgt_t_mean_i, tgt_t_std_i = _interp(steps_tgt, tgt_t_mean, tgt_t_std, X)
+
+                    curves_source_i = None
+                    if src_name is not None:
+                        src = dd[src_name]
+                        steps_src = np.asarray(src.get("steps", X), dtype=int)
+                        src_g_mean = np.asarray(src["greedy_mean"], dtype=float)
+                        src_g_std = np.asarray(src["greedy_std"], dtype=float)
+                        src_t_mean = np.asarray(src["train_mean"], dtype=float)
+                        src_t_std = np.asarray(src["train_std"], dtype=float)
+                        src_g_mean_i, src_g_std_i = _interp(steps_src, src_g_mean, src_g_std, X)
+                        src_t_mean_i, src_t_std_i = _interp(steps_src, src_t_mean, src_t_std, X)
+                        curves_source_i = {
+                            "greedy_mean": src_g_mean_i, "greedy_std": src_g_std_i,
+                            "train_mean": src_t_mean_i, "train_std": src_t_std_i,
+                        }
+
+                    png_path = os.path.join(item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
+                    plot_pairwise(
+                        out_png_path=png_path,
+                        checkpoints=X,
+                        phase_boundaries=item_boundaries,
+                        title_prefix=f"Pairwise for '{lb}'",
+                        baseline={
+                            "greedy_mean": base_g_mean_i, "greedy_std": base_g_std_i,
+                            "train_mean": base_t_mean_i, "train_std": base_t_std_i,
+                        },
+                        curves_target={
+                            "greedy_mean": tgt_g_mean_i, "greedy_std": tgt_g_std_i,
+                            "train_mean": tgt_t_mean_i, "train_std": tgt_t_std_i,
+                        },
+                        curves_source=curves_source_i,
                     )
+
+                    if self.wb is not None:
+                        self.wb.log_image.remote(
+                            key=f"images/pairwise_{lb}_phase_{boundaries_str}",
+                            path=png_path,
+                            caption=f"pairwise {lb} (phase boundaries: {boundaries_str})"
+                        )
 
         return summary
 

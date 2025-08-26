@@ -317,7 +317,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=25)
-    p.add_argument("--ga-generations", type=int, default=25)
+    p.add_argument("--ga-generations", type=int, default=10)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -369,7 +369,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent-tie-tol", type=float, default=1e-2)
     p.add_argument("--agent-verbose", type=int, default=0)
 
-    p.add_argument("--phase-steps", type=str, default="20000,130000",
+    p.add_argument("--phase-steps", type=str, default="10000,40000",
                    help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.")
     p.add_argument("--eval-every", type=int, default=2000)
     p.add_argument("--n-eval-episodes", type=int, default=100)
@@ -607,7 +607,9 @@ def main():
             max_concurrency=int(max_concurrency),
             save_intermediate=bool(args.train_save_intermediate),
             wandb_actor=wandb_actor,
-            media_opts=None,
+            media_opts={
+                "target_size": (128, 128),
+            },
         )
     else:
         print("[MAIN] Training skipped or no JSON files; skipping curriculum stage.")

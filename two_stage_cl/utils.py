@@ -17,80 +17,117 @@ def plot_pairwise(
     curves_source: Optional[Dict[str, np.ndarray]] = None,
 ) -> None:
     """
-    Plot greedy and train-policy curves (mean±std).
-    Also draw vertical phase boundary lines at the provided absolute timesteps.
+    Plot greedy and train-policy curves (mean ± std) and draw vertical phase
+    boundary lines at the provided absolute timesteps.
 
-    Args:
-        out_png_path: where to save the PNG.
-        checkpoints: x-axis points (global timesteps) used for plotting the curves.
-        phase_boundaries: absolute global timesteps marking phase ends (excluding final end).
-        title_prefix: figure title prefix.
-        baseline/curves_target/curves_source: dicts with keys:
-            - 'greedy_mean', 'greedy_std', 'train_mean', 'train_std'
+    Notes on robustness:
+    - Do NOT cast x-range or boundaries to int; keep float to avoid truncation
+      (interpolated checkpoints may be non-integers).
+    - Use a tiny epsilon tolerance when filtering boundaries by x-limits.
+    - Draw boundary lines with high zorder so they are not covered by fill_between.
     """
+
+    # --- Coerce to numpy arrays (defensive) ---
+    checkpoints = np.asarray(checkpoints, dtype=float)
+    x_min = float(np.min(checkpoints))
+    x_max = float(np.max(checkpoints))
+    # Tiny tolerance to account for float round-off during interpolation/union
+    eps = 1e-9 * max(1.0, (x_max - x_min))
+
+    # --- Figure & axes ---
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
 
     # Titles
     ax1.set_title(f"{title_prefix} (Greedy)")
     ax2.set_title(f"{title_prefix} (Training-policy)")
 
-    # --- Greedy curves ---
+    # ----------- Greedy curves -----------
     ax1.plot(checkpoints, baseline["greedy_mean"], label="Target-only baseline", linewidth=1.8)
-    ax1.fill_between(checkpoints,
-                     baseline["greedy_mean"] - baseline["greedy_std"],
-                     baseline["greedy_mean"] + baseline["greedy_std"],
-                     alpha=0.2)
+    ax1.fill_between(
+        checkpoints,
+        np.asarray(baseline["greedy_mean"]) - np.asarray(baseline["greedy_std"]),
+        np.asarray(baseline["greedy_mean"]) + np.asarray(baseline["greedy_std"]),
+        alpha=0.2,
+    )
     ax1.plot(checkpoints, curves_target["greedy_mean"], label="Curriculum → Target (primary)", linewidth=2.2)
-    ax1.fill_between(checkpoints,
-                     curves_target["greedy_mean"] - curves_target["greedy_std"],
-                     curves_target["greedy_mean"] + curves_target["greedy_std"],
-                     alpha=0.15)
+    ax1.fill_between(
+        checkpoints,
+        np.asarray(curves_target["greedy_mean"]) - np.asarray(curves_target["greedy_std"]),
+        np.asarray(curves_target["greedy_mean"]) + np.asarray(curves_target["greedy_std"]),
+        alpha=0.15,
+    )
     if curves_source is not None:
         ax1.plot(checkpoints, curves_source["greedy_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
-        ax1.fill_between(checkpoints,
-                         curves_source["greedy_mean"] - curves_source["greedy_std"],
-                         curves_source["greedy_mean"] + curves_source["greedy_std"],
-                         alpha=0.12)
+        ax1.fill_between(
+            checkpoints,
+            np.asarray(curves_source["greedy_mean"]) - np.asarray(curves_source["greedy_std"]),
+            np.asarray(curves_source["greedy_mean"]) + np.asarray(curves_source["greedy_std"]),
+            alpha=0.12,
+        )
+    ax1.set_xlabel("Timesteps")
+    ax1.set_ylabel("Mean return")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
 
-    ax1.set_xlabel("Timesteps"); ax1.set_ylabel("Mean return"); ax1.grid(True, alpha=0.3); ax1.legend()
-
-    # --- Train-policy curves ---
+    # ----------- Train-policy curves -----------
     ax2.plot(checkpoints, baseline["train_mean"], label="Target-only baseline", linewidth=1.8)
-    ax2.fill_between(checkpoints,
-                     baseline["train_mean"] - baseline["train_std"],
-                     baseline["train_mean"] + baseline["train_std"],
-                     alpha=0.2)
+    ax2.fill_between(
+        checkpoints,
+        np.asarray(baseline["train_mean"]) - np.asarray(baseline["train_std"]),
+        np.asarray(baseline["train_mean"]) + np.asarray(baseline["train_std"]),
+        alpha=0.2,
+    )
     ax2.plot(checkpoints, curves_target["train_mean"], label="Curriculum → Target (primary)", linewidth=2.2)
-    ax2.fill_between(checkpoints,
-                     curves_target["train_mean"] - curves_target["train_std"],
-                     curves_target["train_mean"] + curves_target["train_std"],
-                     alpha=0.15)
+    ax2.fill_between(
+        checkpoints,
+        np.asarray(curves_target["train_mean"]) - np.asarray(curves_target["train_std"]),
+        np.asarray(curves_target["train_mean"]) + np.asarray(curves_target["train_std"]),
+        alpha=0.15,
+    )
     if curves_source is not None:
         ax2.plot(checkpoints, curves_source["train_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
-        ax2.fill_between(checkpoints,
-                         curves_source["train_mean"] - curves_source["train_std"],
-                         curves_source["train_mean"] + curves_source["train_std"],
-                         alpha=0.12)
+        ax2.fill_between(
+            checkpoints,
+            np.asarray(curves_source["train_mean"]) - np.asarray(curves_source["train_std"]),
+            np.asarray(curves_source["train_mean"]) + np.asarray(curves_source["train_std"]),
+            alpha=0.12,
+        )
+    ax2.set_xlabel("Timesteps")
+    ax2.set_ylabel("Mean return")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
 
-    ax2.set_xlabel("Timesteps"); ax2.set_ylabel("Mean return"); ax2.grid(True, alpha=0.3); ax2.legend()
+    # ----------- Vertical phase boundary markers -----------
+    # Lock x-limits first so later autoscale won't hide lines
+    for ax in (ax1, ax2):
+        ax.set_xlim(x_min, x_max)
 
-    # --- Vertical phase boundary markers (clamped to x-limits) ---
-    x_min, x_max = int(np.min(checkpoints)), int(np.max(checkpoints))
-    b_valid = [int(b) for b in (phase_boundaries or []) if x_min <= int(b) <= x_max]
+    # Keep boundaries that fall within the visible x-range (with tolerance)
+    b_valid = []
+    if phase_boundaries:
+        for b in phase_boundaries:
+            try:
+                bb = float(b)
+            except Exception:
+                continue
+            if (x_min - eps) <= bb <= (x_max + eps):
+                b_valid.append(bb)
 
+    # Draw lines with solid color + high zorder to ensure visibility
     for ax in (ax1, ax2):
         for b in b_valid:
-            ax.axvline(b, linestyle="--", alpha=0.7)
+            ax.axvline(b, linestyle="--", color="k", linewidth=1.6, alpha=0.9, zorder=10)
 
-        # Optional zone labels (similar to the old version)
+        # Optional zone labels (kept consistent with the older version)
         if b_valid:
             ymin, ymax = ax.get_ylim()
             ytxt = ymin + 0.06 * (ymax - ymin)
-            left_mid = b_valid[0] * 0.5
-            right_mid = b_valid[-1] + (x_max - b_valid[-1]) * 0.5
-            ax.text(left_mid, ytxt, "Phase 1 (Source)", ha="center", va="bottom", fontsize=9, alpha=0.8)
-            ax.text(right_mid, ytxt, "Later Phases (Target/others)", ha="center", va="bottom", fontsize=9, alpha=0.8)
+            left_mid = (b_valid[0] + x_min) * 0.5
+            right_mid = (b_valid[-1] + x_max) * 0.5
+            ax.text(left_mid, ytxt, "Phase 1 (Source)", ha="center", va="bottom", fontsize=9, alpha=0.85)
+            ax.text(right_mid, ytxt, "Later Phases (Target/others)", ha="center", va="bottom", fontsize=9, alpha=0.85)
 
+    # ----------- Save & close -----------
     fig.tight_layout()
     fig.savefig(out_png_path, dpi=150)
     plt.close(fig)
