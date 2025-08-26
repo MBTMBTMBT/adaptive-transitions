@@ -268,6 +268,7 @@ def _mutation_add_edge(
     *,
     whitelist: Optional[Set[EdgeTriple]] = None,
 ):
+    # ---- Read operator knobs (with defaults) ----
     max_out_degree = int(ops.get("max_out_degree", 8))
     allow_self_loops = bool(ops.get("allow_self_loops", True))
     add_edge_allow_out_of_scope = bool(ops.get("add_edge_allow_out_of_scope", True))
@@ -276,43 +277,83 @@ def _mutation_add_edge(
     gamma_prob = float(ops.get("gamma_prob", 0.0))
     prob_floor = float(ops.get("prob_floor", 1e-6))
 
-    candidates_sa = [(s, a) for (s, a) in _list_all_action_pairs(mdp)
-                     if sum(1 for _sp in _get_outgoing_for_action(mdp, s, a)) < max_out_degree]
+    # ---- Pick a (s, a) that still has room to add a successor ----
+    candidates_sa = [
+        (s, a)
+        for (s, a) in _list_all_action_pairs(mdp)
+        if sum(1 for _sp in _get_outgoing_for_action(mdp, s, a)) < max_out_degree
+    ]
     if not candidates_sa:
-        return
-    s, a = candidates_sa[rng.integers(0, len(candidates_sa))]
-    existing = set(_get_outgoing_for_action(mdp, s, a).keys())
-    sp_candidates = [sp for sp in mdp.states if (allow_self_loops or sp != s) and sp not in existing]
+        return  # nothing to do
 
-    if not add_edge_allow_out_of_scope:
-        allowed = _allowed_nodes_within_scope(base_ref, s, distance_cfg)
-        sp_candidates = [sp for sp in sp_candidates if sp in allowed]
+    s, a = candidates_sa[rng.integers(0, len(candidates_sa))]
+    existing_succ = set(_get_outgoing_for_action(mdp, s, a).keys())
+
+    # ---- Build sp candidate list ----
+    sp_candidates = [
+        sp for sp in mdp.states
+        if (allow_self_loops or sp != s) and (sp not in existing_succ)
+    ]
     if not sp_candidates:
         return
 
-    def dist(_s, _sp):
-        return _directed_prob_distance(
-            base_ref, _s, _sp,
+    # Restrict to allowed scope if requested (based on base_ref's topology)
+    if not add_edge_allow_out_of_scope:
+        allowed = _allowed_nodes_within_scope(base_ref, s, distance_cfg)
+        sp_candidates = [sp for sp in sp_candidates if sp in allowed]
+        if not sp_candidates:
+            return
+
+    # ---- Per-call distance cache to avoid repeated shortest-path solves ----
+    dist_cache: Dict[int, float] = {}
+
+    def dist_cached(src: int, dst: int) -> float:
+        """
+        Memoized directed distance on base_ref with edge weight:
+            w(u->v) = max(weight_eps, 2 - max_a P(v | u, a)).
+        Distances are computed from 'src' to individual 'dst' states.
+        """
+        if dst in dist_cache:
+            return dist_cache[dst]
+        d = _directed_prob_distance(
+            base_ref, src, dst,
             max_hops=distance_cfg.get("max_hops", None),
             node_cap=distance_cfg.get("node_cap", None),
             weight_eps=float(distance_cfg.get("weight_eps", 1e-9)),
             unreachable=float(distance_cfg.get("unreachable", 1e6)),
         )
+        dist_cache[dst] = d
+        return d
 
-    weights = np.asarray(
-        [1.0 if gamma_sample <= 0.0 else math.exp(-gamma_sample * dist(s, sp))
-         for sp in sp_candidates],
-        dtype=float
-    )
-    if weights.sum() == 0.0:
-        return
-    weights /= weights.sum()
+    # ---- Compute sampling weights over sp candidates ----
+    if gamma_sample <= 0.0:
+        # Uniform weights if no sampling bias
+        weights = np.full(len(sp_candidates), 1.0 / float(len(sp_candidates)), dtype=float)
+    else:
+        # Softmax over negative distances (closer nodes get larger weights)
+        raw = np.asarray(
+            [math.exp(-gamma_sample * dist_cached(s, sp)) for sp in sp_candidates],
+            dtype=float
+        )
+        total = float(raw.sum())
+        if total <= 0.0 or not np.isfinite(total):
+            return  # degenerate; skip this mutation
+        weights = raw / total
 
+    # ---- Sample a new successor sp_new ----
     sp_new = int(rng.choice(sp_candidates, p=weights))
-    d_new = dist(s, sp_new)
-    p_new = epsilon_new_prob if gamma_prob <= 0.0 else min(epsilon_new_prob, epsilon_new_prob * math.exp(-gamma_prob * d_new))
 
-    # pick reward by inbound mean (fallback to default)
+    # Distance for probability shaping (cached if already computed above)
+    d_new = dist_cached(s, sp_new)
+
+    # ---- Convert epsilon mass into the new branch probability ----
+    if gamma_prob <= 0.0:
+        p_new = epsilon_new_prob
+    else:
+        # Distance-aware shrink: closer destinations get probability closer to epsilon_new_prob
+        p_new = min(epsilon_new_prob, epsilon_new_prob * math.exp(-gamma_prob * d_new))
+
+    # ---- Heuristic reward for the new edge: inbound-mean fallback ----
     def inbound_reward_mean(sp: int, fallback: float) -> float:
         vals: List[float] = []
         for ss in mdp.graph.predecessors(sp):
@@ -325,12 +366,19 @@ def _mutation_add_edge(
 
     r_new = inbound_reward_mean(sp_new, fallback=mdp.default_reward)
 
+    # ---- Rebuild the (s, a) outgoing map with multiplicative shrink + new branch ----
     out_map = _get_outgoing_for_action(mdp, s, a)
-    for k in out_map:
-        p, r = out_map[k]
-        out_map[k] = (max(prob_floor, p * (1.0 - p_new)), r)
+
+    # Shrink all existing probabilities to free mass for the new branch
+    if out_map:
+        for k in list(out_map.keys()):
+            p_k, r_k = out_map[k]
+            out_map[k] = (max(prob_floor, p_k * (1.0 - p_new)), r_k)
+
+    # Add the new branch
     out_map[sp_new] = (max(prob_floor, p_new), r_new)
 
+    # Use the protected setter to preserve whitelisted edges and clamp by prob_floor.
     _set_outgoing_for_action(
         mdp, s, a, out_map,
         whitelist=whitelist,
@@ -675,7 +723,7 @@ def run_ga(
     theta = float(solver.get("vi_theta", 1e-6))
     max_iters = int(solver.get("vi_max_iterations", 1000))
     policy_temp = float(solver.get("policy_temperature", 1.0))
-    policy_mixing = tuple(solver.get("policy_mixing", (0.0, 1.0, 0.0)))
+    policy_mix = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
     tie_tol = float(solver.get("policy_tie_tol", 1e-6))
 
     t0 = time.perf_counter()
@@ -684,7 +732,7 @@ def run_ga(
         Q,
         states=list(base_mdp.states),
         num_actions=base_mdp.num_actions,
-        mixing=policy_mixing,
+        mixing=policy_mix,
         temperature=policy_temp,
         tie_tol=tie_tol,
     )
@@ -949,7 +997,7 @@ def obj_multi_kl_and_perf(mdp: MDPNetwork, shared: Dict[str, Any], *,
     theta = float(solver.get("vi_theta", 1e-6))
     max_iter = int(solver.get("vi_max_iterations", 1000))
     temperature = float(solver.get("policy_temperature", 1.0))
-    mixing = tuple(solver.get("policy_mixing", (0.0, 1.0, 0.0)))
+    mixing = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
     tie_tol = float(solver.get("policy_tie_tol", 1e-6))
 
     pgamma = float(solver.get("perf_gamma", gamma))
@@ -975,7 +1023,7 @@ def obj_multi_kl_and_perf(mdp: MDPNetwork, shared: Dict[str, Any], *,
     else:
         obj1 = 0.0
 
-    prior = create_random_policy(mdp)  # NOTE: may use its own RNG; same行为与旧实现一致
+    prior = create_random_policy(mdp)
     _curve, integral = performance_curve_and_integral(
         prior_policy=prior, target_policy=policy2, mdp_network=mdp,
         numpoints=numpoints, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
@@ -995,7 +1043,7 @@ def obj_multi_perf(mdp: MDPNetwork, shared: Dict[str, Any], *,
     theta = float(solver.get("vi_theta", 1e-6))
     max_iter = int(solver.get("vi_max_iterations", 1000))
     temperature = float(solver.get("policy_temperature", 1.0))
-    mixing = tuple(solver.get("policy_mixing", (0.0, 1.0, 0.0)))
+    mixing = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
     tie_tol = float(solver.get("policy_tie_tol", 1e-6))
 
     pgamma = float(solver.get("perf_gamma", gamma))

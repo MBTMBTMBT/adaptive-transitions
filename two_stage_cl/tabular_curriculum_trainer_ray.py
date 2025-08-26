@@ -413,14 +413,18 @@ class SeedTrainer:
                 step_cb.n_episodes = 0
 
             phase_steps = int(ph["steps"])
-            # s0 = int(agent.num_timesteps)
-            agent.learn(total_timesteps=phase_steps,
+            s0 = int(agent.num_timesteps)
+            target_total = s0 + phase_steps
+
+            agent.learn(total_timesteps=target_total,
                         reset_num_timesteps=False,
                         callback=step_cb,
                         progress_bar=False)
-            # s1 = int(agent.num_timesteps)
-            # if s1 - s0 != phase_steps:
-            #     print(f"[warn] num_timesteps advanced {s1 - s0} (expect {phase_steps}) at phase {i}.")
+
+            s1 = int(agent.num_timesteps)
+            assert s1 - s0 == phase_steps, \
+                (f"[schedule] steps advanced {s1 - s0} (expect {phase_steps}) "
+                 f"at phase {i} label={label}")
 
             # End-of-phase evals at the boundary step
             for cb in per_eval_cbs:
@@ -730,6 +734,7 @@ class RayCurriculumTrainer:
                 item_dir = os.path.join(self.outdir, str(lb))
                 ensure_dir(Path(item_dir))
 
+                # phase boundaries from the item itself
                 phs = item_phases_map.get(lb, [])
                 item_boundaries: List[int] = []
                 acc = 0
@@ -738,30 +743,27 @@ class RayCurriculumTrainer:
                     item_boundaries.append(acc)
                 boundaries_str = "-".join(str(b) for b in item_boundaries) if item_boundaries else "none"
 
-                if "Target" in dd:
-                    tgt = dd["Target"]
-                else:
-                    tgt = dd[next(iter(dd.keys()))]
+                # choose target eval (prefer "Target")
+                tgt = dd["Target"] if "Target" in dd else dd[next(iter(dd.keys()))]
 
-                steps_tgt = np.asarray(
-                    tgt.get("steps", steps_base if steps_base is not None else tgt["steps"]),
-                    dtype=int
-                )
-
+                # === USE EXACT TARGET STEPS; no fallback/union here ===
+                steps_tgt = np.asarray(tgt["steps"], dtype=int)
                 tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
                 tgt_g_std = np.asarray(tgt["greedy_std"], dtype=float)
                 tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
                 tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
 
+                # Save CSVs
                 save_csv(os.path.join(item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
                          steps_tgt, tgt_g_mean, tgt_g_std, header="greedy")
                 save_csv(os.path.join(item_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
                          steps_tgt, tgt_t_mean, tgt_t_std, header="train")
 
+                # Optional: source-like eval
                 src_name = next((k for k in dd.keys() if k.lower().startswith("source")), None)
                 if src_name is not None:
                     src = dd[src_name]
-                    steps_src = np.asarray(src.get("steps", steps_tgt), dtype=int)
+                    steps_src = np.asarray(src["steps"], dtype=int)
                     src_g_mean = np.asarray(src["greedy_mean"], dtype=float)
                     src_g_std = np.asarray(src["greedy_std"], dtype=float)
                     src_t_mean = np.asarray(src["train_mean"], dtype=float)
@@ -771,30 +773,53 @@ class RayCurriculumTrainer:
                     save_csv(os.path.join(item_dir, f"curriculum_eval_source_train_phase_{boundaries_str}.csv"),
                              steps_src, src_t_mean, src_t_std, header="train")
 
+                # ===== Strict plotting: assert totals equal, align on baseline steps =====
                 if self.run_baseline and base_curves is not None and steps_base is not None:
-                    X = np.union1d(steps_base, steps_tgt)
+                    # item total steps from its phases (design requires equality)
+                    item_total_steps = sum(int(p.get("steps", 0)) for p in phs)
+                    assert item_total_steps > 0, f"empty phases for item {lb}"
 
-                    def _interp(x_old, mean, std, x_new):
-                        return (np.interp(x_new, x_old, mean),
-                                np.interp(x_new, x_old, std))
+                    # --- strong checks before plotting ---
+                    def _tail(x):
+                        return int(x[-1]) if len(x) else None
 
-                    base_g_mean_i, base_g_std_i = _interp(steps_base, base_curves["greedy_mean"],
-                                                          base_curves["greedy_std"], X)
-                    base_t_mean_i, base_t_std_i = _interp(steps_base, base_curves["train_mean"],
-                                                          base_curves["train_std"], X)
-                    tgt_g_mean_i, tgt_g_std_i = _interp(steps_tgt, tgt_g_mean, tgt_g_std, X)
-                    tgt_t_mean_i, tgt_t_std_i = _interp(steps_tgt, tgt_t_mean, tgt_t_std, X)
+                    msg_base = f"[plot-check] baseline tail={_tail(steps_base)} len={len(steps_base)}"
+                    msg_tgt = f"[plot-check] tgt({lb}) tail={_tail(steps_tgt)} len={len(steps_tgt)}"
+                    assert _tail(steps_base) == item_total_steps, \
+                        f"baseline total({_tail(steps_base)}) != item_total({item_total_steps}). {msg_base}"
+                    assert _tail(steps_tgt) == item_total_steps, \
+                        f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
+
+                    # 用 baseline 的步长作为唯一 X（与 target 完全一致）
+                    X = steps_base
+
+                    def _interp_strict(x_old, mean, std, x_new, name):
+                        # 防止隐式外推：要求覆盖区间一致
+                        assert x_old[0] <= x_new[
+                            0], f"{name}: x_old starts after x_new (x_old[0]={x_old[0]}, x_new[0]={x_new[0]})"
+                        assert x_old[-1] >= x_new[
+                            -1], f"{name}: x_old ends before x_new (x_old[-1]={x_old[-1]}, x_new[-1]={x_new[-1]})"
+                        return (np.interp(x_new, x_old, mean), np.interp(x_new, x_old, std))
+
+                    base_g_mean_i, base_g_std_i = _interp_strict(
+                        steps_base, base_curves["greedy_mean"], base_curves["greedy_std"], X, "baseline/greedy")
+                    base_t_mean_i, base_t_std_i = _interp_strict(
+                        steps_base, base_curves["train_mean"], base_curves["train_std"], X, "baseline/train")
+
+                    tgt_g_mean_i, tgt_g_std_i = _interp_strict(
+                        steps_tgt, tgt_g_mean, tgt_g_std, X, f"tgt({lb})/greedy")
+                    tgt_t_mean_i, tgt_t_std_i = _interp_strict(
+                        steps_tgt, tgt_t_mean, tgt_t_std, X, f"tgt({lb})/train")
 
                     curves_source_i = None
                     if src_name is not None:
-                        src = dd[src_name]
-                        steps_src = np.asarray(src.get("steps", X), dtype=int)
-                        src_g_mean = np.asarray(src["greedy_mean"], dtype=float)
-                        src_g_std = np.asarray(src["greedy_std"], dtype=float)
-                        src_t_mean = np.asarray(src["train_mean"], dtype=float)
-                        src_t_std = np.asarray(src["train_std"], dtype=float)
-                        src_g_mean_i, src_g_std_i = _interp(steps_src, src_g_mean, src_g_std, X)
-                        src_t_mean_i, src_t_std_i = _interp(steps_src, src_t_mean, src_t_std, X)
+                        # source 也应当覆盖同一总步数
+                        assert steps_src[-1] == item_total_steps, \
+                            f"source total({steps_src[-1]}) != item_total({item_total_steps}) for {lb}/{src_name}"
+                        src_g_mean_i, src_g_std_i = _interp_strict(
+                            steps_src, src_g_mean, src_g_std, X, f"src({lb})/greedy")
+                        src_t_mean_i, src_t_std_i = _interp_strict(
+                            steps_src, src_t_mean, src_t_std, X, f"src({lb})/train")
                         curves_source_i = {
                             "greedy_mean": src_g_mean_i, "greedy_std": src_g_std_i,
                             "train_mean": src_t_mean_i, "train_std": src_t_std_i,
