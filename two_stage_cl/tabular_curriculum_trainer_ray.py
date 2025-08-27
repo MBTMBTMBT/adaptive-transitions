@@ -18,6 +18,7 @@ from ray.actor import ActorHandle
 from experiment_utils.utils import _import, ensure_dir
 from experiment_utils.save_media import save_policy_media
 from experiment_utils.env_factories import make_env
+from two_stage_cl.metrics import _auc, _ap, _ttt, _value_at
 
 from two_stage_cl.utils import plot_pairwise, save_csv
 
@@ -271,7 +272,10 @@ class SeedTrainer:
                  collect_intermediate: bool = True,
                  media_root: Optional[str] = None,
                  media_opts: Optional[Dict[str, Any]] = None,
-                 mode: str = "both"):  # "baseline" | "items" | "both"
+                 mode: str = "both",                     # "baseline" | "items" | "both" | "item"
+                 single_item_label: Optional[str] = None # NEW: run only one item when mode=="item"
+                 ):
+        # Keep original assignments
         self.seed = int(seed)
         self.envs = envs
         self.base_ph = baseline_phases
@@ -285,8 +289,9 @@ class SeedTrainer:
         self.collector = collector
         self.collect_on = bool(collect_intermediate)
         self.mode = str(mode)
+        self.single_item_label = single_item_label  # NEW
 
-        # media settings
+        # Media settings (unchanged)
         self.media_root = media_root
         self.media_on = media_root is not None
         mo = dict(media_opts or {})
@@ -476,8 +481,19 @@ class SeedTrainer:
 
     def run(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"seed": self.seed, "baseline": None, "items": {}}
+
+        # Run baseline schedule if requested
         if self.mode in ("baseline", "both"):
             out["baseline"] = self._run_schedule("baseline", self.base_ph, self.base_evals)
+
+        # NEW: per-item mode (run exactly one item label)
+        if self.mode == "item":
+            lb = self.single_item_label
+            assert lb is not None and lb in self.items_ph, f"invalid single_item_label={lb}"
+            out["items"][lb] = self._run_schedule(str(lb), self.items_ph[lb], self.evals_map[lb])
+            return out  # Important: do not run other items in this mode
+
+        # Original multi-item mode: iterate all items sequentially
         if self.mode in ("items", "both"):
             for label, phases in self.items_ph.items():
                 out["items"][label] = self._run_schedule(str(label), phases, self.evals_map[label])
@@ -488,20 +504,23 @@ class SeedTrainer:
 # Driver
 # ------------------------------
 class RayCurriculumTrainer:
-    def __init__(self,
-                 agent_ctor_path: str,
-                 agent_kwargs: Dict[str, Any],
-                 eval_every: int,
-                 n_eval_episodes: int,
-                 output_dir: Optional[str],
-                 *,
-                 wandb_step_base: int = 0,
-                 max_concurrency: Optional[int] = None,
-                 save_intermediate: bool = True,
-                 wandb_actor: Optional[ActorHandle] = None,
-                 media_opts: Optional[Dict[str, Any]] = None,
-                 run_baseline: bool = True,   # NEW
-                 run_items: bool = True):     # NEW
+    def __init__(
+             self,
+             agent_ctor_path: str,
+             agent_kwargs: Dict[str, Any],
+             eval_every: int,
+             n_eval_episodes: int,
+             output_dir: Optional[str],
+             *,
+             wandb_step_base: int = 0,
+             max_concurrency: Optional[int] = None,
+             save_intermediate: bool = True,
+             wandb_actor: Optional[ActorHandle] = None,
+             media_opts: Optional[Dict[str, Any]] = None,
+             run_baseline: bool = True,
+             run_items: bool = True,
+             metrics_opts: Optional[Dict[str, Any]] = None,
+    ):
         self.agent_ctor_path = agent_ctor_path
         self.agent_kwargs = dict(agent_kwargs)
         self.eval_every = int(eval_every)
@@ -516,6 +535,92 @@ class RayCurriculumTrainer:
         self.run_items = bool(run_items)
         if self.outdir is not None:
             ensure_dir(Path(self.outdir))
+        mo = dict(metrics_opts or {})
+        self.metrics_opts = {
+            "enabled": bool(mo.get("enabled", True)),
+            "ttt_fraction": float(mo.get("ttt_fraction", 0.90)),
+            "ap_last_k": int(mo.get("ap_last_k", 10)),
+            "use_max_step": mo.get("use_max_step", None),  # None or int
+            "compute_greedy": bool(mo.get("compute_greedy", True)),
+            "compute_train": bool(mo.get("compute_train", True)),
+            "js_baseline_first_k": int(mo.get("js_baseline_first_k", 1)),
+        }
+
+    # --- compute metrics independent of CSV/plots ---
+    def _compute_metrics(self, summary: Dict[str, Any],
+                         item_phases_map: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+        cfg = {
+            "ttt_fraction": self.metrics_opts["ttt_fraction"],
+            "ap_last_k": self.metrics_opts["ap_last_k"],
+            "use_max_step": self.metrics_opts["use_max_step"],
+            "compute_greedy": self.metrics_opts["compute_greedy"],
+            "compute_train": self.metrics_opts["compute_train"],
+            "js_baseline_first_k": self.metrics_opts["js_baseline_first_k"],
+        }
+        out = {"config": cfg, "baseline": {}, "items": {}}
+
+        # ---- baseline (use the primary eval in summary["baseline"]) ----
+        base_key = next(iter(summary["baseline"].keys()))
+        steps_base = np.asarray(summary["steps"], int)
+        b = summary["baseline"][base_key]
+        b_g = np.asarray(b["greedy_mean"], float)
+        b_t = np.asarray(b["train_mean"], float)
+
+        if cfg["compute_greedy"]:
+            out["baseline"]["greedy"] = {
+                "auc": _auc(steps_base, b_g, cfg["use_max_step"]),
+                "ap":  _ap(steps_base, b_g, cfg["ap_last_k"], cfg["use_max_step"]),
+                "ttt": _ttt(steps_base, b_g, cfg["ttt_fraction"], cfg["use_max_step"]),
+            }
+        if cfg["compute_train"]:
+            out["baseline"]["train"] = {
+                "auc": _auc(steps_base, b_t, cfg["use_max_step"]),
+                "ap":  _ap(steps_base, b_t, cfg["ap_last_k"], cfg["use_max_step"]),
+                "ttt": _ttt(steps_base, b_t, cfg["ttt_fraction"], cfg["use_max_step"]),
+            }
+
+        # ---- items (Target eval preferred) ----
+        for lb, eval_dict in summary["items"].items():
+            # select target eval
+            eval_name = "Target" if "Target" in eval_dict else next(iter(eval_dict.keys()))
+            e = eval_dict[eval_name]
+            xs = np.asarray(e["steps"], int)
+            g = np.asarray(e["greedy_mean"], float)
+            t = np.asarray(e["train_mean"], float)
+
+            mi = {}
+            if cfg["compute_greedy"]:
+                mi.setdefault("greedy", {})
+                mi["greedy"]["auc"] = _auc(xs, g, cfg["use_max_step"])
+                mi["greedy"]["ap"]  = _ap(xs, g, cfg["ap_last_k"], cfg["use_max_step"])
+                mi["greedy"]["ttt"] = _ttt(xs, g, cfg["ttt_fraction"], cfg["use_max_step"])
+            if cfg["compute_train"]:
+                mi.setdefault("train", {})
+                mi["train"]["auc"] = _auc(xs, t, cfg["use_max_step"])
+                mi["train"]["ap"]  = _ap(xs, t, cfg["ap_last_k"], cfg["use_max_step"])
+                mi["train"]["ttt"] = _ttt(xs, t, cfg["ttt_fraction"], cfg["use_max_step"])
+
+            # Jumpstart: item 2nd phase start vs baseline start (avg first K)
+            js = {}
+            phs = item_phases_map.get(lb, [])
+            if len(phs) >= 2:
+                second_phase_start = int(phs[0].get("steps", 0))  # boundary after phase-0
+                k0 = max(1, int(cfg["js_baseline_first_k"]))
+                if cfg["compute_greedy"]:
+                    base_start_g = float(np.mean(b_g[:k0]))
+                    item_p2_g = _value_at(xs, g, second_phase_start)
+                    js["greedy"] = float(item_p2_g - base_start_g)
+                if cfg["compute_train"]:
+                    base_start_t = float(np.mean(b_t[:k0]))
+                    item_p2_t = _value_at(xs, t, second_phase_start)
+                    js["train"] = float(item_p2_t - base_start_t)
+                js["second_phase_start_step"] = second_phase_start
+                js["baseline_start_step"] = 0
+            mi["jumpstart"] = js
+
+            out["items"][str(lb)] = mi
+
+        return out
 
     def run(self,
             seeds: List[int],
@@ -530,7 +635,7 @@ class RayCurriculumTrainer:
 
         seeds = sorted(map(int, seeds))
 
-        # ===== Normalize baseline total steps to match curriculum total =====
+        # ===== Normalize baseline total steps to match curriculum total (unchanged) =====
         def _sum_steps(phs: List[Dict[str, Any]]) -> int:
             return sum(int(p.get("steps", 0)) for p in phs)
 
@@ -573,21 +678,31 @@ class RayCurriculumTrainer:
             max_queue=16384,
         )
 
-        # ===== Submit tasks =====
-        maxc = self.max_conc or min(len(seeds) * (1 + int(self.run_baseline and self.run_items)), os.cpu_count() or 1)
-        pending: List[Tuple[int, str]] = []  # (seed, mode)
+        # ===== Submit per-(seed,item) tasks =====
+        item_labels = list(item_phases_map.keys()) if self.run_items else []
+
+        # Build task queue: (seed, mode, item_label)
+        pending: List[Tuple[int, str, Optional[str]]] = []
         if self.run_baseline:
-            pending += [(s, "baseline") for s in seeds]
+            pending += [(s, "baseline", None) for s in seeds]
         if self.run_items:
-            pending += [(s, "items") for s in seeds]
-        in_flight: Dict[Any, Tuple[int, str]] = {}
+            for s in seeds:
+                for lb in item_labels:
+                    pending.append((s, "item", lb))
+
+        # Decide concurrency (fallback to CPU count)
+        total_tasks = len([1 for x in pending])
+        maxc = self.max_conc or min(total_tasks, os.cpu_count() or 1)
+
+        in_flight: Dict[Any, Tuple[int, str, Optional[str]]] = {}
         results: List[Dict[str, Any]] = []
 
         media_root = os.path.join(self.outdir, "media") if self.outdir is not None else None
         if media_root is not None:
             ensure_dir(Path(media_root))
 
-        def submit(seed: int, mode: str, save_media: bool):
+        # Helper to submit one actor job
+        def submit(seed: int, mode: str, item_label: Optional[str], save_media: bool):
             actor = SeedTrainer.options(num_cpus=1).remote(
                 seed=seed, envs=envs,
                 baseline_phases=baseline_phases, baseline_evals=baseline_evals,
@@ -598,32 +713,33 @@ class RayCurriculumTrainer:
                 collect_intermediate=self.save_intermediate,
                 media_root=(media_root if save_media else None),
                 media_opts=self.media_opts,
-                mode=mode,
+                mode=mode,                             # "baseline" or "item"
+                single_item_label=item_label,          # None for baseline; label for item
             )
             fut = actor.run.remote()
-            in_flight[fut] = (seed, mode)
+            in_flight[fut] = (seed, mode, item_label)
 
         # Prime queue
         while pending and len(in_flight) < maxc:
-            seed, mode = pending.pop(0)
-            print(f"[seed {seed}] submit ({mode}).")
-            save_media = (len(in_flight) == 0)
-            submit(seed, mode, save_media)
+            seed, mode, lb = pending.pop(0)
+            print(f"[seed {seed}] submit ({mode}{'/' + lb if lb else ''}).")
+            save_media = (len(in_flight) == 0)  # keep first task uploading media (optional policy)
+            submit(seed, mode, lb, save_media)
 
         # Drain
         while in_flight:
             done, _ = ray.wait(list(in_flight.keys()), timeout=None, num_returns=1)
             for fut in done:
-                seed, mode = in_flight.pop(fut)
+                seed, mode, lb = in_flight.pop(fut)
                 res = ray.get(fut)
                 results.append(res)
-                print(f"[seed {seed}] done ({mode}).")
+                print(f"[seed {seed}] done ({mode}{'/' + lb if lb else ''}).")
                 if pending and len(in_flight) < maxc:
-                    seed2, mode2 = pending.pop(0)
-                    print(f"[seed {seed2}] submit ({mode2}).")
-                    submit(seed2, mode2, save_media=False)
+                    seed2, mode2, lb2 = pending.pop(0)
+                    print(f"[seed {seed2}] submit ({mode2}{'/' + lb2 if lb2 else ''}).")
+                    submit(seed2, mode2, lb2, save_media=False)
 
-        # ===== Merge baseline/items per seed =====
+        # ===== Merge baseline/items per seed (unchanged) =====
         by_seed: Dict[int, Dict[str, Any]] = {}
         for r in results:
             sid = int(r.get("seed", -1))
@@ -646,7 +762,7 @@ class RayCurriculumTrainer:
 
         merged_results: List[Dict[str, Any]] = [by_seed[s] for s in sorted(by_seed.keys())]
 
-        # ===== Optional timeline dump =====
+        # ===== Optional timeline dump (unchanged) =====
         if self.outdir is not None and self.save_intermediate:
             try:
                 tl = ray.get(collector.timeline.remote())
@@ -655,8 +771,11 @@ class RayCurriculumTrainer:
             except Exception as e:
                 print(f"[driver] dump timeline failed: {e}")
 
-        # ===== Aggregate on merged results =====
+        # ===== Aggregate & metrics (unchanged) =====
         summary = self._aggregate(merged_results, item_phases_map)
+        if self.metrics_opts.get("enabled", True):
+            metrics = self._compute_metrics(summary, item_phases_map)
+            summary["metrics"] = metrics
 
         # ===== Save per-seed JSONs =====
         if self.outdir is not None:
@@ -790,11 +909,9 @@ class RayCurriculumTrainer:
                     assert _tail(steps_tgt) == item_total_steps, \
                         f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
 
-                    # 用 baseline 的步长作为唯一 X（与 target 完全一致）
                     X = steps_base
 
                     def _interp_strict(x_old, mean, std, x_new, name):
-                        # 防止隐式外推：要求覆盖区间一致
                         assert x_old[0] <= x_new[
                             0], f"{name}: x_old starts after x_new (x_old[0]={x_old[0]}, x_new[0]={x_new[0]})"
                         assert x_old[-1] >= x_new[
@@ -813,7 +930,6 @@ class RayCurriculumTrainer:
 
                     curves_source_i = None
                     if src_name is not None:
-                        # source 也应当覆盖同一总步数
                         assert steps_src[-1] == item_total_steps, \
                             f"source total({steps_src[-1]}) != item_total({item_total_steps}) for {lb}/{src_name}"
                         src_g_mean_i, src_g_std_i = _interp_strict(
@@ -919,7 +1035,10 @@ def run_curriculum(
     save_intermediate: bool = True,
     wandb_actor: Optional[ActorHandle] = None,
     media_opts: Optional[Dict[str, Any]] = None,
-    wandb_step_base: int = 0,                    # put this at the end
+    wandb_step_base: int = 0,
+    run_baseline: bool = True,
+    run_items: bool = True,
+    metrics_opts: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     - Pure dicts for phases/evals/envs.
@@ -936,7 +1055,10 @@ def run_curriculum(
         save_intermediate=save_intermediate,
         wandb_actor=wandb_actor,
         media_opts=media_opts,
-        wandb_step_base=wandb_step_base,         # <<< IMPORTANT: forward the base here
+        wandb_step_base=wandb_step_base,
+        run_baseline=run_baseline,
+        run_items=run_items,
+        metrics_opts=metrics_opts,
     )
     return trainer.run(
         seeds=seeds,

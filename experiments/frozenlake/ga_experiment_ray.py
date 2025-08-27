@@ -375,7 +375,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval-episodes", type=int, default=100)
 
     # Seeds and parallelism for training
-    p.add_argument("--train-seeds", type=int, default=25, help="Use N to get seeds [0..N-1].")
+    p.add_argument("--train-seeds", type=int, default=5, help="Use N to get seeds [0..N-1].")
     p.add_argument("--train-max-concurrency", type=int, default=0,
                    help="0=auto(cpu_count) or explicit upper bound.")
     p.add_argument("--train-save-intermediate", type=str2bool, default=True)
@@ -592,7 +592,7 @@ def main():
         max_concurrency = _auto_workers(args.train_max_concurrency)
 
         # Call the new curriculum runner
-        _ = run_curriculum(
+        cl_summary = run_curriculum(
             seeds=seeds,
             envs=envs,
             baseline_phases=baseline_phases,
@@ -611,6 +611,7 @@ def main():
                 "target_size": (128, 128),
             },
         )
+        print(f"[MAIN] Curriculum run done; summary:\n{cl_summary}")
     else:
         print("[MAIN] Training skipped or no JSON files; skipping curriculum stage.")
 
