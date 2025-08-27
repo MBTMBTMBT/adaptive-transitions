@@ -30,7 +30,7 @@ from experiment_utils.utils import (
 )
 
 # New W&B writer actor and new GA entrypoint
-from experiment_utils.wandb_utils import WandbActor
+from experiment_utils.wandb_utils import WandbActor, capture_prints_to_wandb
 from genetic_algorithms.ga_mdp_ray import run_ga
 from mdp_network.mdp_network import MDPNetwork
 from mdp_network.mdp_tables import q_table_to_policy, create_random_policy
@@ -425,7 +425,7 @@ def main():
 
     # Init Ray once up front, since we will create a WandbWriter actor
     if not ray.is_initialized():
-        ray.init(ignore_reinit_error=True)
+        ray.init(ignore_reinit_error=True, log_to_driver=False)
 
     # Create WandbWriter actor (pass-through to run_ga & run_curriculum)
     init_kwargs: Dict[str, Any] = {
@@ -438,6 +438,7 @@ def main():
         init_kwargs["entity"] = args.wandb_entity
     env_overrides = {"WANDB_MODE": args.wandb_mode, "WANDB_START_METHOD": "thread"}
     wandb_actor: ActorHandle = WandbActor.remote(init_kwargs, env=env_overrides)
+    capture_prints_to_wandb(wandb_actor)
 
     # ----------------------------- GA Stage -----------------------------
     if args.json_dir:

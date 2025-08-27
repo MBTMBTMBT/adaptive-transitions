@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -100,5 +102,55 @@ class WandbActor:
         # Example: call_wandb("alert", title="x", text="y")
         return getattr(self.wandb, method)(*args, **kwargs)
 
+    def write_console(self, text: str, stream: str = "stdout") -> None:
+        """Forward a line into this actor's console, which W&B Logs captures."""
+        import sys
+        s = str(text)
+        # Ensure line break to avoid sticking lines together
+        if not (s.endswith("\n") or s.endswith("\r")):
+            s += "\n"
+        if stream == "stderr":
+            sys.stderr.write(s)
+            sys.stderr.flush()
+        else:
+            sys.stdout.write(s)
+            sys.stdout.flush()
+
     def finish(self) -> None:
         self.run.finish()
+
+
+def capture_prints_to_wandb(wandb_actor, capture_stderr: bool = True) -> None:
+    """
+    Tee sys.stdout/sys.stderr to the WandbActor so all prints appear in W&B Logs.
+    Non-blocking per line: uses actor.write_console.remote().
+    """
+
+    class _Tee:
+        def __init__(self, original, stream_name: str):
+            self._orig = original
+            self._stream_name = stream_name
+            self._buf = ""
+            self._lock = threading.Lock()
+
+        def write(self, s: str) -> int:
+            with self._lock:
+                written = self._orig.write(s)   # keep local console behavior
+                self._orig.flush()
+                self._buf += s
+                # Split by newline or carriage return to forward complete lines
+                while ("\n" in self._buf) or ("\r" in self._buf):
+                    sep = "\n" if "\n" in self._buf else "\r"
+                    line, self._buf = self._buf.split(sep, 1)
+                    if line:
+                        # Async, one RPC per completed line
+                        wandb_actor.write_console.remote(line, stream=self._stream_name)
+                return written
+
+        def flush(self) -> None:
+            self._orig.flush()
+
+    sys.stdout = _Tee(sys.stdout, "stdout")
+    if capture_stderr:
+        sys.stderr = _Tee(sys.stderr, "stderr")
+
