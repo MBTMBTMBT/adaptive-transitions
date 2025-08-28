@@ -554,6 +554,16 @@ class RayCurriculumTrainer:
     # --- compute metrics independent of CSV/plots ---
     def _compute_metrics(self, summary: Dict[str, Any],
                          item_phases_map: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """
+        Compute offline metrics from the aggregated summary.
+
+        Additions:
+          - For each item (preferring 'Target' eval), compute phase-wise AUCs:
+            * 'auc_phase.p1' : area over [start_step, boundary_step]
+            * 'auc_phase.p2' : area over [boundary_step, end_step]
+            * 'boundary_step': the phase-1 start / phase-0 end (i.e., sum of steps in phase-0)
+          Only available when that item has >= 2 phases.
+        """
         cfg = {
             "ttt_fraction": self.metrics_opts["ttt_fraction"],
             "ap_last_k": self.metrics_opts["ap_last_k"],
@@ -564,7 +574,7 @@ class RayCurriculumTrainer:
         }
         out = {"config": cfg, "baseline": {}, "items": {}}
 
-        # ---- baseline (use the primary eval in summary["baseline"]) ----
+        # ---------------- Baseline (use the primary eval in summary["baseline"]) ----------------
         base_key = next(iter(summary["baseline"].keys()))
         steps_base = np.asarray(summary["steps"], int)
         b = summary["baseline"][base_key]
@@ -574,40 +584,85 @@ class RayCurriculumTrainer:
         if cfg["compute_greedy"]:
             out["baseline"]["greedy"] = {
                 "auc": _auc(steps_base, b_g, cfg["use_max_step"]),
-                "ap":  _ap(steps_base, b_g, cfg["ap_last_k"], cfg["use_max_step"]),
+                "ap": _ap(steps_base, b_g, cfg["ap_last_k"], cfg["use_max_step"]),
                 "ttt": _ttt(steps_base, b_g, cfg["ttt_fraction"], cfg["use_max_step"]),
             }
         if cfg["compute_train"]:
             out["baseline"]["train"] = {
                 "auc": _auc(steps_base, b_t, cfg["use_max_step"]),
-                "ap":  _ap(steps_base, b_t, cfg["ap_last_k"], cfg["use_max_step"]),
+                "ap": _ap(steps_base, b_t, cfg["ap_last_k"], cfg["use_max_step"]),
                 "ttt": _ttt(steps_base, b_t, cfg["ttt_fraction"], cfg["use_max_step"]),
             }
 
-        # ---- items (Target eval preferred) ----
+        # ------------ Helper: trapezoidal AUC on a closed interval [lo, hi] via interpolation ------------
+        def _segmented_auc(xs: np.ndarray, ys: np.ndarray, lo: float, hi: float) -> float:
+            """
+            Compute AUC restricted to [lo, hi]. Endpoints are included by linear interpolation.
+            Assumes xs is strictly increasing with len>=2.
+            """
+            if hi <= lo:
+                return 0.0
+            xs = np.asarray(xs, dtype=float)
+            ys = np.asarray(ys, dtype=float)
+            assert xs.ndim == 1 and ys.ndim == 1 and xs.size == ys.size and xs.size >= 2, "invalid curve"
+            # Clip to domain
+            lo = max(lo, xs[0])
+            hi = min(hi, xs[-1])
+            if hi <= lo:
+                return 0.0
+            y_lo = float(np.interp(lo, xs, ys))
+            y_hi = float(np.interp(hi, xs, ys))
+            mask = (xs > lo) & (xs < hi)
+            X = np.concatenate(([lo], xs[mask], [hi]))
+            Y = np.concatenate(([y_lo], ys[mask], [y_hi]))
+            return float(np.trapz(Y, X))
+
+        # ---------------- Items (Target eval preferred) + phase-wise AUCs ----------------
         for lb, eval_dict in summary["items"].items():
-            # select target eval
+            # Select the eval to compute metrics on (Target preferred)
             eval_name = "Target" if "Target" in eval_dict else next(iter(eval_dict.keys()))
             e = eval_dict[eval_name]
             xs = np.asarray(e["steps"], int)
             g = np.asarray(e["greedy_mean"], float)
             t = np.asarray(e["train_mean"], float)
 
-            mi = {}
+            mi: Dict[str, Any] = {}
+
+            # ----- whole-curve metrics -----
             if cfg["compute_greedy"]:
                 mi.setdefault("greedy", {})
                 mi["greedy"]["auc"] = _auc(xs, g, cfg["use_max_step"])
-                mi["greedy"]["ap"]  = _ap(xs, g, cfg["ap_last_k"], cfg["use_max_step"])
+                mi["greedy"]["ap"] = _ap(xs, g, cfg["ap_last_k"], cfg["use_max_step"])
                 mi["greedy"]["ttt"] = _ttt(xs, g, cfg["ttt_fraction"], cfg["use_max_step"])
             if cfg["compute_train"]:
                 mi.setdefault("train", {})
                 mi["train"]["auc"] = _auc(xs, t, cfg["use_max_step"])
-                mi["train"]["ap"]  = _ap(xs, t, cfg["ap_last_k"], cfg["use_max_step"])
+                mi["train"]["ap"] = _ap(xs, t, cfg["ap_last_k"], cfg["use_max_step"])
                 mi["train"]["ttt"] = _ttt(xs, t, cfg["ttt_fraction"], cfg["use_max_step"])
 
-            # Jumpstart: item 2nd phase start vs baseline start (avg first K)
-            js = {}
+            # ----- phase-wise AUCs (only when item has >= 2 phases) -----
             phs = item_phases_map.get(lb, [])
+            if len(phs) >= 2 and xs.size >= 2:
+                # boundary between phase-0 and phase-1 in the global training step space
+                boundary = float(int(phs[0].get("steps", 0)))
+                start_s = float(xs[0])
+                end_s = float(xs[-1])
+
+                # Compute segmented AUCs for greedy/train over [start,boundary] and [boundary,end]
+                if cfg["compute_greedy"]:
+                    p1 = _segmented_auc(xs, g, start_s, boundary)
+                    p2 = _segmented_auc(xs, g, boundary, end_s)
+                    mi.setdefault("greedy", {})
+                    mi["greedy"]["auc_phase"] = {"p1": float(p1), "p2": float(p2), "boundary_step": int(boundary)}
+
+                if cfg["compute_train"]:
+                    p1 = _segmented_auc(xs, t, start_s, boundary)
+                    p2 = _segmented_auc(xs, t, boundary, end_s)
+                    mi.setdefault("train", {})
+                    mi["train"]["auc_phase"] = {"p1": float(p1), "p2": float(p2), "boundary_step": int(boundary)}
+
+            # ----- jumpstart: item 2nd-phase start vs baseline start (avg first K) -----
+            js: Dict[str, Any] = {}
             if len(phs) >= 2:
                 second_phase_start = int(phs[0].get("steps", 0))  # boundary after phase-0
                 k0 = max(1, int(cfg["js_baseline_first_k"]))

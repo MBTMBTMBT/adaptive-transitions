@@ -279,27 +279,32 @@ def run_ga(
         except Exception:
             pass
 
-    # ===== Precompute baseline policy/occupancy (used by score fns) =====
-    gamma = float(solver.get("vi_gamma", 0.99))
-    theta = float(solver.get("vi_theta", 1e-6))
-    max_iters = int(solver.get("vi_max_iterations", 1000))
-    policy_temp = float(solver.get("policy_temperature", 1.0))
-    policy_mix = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
-    tie_tol = float(solver.get("policy_tie_tol", 1e-6))
+        # ===== Precompute baseline policy/occupancy (used by score fns) =====
+        gamma = float(solver.get("vi_gamma", 0.99))
+        theta = float(solver.get("vi_theta", 1e-6))
+        max_iters = int(solver.get("vi_max_iterations", 1000))
+        policy_temp = float(solver.get("policy_temperature", 1.0))
+        policy_mix = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
+        tie_tol = float(solver.get("policy_tie_tol", 1e-6))
 
-    t0 = time.perf_counter()
-    _, Q = optimal_value_iteration(base_mdp, gamma=gamma, theta=theta, max_iterations=max_iters)
-    base_policy = q_table_to_policy(
-        Q,
-        states=list(base_mdp.states),
-        num_actions=base_mdp.num_actions,
-        mixing=policy_mix,
-        temperature=policy_temp,
-        tie_tol=tie_tol,
-    )
-    base_occupancy = compute_occupancy_measure(base_mdp, base_policy, gamma=gamma, theta=theta, max_iterations=max_iters)
-    precomputed = [base_policy.to_portable(), base_occupancy.to_portable()]
-    t1 = time.perf_counter()
+        t0 = time.perf_counter()
+        _, Q = optimal_value_iteration(base_mdp, gamma=gamma, theta=theta, max_iterations=max_iters)
+        base_policy = q_table_to_policy(
+            Q,
+            states=list(base_mdp.states),
+            num_actions=base_mdp.num_actions,
+            mixing=policy_mix,
+            temperature=policy_temp,
+            tie_tol=tie_tol,
+        )
+        base_occupancy = compute_occupancy_measure(base_mdp, base_policy, gamma=gamma, theta=theta,
+                                                   max_iterations=max_iters)
+        precomputed = [
+            base_policy.to_portable(),
+            base_occupancy.to_portable(),
+            base_mdp.to_portable(),
+        ]
+        t1 = time.perf_counter()
 
     if wandb_writer is not None:
         try:

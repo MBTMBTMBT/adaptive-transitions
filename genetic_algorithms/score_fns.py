@@ -89,9 +89,16 @@ def obj_multi_kl_and_perf(mdp: MDPNetwork, shared: Dict[str, Any], *, kl_delta: 
 
 def obj_multi_perf(mdp: MDPNetwork, shared: Dict[str, Any], *, blend_weight: float = 0.8) -> Sequence[float]:
     """
-    Returns:
-      1) integral( blend(policy2, random, w) -> baseline_policy )
-      2) integral( random -> policy2 )
+    Returns, in this order (maximize both):
+      1) integral( random -> blended(policy2, random, w) )  evaluated on the *current* candidate MDP `mdp`.
+      2) integral( blended(policy2, random, w) -> base_optimal_policy ) evaluated on the *ORIGINAL* base MDP.
+
+    Strict requirements on `shared`:
+      - shared['precomputed'][0] = base_optimal_policy (PolicyTable portable) for the ORIGINAL base MDP.
+      - shared['precomputed'][1] = base_occupancy (portable) [kept for compatibility; unused here].
+      - shared['precomputed'][2] = ORIGINAL base MDP portable (MDPNetwork.to_portable()).
+
+    If any of the above entries are missing or None, this function raises a ValueError.
     """
     solver = shared.get("solver", {})
     gamma = float(solver.get("vi_gamma", 0.99))
@@ -106,31 +113,42 @@ def obj_multi_perf(mdp: MDPNetwork, shared: Dict[str, Any], *, blend_weight: flo
     pmax_iter = int(solver.get("perf_max_iterations", max_iter))
     numpoints = int(solver.get("perf_numpoints", 100))
 
-    pre = shared.get("precomputed", None) or []
-    base_policy = PolicyTable.from_portable(pre[0]) if len(pre) >= 1 else None
+    # --- Strict validation of shared precomputed materials ---
+    pre = shared.get("precomputed", None)
+    if not (isinstance(pre, list) and len(pre) >= 3 and pre[0] is not None and pre[2] is not None):
+        raise ValueError(
+            "obj_multi_perf requires shared['precomputed'] = "
+            "[base_policy_portable, base_occupancy_portable, base_mdp_portable]; "
+            "got: {}".format(type(pre).__name__)
+        )
 
+    base_policy = PolicyTable.from_portable(pre[0])
+    base_mdp = MDPNetwork.from_portable(pre[2])
+
+    # Optimal policy of the *candidate* MDP
     _, Q2 = optimal_value_iteration(mdp, gamma=gamma, theta=theta, max_iterations=max_iter)
     policy2: PolicyTable = q_table_to_policy(
         Q2, states=list(mdp.states), num_actions=mdp.num_actions,
         mixing=mixing, temperature=temperature, tie_tol=tie_tol,
     )
 
+    # Intermediate (blended) policy between the candidate-optimal and random (on candidate MDP's action space)
     prior_rand = create_random_policy(mdp)
     blended = blend_policies(policy2, prior_rand, weight=float(blend_weight))
 
-    if base_policy is not None:
-        _curve, integral1 = performance_curve_and_integral(
-            prior_policy=blended, target_policy=base_policy, mdp_network=mdp,
-            numpoints=numpoints, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
-        )
-    else:
-        integral1 = 0.0
-
-    _curve, integral2 = performance_curve_and_integral(
-        prior_policy=prior_rand, target_policy=policy2, mdp_network=mdp,
+    # ---- Objective 0: random -> blended on the CANDIDATE MDP ----
+    _curve, integral0 = performance_curve_and_integral(
+        prior_policy=prior_rand, target_policy=blended, mdp_network=mdp,
         numpoints=numpoints, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
     )
-    return [float(integral1), float(integral2)]
+
+    # ---- Objective 1: blended -> base_optimal on the ORIGINAL base MDP ----
+    _curve, integral1 = performance_curve_and_integral(
+        prior_policy=blended, target_policy=base_policy, mdp_network=base_mdp,
+        numpoints=numpoints, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
+    )
+
+    return [float(integral0), float(integral1)]
 
 
 SCORE_FNS: Dict[str, Callable[..., Sequence[float]]] = {
