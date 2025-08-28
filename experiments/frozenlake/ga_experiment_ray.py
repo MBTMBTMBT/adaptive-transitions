@@ -474,7 +474,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=100)
-    p.add_argument("--ga-generations", type=int, default=200)
+    p.add_argument("--ga-generations", type=int, default=250)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=20)
     p.add_argument("--ga-crossover", type=float, default=0.5)
