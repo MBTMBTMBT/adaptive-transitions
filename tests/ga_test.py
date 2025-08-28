@@ -24,16 +24,25 @@ from genetic_algorithms.ga_mdp_search import (
 from mdp_network.mdp_network import MDPNetwork
 
 # ---- Tables (serialisable) ----
-from mdp_network.mdp_tables import PolicyTable, ValueTable, QTable, q_table_to_policy  # noqa: F401
+from mdp_network.mdp_tables import (
+    PolicyTable,
+    ValueTable,
+    QTable,
+    q_table_to_policy,
+)  # noqa: F401
 
 # ---- Custom FrozenLake environment exposing MDPNetwork ----
 from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 
 
-def build_frozenlake_mdp_via_env(map_name: str = "8x8", is_slippery: bool = True) -> MDPNetwork:
+def build_frozenlake_mdp_via_env(
+    map_name: str = "8x8", is_slippery: bool = True
+) -> MDPNetwork:
     """Construct an MDPNetwork using the CustomisedFrozenLakeEnv helper."""
-    env = CustomisedFrozenLakeEnv(render_mode=None, map_name=map_name, is_slippery=is_slippery)
+    env = CustomisedFrozenLakeEnv(
+        render_mode=None, map_name=map_name, is_slippery=is_slippery
+    )
     env.reset(seed=0)
     mdp = env.get_mdp_network()
     return mdp
@@ -56,7 +65,9 @@ if __name__ == "__main__":
 
     print("\n=== Build FrozenLake 8x8 (slippery) MDPNetwork ===")
     mdp = build_frozenlake_mdp_via_env(map_name="8x8", is_slippery=True)
-    print(f"|S|={len(mdp.states)}  |A|={mdp.num_actions}  terminals={len(mdp.terminal_states)}")
+    print(
+        f"|S|={len(mdp.states)}  |A|={mdp.num_actions}  terminals={len(mdp.terminal_states)}"
+    )
 
     workers = os.cpu_count() or 1
 
@@ -74,7 +85,6 @@ if __name__ == "__main__":
         tournament_k=2,
         elitism_num=5,
         crossover_rate=0.5,
-
         allow_self_loops=True,
         min_out_degree=1,
         max_out_degree=4,
@@ -89,9 +99,7 @@ if __name__ == "__main__":
         reward_tweak_edges_per_child=0,  # keep rewards unchanged
         reward_k_percent=0.05,
         reward_ref_floor=1e-3,
-
         add_edge_allow_out_of_scope=False,  # restrict new edges to in-scope states
-
         # Parallel scoring configuration
         n_workers=workers,
         score_fn_names=["obj_multi_perf"],
@@ -101,16 +109,13 @@ if __name__ == "__main__":
             "policy_tie_tol": POLICY_TIE_TOL,
             "blend_weight": 0.8,
         },
-
         # Parallel mutation
         mutation_n_workers=workers,
-
         # Graph distance/scope constraints
         dist_max_hops=10,
         dist_node_cap=64,
         dist_weight_eps=1e-6,
         dist_unreachable=1e9,
-
         # VI / policy / performance defaults
         vi_gamma=0.99,
         vi_theta=1e-3,
@@ -120,19 +125,28 @@ if __name__ == "__main__":
         perf_gamma=None,
         perf_theta=None,
         perf_max_iterations=None,
-
         seed=4444,
     )
 
     # Sync configuration with W&B
-    run.config.update({"policy_mixing": POLICY_MIXING, "policy_tie_tol": POLICY_TIE_TOL, **asdict(cfg)}, allow_val_change=True)
+    run.config.update(
+        {
+            "policy_mixing": POLICY_MIXING,
+            "policy_tie_tol": POLICY_TIE_TOL,
+            **asdict(cfg),
+        },
+        allow_val_change=True,
+    )
 
     # ---------------- GA driver ----------------
     ga = MDPEvolutionGA(base_mdp=mdp, cfg=cfg, wb_run=run)
 
     # ----- Precompute baseline policy and occupancy -----
     V, Q = optimal_value_iteration(
-        mdp, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
+        mdp,
+        gamma=cfg.vi_gamma,
+        theta=cfg.vi_theta,
+        max_iterations=cfg.vi_max_iterations,
     )
     base_policy = q_table_to_policy(
         Q,
@@ -143,7 +157,11 @@ if __name__ == "__main__":
         tie_tol=POLICY_TIE_TOL,
     )
     base_occupancy = compute_occupancy_measure(
-        mdp, base_policy, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
+        mdp,
+        base_policy,
+        gamma=cfg.vi_gamma,
+        theta=cfg.vi_theta,
+        max_iterations=cfg.vi_max_iterations,
     )
     ga.precomputed_artifacts = [base_policy, base_occupancy]
 
@@ -163,9 +181,17 @@ if __name__ == "__main__":
             "policy_mixing": POLICY_MIXING,
             "policy_tie_tol": POLICY_TIE_TOL,
             "perf_numpoints": cfg.perf_numpoints,
-            "perf_gamma": cfg.perf_gamma if cfg.perf_gamma is not None else cfg.vi_gamma,
-            "perf_theta": cfg.perf_theta if cfg.perf_theta is not None else cfg.vi_theta,
-            "perf_max_iterations": cfg.perf_max_iterations if cfg.perf_max_iterations is not None else cfg.vi_max_iterations,
+            "perf_gamma": (
+                cfg.perf_gamma if cfg.perf_gamma is not None else cfg.vi_gamma
+            ),
+            "perf_theta": (
+                cfg.perf_theta if cfg.perf_theta is not None else cfg.vi_theta
+            ),
+            "perf_max_iterations": (
+                cfg.perf_max_iterations
+                if cfg.perf_max_iterations is not None
+                else cfg.vi_max_iterations
+            ),
         },
         precomputed_portables=[base_policy.to_portable(), base_occupancy.to_portable()],
     )
@@ -201,13 +227,18 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    print("\nOK: NSGA-II GA ran successfully on FrozenLake 8x8 with parallel scoring & offspring.")
+    print(
+        "\nOK: NSGA-II GA ran successfully on FrozenLake 8x8 with parallel scoring & offspring."
+    )
 
     # Save Pareto front MDPs to disk
     K = len(pareto_mdps)
     saved_files = []
     for i in range(K):
-        out_path = os.path.join(out_dir, f"pareto_{i}_objs_{'_'.join(f'{v:.4f}' for v in pareto_objs[i])}.json")
+        out_path = os.path.join(
+            out_dir,
+            f"pareto_{i}_objs_{'_'.join(f'{v:.4f}' for v in pareto_objs[i])}.json",
+        )
         pareto_mdps[i].export_to_json(out_path)
         saved_files.append(out_path)
         print(f"Saved PF[{i}] -> {out_path}")

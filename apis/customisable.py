@@ -13,7 +13,9 @@ class CustomisableEnvAbs(ABC):
             self.networkx_env.reset()
 
     @abstractmethod
-    def encode_state(self,) -> int:
+    def encode_state(
+        self,
+    ) -> int:
         pass
 
     @abstractmethod
@@ -21,9 +23,13 @@ class CustomisableEnvAbs(ABC):
         pass
 
     @abstractmethod
-    def get_start_states(self,) -> List[int]:
+    def get_start_states(
+        self,
+    ) -> List[int]:
         pass
 
     @abstractmethod
-    def get_mdp_network(self,) -> MDPNetwork:
+    def get_mdp_network(
+        self,
+    ) -> MDPNetwork:
         pass

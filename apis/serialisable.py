@@ -3,6 +3,7 @@ from typing import Any, Dict, Type, TypeVar
 
 T = TypeVar("T", bound="Serialisable")
 
+
 class Serialisable(ABC):
     """
     ABC for objects that can be serialized to a JSON-friendly dict and

@@ -12,13 +12,15 @@ class MDPNetwork(Serialisable):
     Supports optional string<->int state mapping.
     """
 
-    def __init__(self,
-                 config_data: Optional[Dict] = None,
-                 config_path: Optional[str] = None,
-                 int_to_state: Optional[Dict[int, Union[str, int]]] = None,
-                 state_to_int: Optional[Dict[Union[str, int], int]] = None):
+    def __init__(
+        self,
+        config_data: Optional[Dict] = None,
+        config_path: Optional[str] = None,
+        int_to_state: Optional[Dict[int, Union[str, int]]] = None,
+        state_to_int: Optional[Dict[Union[str, int], int]] = None,
+    ):
         if config_path is not None:
-            with open(config_path, 'r') as f:
+            with open(config_path, "r") as f:
                 self.config = json.load(f)
         elif config_data is not None:
             self.config = config_data.copy()
@@ -28,7 +30,9 @@ class MDPNetwork(Serialisable):
         # Optional mapping
         self.int_to_state = int_to_state
         self.state_to_int = state_to_int
-        self.has_string_mapping = (int_to_state is not None) and (state_to_int is not None)
+        self.has_string_mapping = (int_to_state is not None) and (
+            state_to_int is not None
+        )
 
         # Core config
         self.num_actions = int(self.config["num_actions"])
@@ -57,7 +61,9 @@ class MDPNetwork(Serialisable):
             return int(self.state_to_int[state])
         return int(state)
 
-    def _format_state_output(self, int_state: int, as_string: bool = False) -> Union[int, str]:
+    def _format_state_output(
+        self, int_state: int, as_string: bool = False
+    ) -> Union[int, str]:
         """Format output state."""
         if as_string and self.has_string_mapping:
             return self.int_to_state.get(int_state, int_state)
@@ -101,14 +107,17 @@ class MDPNetwork(Serialisable):
             for sp, v in sp_dict.items():
                 if not self.graph.has_edge(s, sp):
                     self.graph.add_edge(s, sp, transitions={})
-                self.graph[s][sp]["transitions"][a] = {"p": float(v["p"]), "r": float(v["r"])}
+                self.graph[s][sp]["transitions"][a] = {
+                    "p": float(v["p"]),
+                    "r": float(v["r"]),
+                }
 
     # -------------------------
     # Query
     # -------------------------
-    def get_transition_probabilities(self,
-                                     state: Union[int, str],
-                                     action: int) -> Dict[Union[int, str], float]:
+    def get_transition_probabilities(
+        self, state: Union[int, str], action: int
+    ) -> Dict[Union[int, str], float]:
         """Return P(s' | s, a)."""
         s = self._normalize_state_input(state)
         out: Dict[Union[int, str], float] = {}
@@ -119,10 +128,9 @@ class MDPNetwork(Serialisable):
                 out[self._format_state_output(sp, isinstance(state, str))] = p
         return out
 
-    def get_transition_reward(self,
-                              state: Union[int, str],
-                              action: int,
-                              next_state: Union[int, str]) -> float:
+    def get_transition_reward(
+        self, state: Union[int, str], action: int, next_state: Union[int, str]
+    ) -> float:
         """Return R(s, a, s')."""
         s = self._normalize_state_input(state)
         sp = self._normalize_state_input(next_state)
@@ -139,11 +147,13 @@ class MDPNetwork(Serialisable):
     # -------------------------
     # Sampling
     # -------------------------
-    def sample_next_state(self,
-                          state: Union[int, str],
-                          action: int,
-                          rng: np.random.Generator,
-                          as_string: bool = False) -> Union[int, str]:
+    def sample_next_state(
+        self,
+        state: Union[int, str],
+        action: int,
+        rng: np.random.Generator,
+        as_string: bool = False,
+    ) -> Union[int, str]:
         """Sample s' ~ P(. | s,a)."""
         s = self._normalize_state_input(state)
         probs: Dict[int, float] = {}
@@ -157,11 +167,13 @@ class MDPNetwork(Serialisable):
         sp_next = int(rng.choice(sp_list, p=p_list))
         return self._format_state_output(sp_next, as_string)
 
-    def sample_step(self,
-                    state: Union[int, str],
-                    action: int,
-                    rng: np.random.Generator,
-                    as_string: bool = False) -> Tuple[Union[int, str], float]:
+    def sample_step(
+        self,
+        state: Union[int, str],
+        action: int,
+        rng: np.random.Generator,
+        as_string: bool = False,
+    ) -> Tuple[Union[int, str], float]:
         """Sample (s', r) given (s, a)."""
         s = self._normalize_state_input(state)
         probs: Dict[int, float] = {}
@@ -176,9 +188,9 @@ class MDPNetwork(Serialisable):
         r = float(self.graph[s][sp_next]["transitions"][action]["r"])
         return self._format_state_output(sp_next, as_string), r
 
-    def sample_start_state(self,
-                           rng: np.random.Generator,
-                           as_string: bool = False) -> Union[int, str]:
+    def sample_start_state(
+        self, rng: np.random.Generator, as_string: bool = False
+    ) -> Union[int, str]:
         s0 = int(rng.choice(self.start_states))
         return self._format_state_output(s0, as_string)
 
@@ -189,7 +201,9 @@ class MDPNetwork(Serialisable):
         """Return tags as name -> sorted list of state ids."""
         return {k: sorted(list(v)) for k, v in self.tags.items()}
 
-    def get_states_by_tag(self, name: str, as_string: bool = False) -> List[Union[int, str]]:
+    def get_states_by_tag(
+        self, name: str, as_string: bool = False
+    ) -> List[Union[int, str]]:
         """Return states for a tag."""
         if name not in self.tags:
             return []
@@ -216,10 +230,9 @@ class MDPNetwork(Serialisable):
     # -------------------------
     # Mutations
     # -------------------------
-    def add_state(self,
-                  state: Union[int, str],
-                  is_terminal: bool = False,
-                  is_start: bool = False):
+    def add_state(
+        self, state: Union[int, str], is_terminal: bool = False, is_start: bool = False
+    ):
         s = self._normalize_state_input(state)
         if s not in self.states:
             self.states.append(s)
@@ -229,12 +242,14 @@ class MDPNetwork(Serialisable):
         if is_start and s not in self.start_states:
             self.start_states.append(s)
 
-    def add_transition(self,
-                       from_state: Union[int, str],
-                       to_state: Union[int, str],
-                       action: int,
-                       probability: float,
-                       reward: Optional[float] = None):
+    def add_transition(
+        self,
+        from_state: Union[int, str],
+        to_state: Union[int, str],
+        action: int,
+        probability: float,
+        reward: Optional[float] = None,
+    ):
         s = self._normalize_state_input(from_state)
         sp = self._normalize_state_input(to_state)
         if not self.graph.has_edge(s, sp):
@@ -257,11 +272,13 @@ class MDPNetwork(Serialisable):
             for _, item in pairs:
                 item["p"] = float(item["p"] / total)
 
-    def update_transition_reward(self,
-                                 state: Union[int, str],
-                                 action: int,
-                                 next_state: Union[int, str],
-                                 reward: float):
+    def update_transition_reward(
+        self,
+        state: Union[int, str],
+        action: int,
+        next_state: Union[int, str],
+        reward: float,
+    ):
         s = self._normalize_state_input(state)
         sp = self._normalize_state_input(next_state)
         if not self.graph.has_edge(s, sp):
@@ -271,9 +288,7 @@ class MDPNetwork(Serialisable):
             raise KeyError(f"No (s,a,s') triple for (s={s}, a={action}, s'={sp})")
         edata["transitions"][action]["r"] = float(reward)
 
-    def compute_expected_reward(self,
-                                state: Union[int, str],
-                                action: int) -> float:
+    def compute_expected_reward(self, state: Union[int, str], action: int) -> float:
         s = self._normalize_state_input(state)
         total = 0.0
         for sp in self.graph.successors(s):
@@ -308,7 +323,10 @@ class MDPNetwork(Serialisable):
                 a_str = str(int(a))
                 s_trans.setdefault(a_str, {})
                 for sp, ar in sp_dict.items():
-                    s_trans[a_str][str(int(sp))] = {"p": float(ar["p"]), "r": float(ar["r"])}
+                    s_trans[a_str][str(int(sp))] = {
+                        "p": float(ar["p"]),
+                        "r": float(ar["r"]),
+                    }
             if s_trans:
                 transitions[str(int(s))] = s_trans
 
@@ -323,15 +341,17 @@ class MDPNetwork(Serialisable):
 
         # Tags out as int lists
         if self.tags:
-            export_config["tags"] = {k: sorted(int(x) for x in v) for k, v in self.tags.items()}
+            export_config["tags"] = {
+                k: sorted(int(x) for x in v) for k, v in self.tags.items()
+            }
 
         if self.has_string_mapping:
             export_config["state_mapping"] = {
                 "int_to_state": {str(k): v for k, v in self.int_to_state.items()},
-                "state_to_int": {str(k): v for k, v in self.state_to_int.items()}
+                "state_to_int": {str(k): v for k, v in self.state_to_int.items()},
             }
 
-        with open(output_path, 'w') as f:
+        with open(output_path, "w") as f:
             json.dump(export_config, f, indent=2)
 
     def to_portable(self) -> Dict[str, Any]:
@@ -357,12 +377,18 @@ class MDPNetwork(Serialisable):
                     continue
                 for a, ar in edata["transitions"].items():
                     action_map.setdefault(int(a), {})
-                    action_map[int(a)][int(sp)] = {"p": float(ar["p"]), "r": float(ar["r"])}
+                    action_map[int(a)][int(sp)] = {
+                        "p": float(ar["p"]),
+                        "r": float(ar["r"]),
+                    }
             for a, sp_dict in action_map.items():
                 a_str = str(int(a))
                 s_trans.setdefault(a_str, {})
                 for sp, ar in sp_dict.items():
-                    s_trans[a_str][str(int(sp))] = {"p": float(ar["p"]), "r": float(ar["r"])}
+                    s_trans[a_str][str(int(sp))] = {
+                        "p": float(ar["p"]),
+                        "r": float(ar["r"]),
+                    }
             if s_trans:
                 transitions[str(int(s))] = s_trans
 
@@ -376,7 +402,9 @@ class MDPNetwork(Serialisable):
         }
 
         if self.tags:
-            portable_config["tags"] = {k: sorted(int(x) for x in v) for k, v in self.tags.items()}
+            portable_config["tags"] = {
+                k: sorted(int(x) for x in v) for k, v in self.tags.items()
+            }
 
         return {
             "config": portable_config,

@@ -22,6 +22,7 @@ from two_stage_cl.utils import plot_pairwise
 # Optional: W&B is only used in the parent process if provided.
 try:
     import wandb  # noqa: F401
+
     _WANDB_AVAILABLE = True
 except Exception:
     _WANDB_AVAILABLE = False
@@ -36,12 +37,20 @@ class PeriodicEvalCallback:
     It assumes model has attributes/methods like SB3 (num_timesteps, predict, set_env).
     Optionally logs scalars to Weights & Biases if a run is provided.
     """
-    def __init__(self, eval_env, eval_every: int, n_eval_episodes: int,
-                 greedy_scores_list: List[float], train_scores_list: List[float],
-                 eval_seed_base: int = 10000, verbose: int = 0,
-                 wandb_run: Optional[Any] = None,
-                 wandb_prefix: str = "eval",
-                 eval_name: str = "default"):
+
+    def __init__(
+        self,
+        eval_env,
+        eval_every: int,
+        n_eval_episodes: int,
+        greedy_scores_list: List[float],
+        train_scores_list: List[float],
+        eval_seed_base: int = 10000,
+        verbose: int = 0,
+        wandb_run: Optional[Any] = None,
+        wandb_prefix: str = "eval",
+        eval_name: str = "default",
+    ):
         self.model = None
         self.eval_env = eval_env
         self.eval_every = int(eval_every)
@@ -54,7 +63,9 @@ class PeriodicEvalCallback:
         self.verbose = int(verbose)
 
         # Optional W&B logging. Safe no-op if _WANDB_AVAILABLE is False.
-        self.wandb_run = (wandb_run if (_WANDB_AVAILABLE and wandb_run is not None) else None)
+        self.wandb_run = (
+            wandb_run if (_WANDB_AVAILABLE and wandb_run is not None) else None
+        )
         self.wandb_prefix = str(wandb_prefix)
         self.eval_name = str(eval_name)
 
@@ -69,7 +80,9 @@ class PeriodicEvalCallback:
             key_g = f"{self.wandb_prefix}/{self.eval_name}/greedy"
             key_t = f"{self.wandb_prefix}/{self.eval_name}/train"
             # Optionally include tag info (e.g., start/periodic/end) as another key if desired.
-            self.wandb_run.log({key_g: float(greedy), key_t: float(trainpol)}, step=int(step))
+            self.wandb_run.log(
+                {key_g: float(greedy), key_t: float(trainpol)}, step=int(step)
+            )
         except Exception as e:
             # Do not break training due to logging failures.
             if self.verbose:
@@ -77,37 +90,52 @@ class PeriodicEvalCallback:
 
     def _do_eval(self, tag: str):
         # Control RNG for reproducibility
-        self.eval_env.reset(seed=self.eval_seed_base + 2*self._eval_count)
+        self.eval_env.reset(seed=self.eval_seed_base + 2 * self._eval_count)
         mean_greedy, _ = evaluate_policy(
-            model=self.model, env=self.eval_env,
+            model=self.model,
+            env=self.eval_env,
             n_eval_episodes=self.n_eval_episodes,
-            deterministic=True, render=False, warn=False
+            deterministic=True,
+            render=False,
+            warn=False,
         )
-        self.eval_env.reset(seed=self.eval_seed_base + 2*self._eval_count + 1)
+        self.eval_env.reset(seed=self.eval_seed_base + 2 * self._eval_count + 1)
         mean_train, _ = evaluate_policy(
-            model=self.model, env=self.eval_env,
+            model=self.model,
+            env=self.eval_env,
             n_eval_episodes=self.n_eval_episodes,
-            deterministic=False, render=False, warn=False
+            deterministic=False,
+            render=False,
+            warn=False,
         )
         self.greedy_scores_list.append(float(mean_greedy))
         self.train_scores_list.append(float(mean_train))
 
         # WandB scalar logging at the model's global step
-        self._wandb_log_safe(step=self.model.num_timesteps,
-                             greedy=mean_greedy, trainpol=mean_train, tag=tag)
+        self._wandb_log_safe(
+            step=self.model.num_timesteps,
+            greedy=mean_greedy,
+            trainpol=mean_train,
+            tag=tag,
+        )
 
         self._last_eval_step = self.model.num_timesteps
         self._eval_count += 1
         if self.verbose:
-            print(f"[Eval:{tag}] step={self.model.num_timesteps}  "
-                  f"Greedy={mean_greedy:.3f}  TrainPol={mean_train:.3f}")
+            print(
+                f"[Eval:{tag}] step={self.model.num_timesteps}  "
+                f"Greedy={mean_greedy:.3f}  TrainPol={mean_train:.3f}"
+            )
 
     def on_training_start(self, model):
         self.model = model
         self._do_eval(tag="start")
 
     def on_step(self):
-        if self.model.num_timesteps > 0 and self.model.num_timesteps % self.eval_every == 0:
+        if (
+            self.model.num_timesteps > 0
+            and self.model.num_timesteps % self.eval_every == 0
+        ):
             if self._last_eval_step != self.model.num_timesteps:
                 self._do_eval(tag="periodic")
         return True
@@ -128,11 +156,16 @@ class EnvFactorySpec:
     kwargs: passed to factory when building env
     The factory signature must be: def factory(seed: int, **kwargs) -> gym.Env
     """
+
     factory_path: str
     kwargs: Dict[str, Any]
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"type": "target", "factory_path": self.factory_path, "kwargs": self.kwargs}
+        return {
+            "type": "target",
+            "factory_path": self.factory_path,
+            "kwargs": self.kwargs,
+        }
 
 
 @dataclass
@@ -141,6 +174,7 @@ class SourceFactorySpec:
     Source env factory spec that depends on an MDPNetwork loaded from config path.
     The factory signature must be: def factory(mdp, seed: int, **kwargs) -> gym.Env
     """
+
     factory_path: str
     mdp_config_path: str
     kwargs: Dict[str, Any]
@@ -162,6 +196,7 @@ class PhaseSpec:
     steps: training steps for this phase
     env_spec: EnvFactorySpec or SourceFactorySpec (serialized dict)
     """
+
     name: str
     steps: int
     env_spec: Dict[str, Any]
@@ -178,12 +213,17 @@ class EvalSpec:
     env_spec: EnvFactorySpec or SourceFactorySpec (serialized dict)
     eval_seed_base: base seed for deterministic eval reproducibility
     """
+
     name: str
     env_spec: Dict[str, Any]
     eval_seed_base: int = 10000
 
     def as_dict(self) -> Dict[str, Any]:
-        d = {"name": self.name, "env_spec": self.env_spec, "eval_seed_base": int(self.eval_seed_base)}
+        d = {
+            "name": self.name,
+            "env_spec": self.env_spec,
+            "eval_seed_base": int(self.eval_seed_base),
+        }
         return d
 
 
@@ -210,13 +250,16 @@ def _make_env_from_spec(spec: Dict[str, Any], seed: int):
     elif spec_type == "source":
         # Lazy import to avoid heavy deps in parent
         from mdp_network.mdp_network import MDPNetwork  # noqa
+
         mdp = MDPNetwork(config_path=spec["mdp_config_path"])
         return factory(mdp=mdp, seed=seed, **spec.get("kwargs", {}))
     else:
         raise ValueError(f"Unknown env spec type: {spec_type}")
 
 
-def _make_agent_from_ctor(agent_ctor_path: str, env, agent_kwargs: Dict[str, Any], seed: int):
+def _make_agent_from_ctor(
+    agent_ctor_path: str, env, agent_kwargs: Dict[str, Any], seed: int
+):
     """
     Build agent from a callable dotted path, expecting SB3-like signature: (env=..., **kwargs).
     """
@@ -224,7 +267,9 @@ def _make_agent_from_ctor(agent_ctor_path: str, env, agent_kwargs: Dict[str, Any
     return ctor(env=env, seed=seed, **agent_kwargs)
 
 
-def build_checkpoints_from_curve_len_multiphase(steps_per_phase: List[int], n_points: int) -> np.ndarray:
+def build_checkpoints_from_curve_len_multiphase(
+    steps_per_phase: List[int], n_points: int
+) -> np.ndarray:
     """
     Reconstruct x-axis (global timesteps) from callback output length for multi-phase training.
     Behavior mirrors: eval at start (step 0), periodic every eval_every (unknown here), and at each training end.
@@ -278,8 +323,7 @@ def build_checkpoints_from_curve_len_multiphase(steps_per_phase: List[int], n_po
 
 
 def _dedup_by_equal_steps(
-    checkpoints: np.ndarray,
-    curves: Dict[str, Dict[str, np.ndarray]]
+    checkpoints: np.ndarray, curves: Dict[str, Dict[str, np.ndarray]]
 ) -> tuple[np.ndarray, Dict[str, Dict[str, np.ndarray]]]:
     """
     Remove consecutive duplicates in `checkpoints` (same timestep twice),
@@ -301,7 +345,7 @@ def _dedup_by_equal_steps(
     # new y for every eval name
     for name, dd in curves.items():
         dd["greedy"] = dd["greedy"][keep_idx]
-        dd["train"]  = dd["train"][keep_idx]
+        dd["train"] = dd["train"][keep_idx]
 
     return new_ckpt, curves
 
@@ -420,7 +464,7 @@ def _run_one_seed_worker(
     def _run_plan(
         phase_specs: List[Dict[str, Any]],
         eval_specs: List[Dict[str, Any]],
-        label_for_media: str
+        label_for_media: str,
     ) -> Dict[str, Any]:
         """
         Train across multiple phases without resetting num_timesteps.
@@ -428,8 +472,12 @@ def _run_one_seed_worker(
         and additionally performs "boundary tests" right AFTER selected phases end.
         """
         # Build the agent on the first phase env; later phases call set_env(...)
-        first_env = DummyVecEnv([lambda: _make_env_from_spec(phase_specs[0]["env_spec"], seed=seed)])
-        agent = _make_agent_from_ctor(agent_ctor_path, env=first_env, agent_kwargs=agent_kwargs, seed=seed)
+        first_env = DummyVecEnv(
+            [lambda: _make_env_from_spec(phase_specs[0]["env_spec"], seed=seed)]
+        )
+        agent = _make_agent_from_ctor(
+            agent_ctor_path, env=first_env, agent_kwargs=agent_kwargs, seed=seed
+        )
 
         # Build evaluation environments + callback storage
         eval_envs: Dict[str, Any] = {}
@@ -462,9 +510,15 @@ def _run_one_seed_worker(
         # Parse boundary-test configuration
         boundary_cfg = (media_cfg or {}).get("boundary_tests", {}) or {}
         boundary_enabled: bool = bool(boundary_cfg.get("enabled", False))
-        boundary_phase_indices = set(int(i) for i in boundary_cfg.get("phase_indices", [0]))  # default: after Phase-0
-        boundary_eval_names = boundary_cfg.get("eval_names", ["Target"])  # default: only Target
-        boundary_eval_names_set = None if boundary_eval_names is None else set(boundary_eval_names)
+        boundary_phase_indices = set(
+            int(i) for i in boundary_cfg.get("phase_indices", [0])
+        )  # default: after Phase-0
+        boundary_eval_names = boundary_cfg.get(
+            "eval_names", ["Target"]
+        )  # default: only Target
+        boundary_eval_names_set = (
+            None if boundary_eval_names is None else set(boundary_eval_names)
+        )
         record_boundary_media: bool = bool(boundary_cfg.get("record_media", False))
 
         # Boundary cache: out["boundary"][f"phase_{idx}"][eval_name] = {...}
@@ -477,8 +531,15 @@ def _run_one_seed_worker(
             total_steps_list.append(steps)
 
             # Train current phase with callbacks being ticked by the agent
-            step_cb = FunctionCallback(lambda model: all(cb.on_step() for cb in callbacks.values()))
-            agent.learn(total_timesteps=steps, reset_num_timesteps=False, progress_bar=False, callback=step_cb)
+            step_cb = FunctionCallback(
+                lambda model: all(cb.on_step() for cb in callbacks.values())
+            )
+            agent.learn(
+                total_timesteps=steps,
+                reset_num_timesteps=False,
+                progress_bar=False,
+                callback=step_cb,
+            )
 
             # -----------------------------
             # Boundary test right AFTER this phase finishes
@@ -487,25 +548,35 @@ def _run_one_seed_worker(
                 boundary_key = f"phase_{idx}"
                 for es in eval_specs:
                     name = es["name"]
-                    if (boundary_eval_names_set is not None) and (name not in boundary_eval_names_set):
+                    if (boundary_eval_names_set is not None) and (
+                        name not in boundary_eval_names_set
+                    ):
                         continue
 
                     # Fresh eval env for this boundary (isolated RNG)
-                    test_env = _make_env_from_spec(es["env_spec"], seed=seed + 777 + idx)
+                    test_env = _make_env_from_spec(
+                        es["env_spec"], seed=seed + 777 + idx
+                    )
                     try:
                         # Greedy (deterministic) policy eval
                         test_env.reset(seed=seed + 777 + idx)
                         greedy_mean, _ = evaluate_policy(
-                            model=agent, env=test_env,
+                            model=agent,
+                            env=test_env,
                             n_eval_episodes=n_eval_episodes,
-                            deterministic=True, render=False, warn=False
+                            deterministic=True,
+                            render=False,
+                            warn=False,
                         )
                         # Stochastic (training-policy) eval
                         test_env.reset(seed=seed + 888 + idx)
                         train_mean, _ = evaluate_policy(
-                            model=agent, env=test_env,
+                            model=agent,
+                            env=test_env,
                             n_eval_episodes=n_eval_episodes,
-                            deterministic=False, render=False, warn=False
+                            deterministic=False,
+                            render=False,
+                            warn=False,
                         )
                     finally:
                         try:
@@ -521,8 +592,11 @@ def _run_one_seed_worker(
 
                     # Optional media at the boundary
                     if record_boundary_media and media_cfg and media_dir:
+
                         def _make_media_env():
-                            env = _make_env_from_spec(es["env_spec"], seed=seed + 42 + idx)
+                            env = _make_env_from_spec(
+                                es["env_spec"], seed=seed + 42 + idx
+                            )
                             if hasattr(env, "render_mode"):
                                 try:
                                     env.render_mode = "rgb_array"
@@ -530,10 +604,15 @@ def _run_one_seed_worker(
                                     pass
                             return env
 
-                        subdir = os.path.join(str(media_dir), f"seed_{seed}", label_for_media)
+                        subdir = os.path.join(
+                            str(media_dir), f"seed_{seed}", label_for_media
+                        )
                         os.makedirs(subdir, exist_ok=True)
                         fmt = str(media_cfg.get("format", "gif")).lower()
-                        out_path = os.path.join(subdir, f"{name}_phase{idx}.{fmt if fmt in ('gif','mp4') else 'gif'}")
+                        out_path = os.path.join(
+                            subdir,
+                            f"{name}_phase{idx}.{fmt if fmt in ('gif','mp4') else 'gif'}",
+                        )
                         try:
                             saved = _rollout_and_save_media(
                                 make_env_fn=_make_media_env,
@@ -543,10 +622,14 @@ def _run_one_seed_worker(
                                 max_steps=int(media_cfg.get("max_steps", 200)),
                                 fps=int(media_cfg.get("fps", 8)),
                                 fmt=fmt,
-                                deterministic=bool(media_cfg.get("deterministic", True)),
+                                deterministic=bool(
+                                    media_cfg.get("deterministic", True)
+                                ),
                             )
                         except Exception as e:
-                            print(f"[media] boundary recording failed for '{label_for_media}/{name}@phase{idx}': {e}")
+                            print(
+                                f"[media] boundary recording failed for '{label_for_media}/{name}@phase{idx}': {e}"
+                            )
                             saved = None
                         boundary_cache[boundary_key][name]["media_path"] = saved
 
@@ -554,7 +637,13 @@ def _run_one_seed_worker(
             # Switch to the next phase's env (if any) and trigger "start" evals
             # -----------------------------
             if idx < len(phase_specs) - 1:
-                next_env = DummyVecEnv([lambda: _make_env_from_spec(phase_specs[idx + 1]["env_spec"], seed=seed)])
+                next_env = DummyVecEnv(
+                    [
+                        lambda: _make_env_from_spec(
+                            phase_specs[idx + 1]["env_spec"], seed=seed
+                        )
+                    ]
+                )
                 agent.set_env(next_env)
                 for cb in callbacks.values():
                     cb.on_training_start(agent)
@@ -565,7 +654,9 @@ def _run_one_seed_worker(
 
         # Build checkpoints array (same for all eval contexts)
         n_points = len(next(iter(greedy_lists.values())))
-        checkpoints = build_checkpoints_from_curve_len_multiphase(total_steps_list, n_points)
+        checkpoints = build_checkpoints_from_curve_len_multiphase(
+            total_steps_list, n_points
+        )
 
         # Assemble curves
         curves = {
@@ -609,7 +700,9 @@ def _run_one_seed_worker(
 
                 subdir = os.path.join(str(media_dir), f"seed_{seed}", label_for_media)
                 os.makedirs(subdir, exist_ok=True)
-                out_path = os.path.join(subdir, f"{name}.{fmt if fmt in ('gif', 'mp4') else 'gif'}")
+                out_path = os.path.join(
+                    subdir, f"{name}.{fmt if fmt in ('gif', 'mp4') else 'gif'}"
+                )
 
                 try:
                     saved = _rollout_and_save_media(
@@ -623,7 +716,9 @@ def _run_one_seed_worker(
                         deterministic=deterministic,
                     )
                 except Exception as e:
-                    print(f"[media] recording failed for '{label_for_media}/{name}': {e}")
+                    print(
+                        f"[media] recording failed for '{label_for_media}/{name}': {e}"
+                    )
                     saved = None
                 out["media"][name] = saved
 
@@ -634,7 +729,9 @@ def _run_one_seed_worker(
     # --- Baseline (Target-only) ---
     results["baseline"] = _run_plan(
         baseline_phase_specs,
-        eval_specs=[{"name": "Target", "env_spec": baseline_phase_specs[-1]["env_spec"]}],
+        eval_specs=[
+            {"name": "Target", "env_spec": baseline_phase_specs[-1]["env_spec"]}
+        ],
         label_for_media="baseline",
     )
 
@@ -659,8 +756,11 @@ def _ensure_dir(p: str | Path):
     Path(p).mkdir(parents=True, exist_ok=True)
 
 
-def _save_csv(path: str, steps: np.ndarray, mean: np.ndarray, std: np.ndarray, header: str):
+def _save_csv(
+    path: str, steps: np.ndarray, mean: np.ndarray, std: np.ndarray, header: str
+):
     import csv
+
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow([header])
@@ -715,11 +815,11 @@ class TabularCurriculumTrainer:
         _ensure_dir(self.output_dir)
 
     def run(
-            self,
-            seeds: List[int],
-            baseline_phase_specs: List[PhaseSpec],
-            item_phase_specs_map: Dict[str, List[PhaseSpec]],
-            eval_specs_map: Dict[str, List[EvalSpec]],
+        self,
+        seeds: List[int],
+        baseline_phase_specs: List[PhaseSpec],
+        item_phase_specs_map: Dict[str, List[PhaseSpec]],
+        eval_specs_map: Dict[str, List[EvalSpec]],
     ) -> Dict[str, Any]:
         """
         Execute parallel training across seeds and aggregate results.
@@ -727,15 +827,21 @@ class TabularCurriculumTrainer:
         """
         # Serialize specs to dicts (pickle-safe)
         baseline_phase_specs_d = [ph.as_dict() for ph in baseline_phase_specs]
-        item_phase_specs_map_d = {k: [ph.as_dict() for ph in v] for k, v in item_phase_specs_map.items()}
-        eval_specs_map_d = {k: [es.as_dict() for es in v] for k, v in eval_specs_map.items()}
+        item_phase_specs_map_d = {
+            k: [ph.as_dict() for ph in v] for k, v in item_phase_specs_map.items()
+        }
+        eval_specs_map_d = {
+            k: [es.as_dict() for es in v] for k, v in eval_specs_map.items()
+        }
 
         num_workers = self.max_workers or min(len(seeds), os.cpu_count() or 1)
         all_results: List[Dict[str, Any]] = []
 
         media_root = os.path.join(self.output_dir, "media")
         _ensure_dir(media_root)
-        with ProcessPoolExecutor(max_workers=num_workers, mp_context=get_context("spawn")) as ex:
+        with ProcessPoolExecutor(
+            max_workers=num_workers, mp_context=get_context("spawn")
+        ) as ex:
             futs = {
                 ex.submit(
                     _run_one_seed_worker,
@@ -763,10 +869,14 @@ class TabularCurriculumTrainer:
         # Use first seed checkpoints as reference; assert match
         ref_checkpoints = all_results[0]["baseline"]["checkpoints"]
         for r in all_results:
-            assert np.array_equal(r["baseline"]["checkpoints"], ref_checkpoints), "Baseline checkpoints mismatch."
+            assert np.array_equal(
+                r["baseline"]["checkpoints"], ref_checkpoints
+            ), "Baseline checkpoints mismatch."
             for lb in labels:
-                assert np.array_equal(r["items"][lb]["checkpoints"], all_results[0]["items"][lb]["checkpoints"]), \
-                    f"Item checkpoints mismatch for '{lb}'."
+                assert np.array_equal(
+                    r["items"][lb]["checkpoints"],
+                    all_results[0]["items"][lb]["checkpoints"],
+                ), f"Item checkpoints mismatch for '{lb}'."
 
         # Compute phase boundaries for baseline (for plot/filenames)
         baseline_boundaries = []
@@ -774,7 +884,11 @@ class TabularCurriculumTrainer:
         for ph in baseline_phase_specs[:-1]:
             s += int(ph.steps)
             baseline_boundaries.append(s)
-        boundaries_str = "-".join(str(b) for b in baseline_boundaries) if baseline_boundaries else "none"
+        boundaries_str = (
+            "-".join(str(b) for b in baseline_boundaries)
+            if baseline_boundaries
+            else "none"
+        )
 
         # Baseline aggregate
         base_greedy_all, base_train_all = [], []
@@ -794,13 +908,15 @@ class TabularCurriculumTrainer:
                 "train_mean": base_train_mean.tolist(),
                 "train_std": base_train_std.tolist(),
             },
-            "items": {}
+            "items": {},
         }
 
         # Per item aggregate + save CSV + plot + (optional) W&B images/tables
         for lb in labels:
             eval_names = [es.name for es in eval_specs_map[lb]]
-            eval_curves: Dict[str, Dict[str, List[np.ndarray]]] = {nm: {"greedy": [], "train": []} for nm in eval_names}
+            eval_curves: Dict[str, Dict[str, List[np.ndarray]]] = {
+                nm: {"greedy": [], "train": []} for nm in eval_names
+            }
             for r in all_results:
                 item = r["items"][lb]
                 for nm in eval_names:
@@ -812,88 +928,160 @@ class TabularCurriculumTrainer:
                 g_mean, g_std = _mean_std(eval_curves[nm]["greedy"])
                 t_mean, t_std = _mean_std(eval_curves[nm]["train"])
                 agg_item[nm] = {
-                    "greedy_mean": g_mean, "greedy_std": g_std,
-                    "train_mean": t_mean, "train_std": t_std
+                    "greedy_mean": g_mean,
+                    "greedy_std": g_std,
+                    "train_mean": t_mean,
+                    "train_std": t_std,
                 }
 
-            aggregated["items"][lb] = {k: {kk: vv.tolist() for kk, vv in v.items()} for k, v in agg_item.items()}
+            aggregated["items"][lb] = {
+                k: {kk: vv.tolist() for kk, vv in v.items()}
+                for k, v in agg_item.items()
+            }
 
             # Save CSVs
             item_out_dir = os.path.join(self.output_dir, f"{lb}")
             _ensure_dir(item_out_dir)
 
-            _save_csv(os.path.join(item_out_dir, f"baseline_target_phase_{boundaries_str}.csv"),
-                      ref_checkpoints, base_greedy_mean, base_greedy_std, header="greedy")
-            _save_csv(os.path.join(item_out_dir, f"baseline_target_train_phase_{boundaries_str}.csv"),
-                      ref_checkpoints, base_train_mean, base_train_std, header="train")
+            _save_csv(
+                os.path.join(
+                    item_out_dir, f"baseline_target_phase_{boundaries_str}.csv"
+                ),
+                ref_checkpoints,
+                base_greedy_mean,
+                base_greedy_std,
+                header="greedy",
+            )
+            _save_csv(
+                os.path.join(
+                    item_out_dir, f"baseline_target_train_phase_{boundaries_str}.csv"
+                ),
+                ref_checkpoints,
+                base_train_mean,
+                base_train_std,
+                header="train",
+            )
 
             if "Target" in agg_item:
-                _save_csv(os.path.join(item_out_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item["Target"]["greedy_mean"], agg_item["Target"]["greedy_std"],
-                          header="greedy")
-                _save_csv(os.path.join(item_out_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item["Target"]["train_mean"], agg_item["Target"]["train_std"],
-                          header="train")
+                _save_csv(
+                    os.path.join(
+                        item_out_dir,
+                        f"curriculum_eval_target_phase_{boundaries_str}.csv",
+                    ),
+                    ref_checkpoints,
+                    agg_item["Target"]["greedy_mean"],
+                    agg_item["Target"]["greedy_std"],
+                    header="greedy",
+                )
+                _save_csv(
+                    os.path.join(
+                        item_out_dir,
+                        f"curriculum_eval_target_train_phase_{boundaries_str}.csv",
+                    ),
+                    ref_checkpoints,
+                    agg_item["Target"]["train_mean"],
+                    agg_item["Target"]["train_std"],
+                    header="train",
+                )
 
-            src_key = next((nm for nm in eval_names if nm.lower().startswith("source")), None)
+            src_key = next(
+                (nm for nm in eval_names if nm.lower().startswith("source")), None
+            )
             if src_key is not None:
-                _save_csv(os.path.join(item_out_dir, f"curriculum_eval_source_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item[src_key]["greedy_mean"], agg_item[src_key]["greedy_std"],
-                          header="greedy")
-                _save_csv(os.path.join(item_out_dir, f"curriculum_eval_source_train_phase_{boundaries_str}.csv"),
-                          ref_checkpoints, agg_item[src_key]["train_mean"], agg_item[src_key]["train_std"],
-                          header="train")
+                _save_csv(
+                    os.path.join(
+                        item_out_dir,
+                        f"curriculum_eval_source_phase_{boundaries_str}.csv",
+                    ),
+                    ref_checkpoints,
+                    agg_item[src_key]["greedy_mean"],
+                    agg_item[src_key]["greedy_std"],
+                    header="greedy",
+                )
+                _save_csv(
+                    os.path.join(
+                        item_out_dir,
+                        f"curriculum_eval_source_train_phase_{boundaries_str}.csv",
+                    ),
+                    ref_checkpoints,
+                    agg_item[src_key]["train_mean"],
+                    agg_item[src_key]["train_std"],
+                    header="train",
+                )
 
             # Plot pairwise
-            png_path = os.path.join(item_out_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
+            png_path = os.path.join(
+                item_out_dir, f"pairwise_{lb}_phase_{boundaries_str}.png"
+            )
             plot_pairwise(
                 out_png_path=png_path,
                 checkpoints=ref_checkpoints,
                 phase_boundaries=baseline_boundaries,
                 title_prefix=f"Pairwise for '{lb}'",
                 baseline={
-                    "greedy_mean": base_greedy_mean, "greedy_std": base_greedy_std,
-                    "train_mean": base_train_mean, "train_std": base_train_std,
+                    "greedy_mean": base_greedy_mean,
+                    "greedy_std": base_greedy_std,
+                    "train_mean": base_train_mean,
+                    "train_std": base_train_std,
                 },
                 curves_target=agg_item.get("Target", None) or agg_item[eval_names[0]],
-                curves_source=agg_item.get("Source", None) or agg_item.get("Source-A", None),
+                curves_source=agg_item.get("Source", None)
+                or agg_item.get("Source-A", None),
             )
 
             if self.wandb_run is not None:
                 try:
-                    self.wandb_run.log({f"images/pairwise_{lb}_phase_{boundaries_str}": wandb.Image(png_path)})
+                    self.wandb_run.log(
+                        {
+                            f"images/pairwise_{lb}_phase_{boundaries_str}": wandb.Image(
+                                png_path
+                            )
+                        }
+                    )
 
                     # Log curves as a wandb.Table
                     columns = [
                         "step",
-                        "baseline_greedy_mean", "baseline_greedy_std",
-                        "baseline_train_mean", "baseline_train_std",
+                        "baseline_greedy_mean",
+                        "baseline_greedy_std",
+                        "baseline_train_mean",
+                        "baseline_train_std",
                     ]
                     for nm in eval_names:
-                        columns.extend([
-                            f"{nm}_greedy_mean", f"{nm}_greedy_std",
-                            f"{nm}_train_mean", f"{nm}_train_std",
-                        ])
+                        columns.extend(
+                            [
+                                f"{nm}_greedy_mean",
+                                f"{nm}_greedy_std",
+                                f"{nm}_train_mean",
+                                f"{nm}_train_std",
+                            ]
+                        )
 
                     data = []
                     L = len(ref_checkpoints)
                     for i in range(L):
                         row = [
                             int(ref_checkpoints[i]),
-                            float(base_greedy_mean[i]), float(base_greedy_std[i]),
-                            float(base_train_mean[i]), float(base_train_std[i]),
+                            float(base_greedy_mean[i]),
+                            float(base_greedy_std[i]),
+                            float(base_train_mean[i]),
+                            float(base_train_std[i]),
                         ]
                         for nm in eval_names:
-                            row.extend([
-                                float(agg_item[nm]["greedy_mean"][i]),
-                                float(agg_item[nm]["greedy_std"][i]),
-                                float(agg_item[nm]["train_mean"][i]),
-                                float(agg_item[nm]["train_std"][i]),
-                            ])
+                            row.extend(
+                                [
+                                    float(agg_item[nm]["greedy_mean"][i]),
+                                    float(agg_item[nm]["greedy_std"][i]),
+                                    float(agg_item[nm]["train_mean"][i]),
+                                    float(agg_item[nm]["train_std"][i]),
+                                ]
+                            )
                         data.append(row)
 
                     table = wandb.Table(columns=columns, data=data)
-                    self.wandb_run.log({f"tables/curves_{lb}_phase_{boundaries_str}": table})
+                    self.wandb_run.log(
+                        {f"tables/curves_{lb}_phase_{boundaries_str}": table}
+                    )
                 except Exception as e:
                     print(f"[W&B] logging failed for '{lb}': {e}")
 
@@ -901,7 +1089,9 @@ class TabularCurriculumTrainer:
         if self.wandb_run is not None and self.media_cfg.get("enabled", False):
             to_log = []
 
-            def _enqueue_media(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
+            def _enqueue_media(
+                seed_id: int, label: str, media_map: Dict[str, Optional[str]]
+            ):
                 # media_map: {"Target": ".../Target.gif", ...}
                 if not isinstance(media_map, dict):
                     return
@@ -910,7 +1100,9 @@ class TabularCurriculumTrainer:
                         # e.g. media/seed_0/<label>/Target
                         to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
 
-            def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
+            def _enqueue_boundary(
+                seed_id: int, label: str, boundary_map: Dict[str, Any]
+            ):
                 # boundary_map: {"phase_0": {"Target": {"media_path": ".../Target_phase0.gif", ...}}, ...}
                 if not isinstance(boundary_map, dict):
                     return
@@ -921,7 +1113,12 @@ class TabularCurriculumTrainer:
                         path = (rec or {}).get("media_path", None)
                         if path:
                             # e.g. media/seed_0/<label>/Target_phase_0
-                            to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", path))
+                            to_log.append(
+                                (
+                                    f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}",
+                                    path,
+                                )
+                            )
 
             for i, r in enumerate(all_results):
                 if self.media_cfg.get("log_first_seed_only", True) and i > 0:
@@ -945,11 +1142,21 @@ class TabularCurriculumTrainer:
                 try:
                     if str(path).lower().endswith(".gif"):
                         self.wandb_run.log(
-                            {key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)), format="gif")}
+                            {
+                                key: wandb.Video(
+                                    path,
+                                    fps=int(self.media_cfg.get("fps", 8)),
+                                    format="gif",
+                                )
+                            }
                         )
                     else:
                         self.wandb_run.log(
-                            {key: wandb.Video(path, fps=int(self.media_cfg.get("fps", 8)))}
+                            {
+                                key: wandb.Video(
+                                    path, fps=int(self.media_cfg.get("fps", 8))
+                                )
+                            }
                         )
                     print(f"[W&B] uploaded: {key}  -->  {path}")
                 except Exception as e:
@@ -957,10 +1164,14 @@ class TabularCurriculumTrainer:
 
         # Save meta
         with open(os.path.join(self.output_dir, "meta.json"), "w") as f:
-            json.dump({
-                "checkpoints": aggregated["checkpoints"],
-                "boundaries": aggregated["boundaries"],
-                "labels": labels,
-            }, f, indent=2)
+            json.dump(
+                {
+                    "checkpoints": aggregated["checkpoints"],
+                    "boundaries": aggregated["boundaries"],
+                    "labels": labels,
+                },
+                f,
+                indent=2,
+            )
 
         return aggregated

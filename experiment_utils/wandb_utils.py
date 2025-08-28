@@ -19,8 +19,11 @@ def wandb_init(args) -> "wandb.sdk.wandb_run.Run":
     elif args.wandb_mode != "online":
         raise ValueError("--wandb-mode must be 'online' or 'offline'")
 
-    name = args.run_name or f"fullexp_{args.map}_{'slip' if args.slippery else 'noslip'}_" \
-           f"ph{'-'.join(str(x) for x in args.phase_steps)}_seeds{len(args.train_seeds)}_{now_tag()}"
+    name = (
+        args.run_name
+        or f"fullexp_{args.map}_{'slip' if args.slippery else 'noslip'}_"
+        f"ph{'-'.join(str(x) for x in args.phase_steps)}_seeds{len(args.train_seeds)}_{now_tag()}"
+    )
 
     run = wandb.init(
         project=args.wandb_project,
@@ -40,9 +43,11 @@ def wandb_log_image(run, key: str, path: Path):
     run.log({key: wandb.Image(str(path))})
 
 
-@ray.remote # single-threaded actor by default -> serialized W&B calls
+@ray.remote  # single-threaded actor by default -> serialized W&B calls
 class WandbActor:
-    def __init__(self, init_kwargs: Dict[str, Any], env: Dict[str, str] | None = None) -> None:
+    def __init__(
+        self, init_kwargs: Dict[str, Any], env: Dict[str, str] | None = None
+    ) -> None:
         # Safer start method in multi-proc envs; optional overrides via env.
         os.environ.setdefault("WANDB_START_METHOD", "thread")
         if env:
@@ -66,25 +71,32 @@ class WandbActor:
     def define_metric(self, *args, **kwargs) -> None:
         self.wandb.define_metric(*args, **kwargs)
 
-    def log_artifact_dir(self, name: str, a_type: str, dir_path: str, metadata: Dict[str, Any] | None = None, **kwargs) -> None:
+    def log_artifact_dir(
+        self,
+        name: str,
+        a_type: str,
+        dir_path: str,
+        metadata: Dict[str, Any] | None = None,
+        **kwargs,
+    ) -> None:
         art = self.wandb.Artifact(name=name, type=a_type, metadata=(metadata or {}))
         art.add_dir(dir_path)
         self.run.log_artifact(art, **kwargs)
 
-    def log_image(self,
-                  key: str,
-                  path: str | os.PathLike,
-                  caption: str | None = None,
-                  **kwargs) -> None:
+    def log_image(
+        self, key: str, path: str | os.PathLike, caption: str | None = None, **kwargs
+    ) -> None:
         img = self.wandb.Image(str(path), caption=caption)
         self.run.log({key: img}, **kwargs)
 
-    def log_video(self,
-                  key: str,
-                  path: str | os.PathLike,
-                  fps: int | None = None,
-                  fmt: str | None = None,
-                  **kwargs) -> None:
+    def log_video(
+        self,
+        key: str,
+        path: str | os.PathLike,
+        fps: int | None = None,
+        fmt: str | None = None,
+        **kwargs,
+    ) -> None:
         vkw = {}
         if fps is not None:
             vkw["fps"] = int(fps)
@@ -105,6 +117,7 @@ class WandbActor:
     def write_console(self, text: str, stream: str = "stdout") -> None:
         """Forward a line into this actor's console, which W&B Logs captures."""
         import sys
+
         s = str(text)
         # Ensure line break to avoid sticking lines together
         if not (s.endswith("\n") or s.endswith("\r")):
@@ -135,7 +148,7 @@ def capture_prints_to_wandb(wandb_actor, capture_stderr: bool = True) -> None:
 
         def write(self, s: str) -> int:
             with self._lock:
-                written = self._orig.write(s)   # keep local console behavior
+                written = self._orig.write(s)  # keep local console behavior
                 self._orig.flush()
                 self._buf += s
                 # Split by newline or carriage return to forward complete lines
@@ -153,4 +166,3 @@ def capture_prints_to_wandb(wandb_actor, capture_stderr: bool = True) -> None:
     sys.stdout = _Tee(sys.stdout, "stdout")
     if capture_stderr:
         sys.stderr = _Tee(sys.stderr, "stderr")
-

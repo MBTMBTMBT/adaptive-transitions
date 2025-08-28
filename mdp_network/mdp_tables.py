@@ -22,7 +22,9 @@ class QTable(Serialisable):
         Args:
             q_values: Dictionary mapping state -> action -> q_value
         """
-        self.q_values: Dict[int, Dict[int, float]] = q_values if q_values is not None else {}
+        self.q_values: Dict[int, Dict[int, float]] = (
+            q_values if q_values is not None else {}
+        )
 
     # -------- Serialisable interface --------
     def to_portable(self) -> Dict[str, Any]:
@@ -89,9 +91,9 @@ class QTable(Serialisable):
         Export Q-table to CSV file.
         CSV format: state,action,q_value
         """
-        with open(file_path, 'w', newline='') as csvfile:
+        with open(file_path, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['state', 'action', 'q_value'])
+            writer.writerow(["state", "action", "q_value"])
             for state in sorted(self.q_values.keys()):
                 for action in sorted(self.q_values[state].keys()):
                     writer.writerow([state, action, self.q_values[state][action]])
@@ -105,12 +107,12 @@ class QTable(Serialisable):
             raise FileNotFoundError(f"CSV file not found: {file_path}")
 
         self.q_values = {}
-        with open(file_path, 'r') as csvfile:
+        with open(file_path, "r") as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
-                state = int(row['state'])
-                action = int(row['action'])
-                q_value = float(row['q_value'])
+                state = int(row["state"])
+                action = int(row["action"])
+                q_value = float(row["q_value"])
                 if state not in self.q_values:
                     self.q_values[state] = {}
                 self.q_values[state][action] = q_value
@@ -152,11 +154,18 @@ class QTable(Serialisable):
                 result += f"State {state}: "
                 actions = sorted(self.q_values[state].items())
                 if len(actions) <= max_actions_per_state:
-                    action_strs = [f"A{action}={value:.4f}" for action, value in actions]
+                    action_strs = [
+                        f"A{action}={value:.4f}" for action, value in actions
+                    ]
                 else:
                     top_actions = sorted(actions, key=lambda x: x[1], reverse=True)
-                    action_strs = [f"A{action}={value:.4f}" for action, value in top_actions[:max_actions_per_state]]
-                    action_strs.append(f"... and {len(actions) - max_actions_per_state} more")
+                    action_strs = [
+                        f"A{action}={value:.4f}"
+                        for action, value in top_actions[:max_actions_per_state]
+                    ]
+                    action_strs.append(
+                        f"... and {len(actions) - max_actions_per_state} more"
+                    )
                 result += ", ".join(action_strs) + "\n"
 
             if total_states > max_states:
@@ -228,9 +237,9 @@ class ValueTable(Serialisable):
         Export Value table to CSV file.
         CSV format: state,value
         """
-        with open(file_path, 'w', newline='') as csvfile:
+        with open(file_path, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['state', 'value'])
+            writer.writerow(["state", "value"])
             for state in sorted(self.values.keys()):
                 writer.writerow([state, self.values[state]])
 
@@ -243,11 +252,11 @@ class ValueTable(Serialisable):
             raise FileNotFoundError(f"CSV file not found: {file_path}")
 
         self.values = {}
-        with open(file_path, 'r') as csvfile:
+        with open(file_path, "r") as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
-                state = int(row['state'])
-                value = float(row['value'])
+                state = int(row["state"])
+                value = float(row["value"])
                 self.values[state] = value
 
     def __str__(self, max_states: int = 50, columns: int = 4) -> str:
@@ -268,7 +277,7 @@ class ValueTable(Serialisable):
             else:
                 result += "\n"
                 for i in range(0, len(states), columns):
-                    row_states = states[i:i + columns]
+                    row_states = states[i : i + columns]
                     line = ""
                     for state in row_states:
                         line += f"S{state:3d}:{self.values[state]:7.4f}  "
@@ -279,10 +288,12 @@ class ValueTable(Serialisable):
             min_val = min(values_array)
             max_val = max(values_array)
             avg_val = sum(values_array) / len(values_array)
-            result += f"Stats: Min={min_val:.4f}, Max={max_val:.4f}, Avg={avg_val:.4f}\n\n"
+            result += (
+                f"Stats: Min={min_val:.4f}, Max={max_val:.4f}, Avg={avg_val:.4f}\n\n"
+            )
             result += "Sample states:\n"
             for i in range(0, len(display_states), columns):
-                row_states = display_states[i:i + columns]
+                row_states = display_states[i : i + columns]
                 line = ""
                 for state in row_states:
                     line += f"S{state:3d}:{self.values[state]:7.4f}  "
@@ -342,7 +353,9 @@ class PolicyTable(Serialisable):
         """Set action probability distribution for a state (normalized)."""
         total_prob = float(sum(action_probs.values()))
         if total_prob > 0:
-            normalized_probs = {int(a): float(p) / total_prob for a, p in action_probs.items()}
+            normalized_probs = {
+                int(a): float(p) / total_prob for a, p in action_probs.items()
+            }
         else:
             num_actions = max(1, len(action_probs))
             normalized_probs = {int(a): 1.0 / num_actions for a in action_probs.keys()}
@@ -383,7 +396,9 @@ class PolicyTable(Serialisable):
             if not state_policy:
                 continue
             most_likely_action = max(state_policy, key=state_policy.get)
-            action_counts[most_likely_action] = action_counts.get(most_likely_action, 0) + 1
+            action_counts[most_likely_action] = (
+                action_counts.get(most_likely_action, 0) + 1
+            )
         if not action_counts:
             return 0, 0
         most_common_action = max(action_counts, key=action_counts.get)
@@ -406,9 +421,9 @@ class PolicyTable(Serialisable):
         Export Policy table to CSV file.
         CSV format: state,action,probability
         """
-        with open(file_path, 'w', newline='') as csvfile:
+        with open(file_path, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['state', 'action', 'probability'])
+            writer.writerow(["state", "action", "probability"])
             for state in sorted(self.policy.keys()):
                 for action, prob in sorted(self.policy[state].items()):
                     writer.writerow([state, action, prob])
@@ -422,17 +437,19 @@ class PolicyTable(Serialisable):
             raise FileNotFoundError(f"CSV file not found: {file_path}")
 
         self.policy = {}
-        with open(file_path, 'r') as csvfile:
+        with open(file_path, "r") as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
-                state = int(row['state'])
-                action = int(row['action'])
-                probability = float(row['probability'])
+                state = int(row["state"])
+                action = int(row["action"])
+                probability = float(row["probability"])
                 if state not in self.policy:
                     self.policy[state] = {}
                 self.policy[state][action] = probability
 
-    def __str__(self, max_states: int = 30, show_deterministic_only: bool = False) -> str:
+    def __str__(
+        self, max_states: int = 30, show_deterministic_only: bool = False
+    ) -> str:
         """
         String representation of Policy table with flexible formatting for large dimensions.
         """
@@ -450,7 +467,9 @@ class PolicyTable(Serialisable):
 
         result = f"Policy Table ({total_states} states, {deterministic_count} deterministic):\n"
 
-        if show_deterministic_only or (total_states > 20 and deterministic_count / max(total_states, 1) > 0.8):
+        if show_deterministic_only or (
+            total_states > 20 and deterministic_count / max(total_states, 1) > 0.8
+        ):
             result += "\nDeterministic actions (probability >= 0.99):\n"
             display_states = states[:max_states]
             action_groups: Dict[int, List[int]] = {}
@@ -488,11 +507,17 @@ class PolicyTable(Serialisable):
             for state in display_states:
                 result += f"State {state}: "
                 state_policy = self.policy[state]
-                sorted_actions = sorted(state_policy.items(), key=lambda x: x[1], reverse=True)
+                sorted_actions = sorted(
+                    state_policy.items(), key=lambda x: x[1], reverse=True
+                )
                 if len(sorted_actions) <= 5:
-                    action_strs = [f"A{action}={prob:.3f}" for action, prob in sorted_actions]
+                    action_strs = [
+                        f"A{action}={prob:.3f}" for action, prob in sorted_actions
+                    ]
                 else:
-                    action_strs = [f"A{action}={prob:.3f}" for action, prob in sorted_actions[:5]]
+                    action_strs = [
+                        f"A{action}={prob:.3f}" for action, prob in sorted_actions[:5]
+                    ]
                     action_strs.append(f"... +{len(sorted_actions) - 5} more")
                 result += "{" + ", ".join(action_strs) + "}\n"
 
@@ -522,12 +547,14 @@ def create_random_policy(mdp_network: MDPNetwork) -> PolicyTable:
     return policy
 
 
-def q_table_to_policy(q_table: QTable,
-                      states: List[int],
-                      num_actions: int,
-                      mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0),
-                      temperature: float = 1.0,
-                      tie_tol: float = 1e-6) -> PolicyTable:
+def q_table_to_policy(
+    q_table: QTable,
+    states: List[int],
+    num_actions: int,
+    mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0),
+    temperature: float = 1.0,
+    tie_tol: float = 1e-6,
+) -> PolicyTable:
     """
     Convert a Q-table to a mixed policy that blends (greedy, softmax, random) components.
 
@@ -564,7 +591,9 @@ def q_table_to_policy(q_table: QTable,
 
     for state in states:
         # Collect Q-values for all actions (missing -> 0.0)
-        q_values = np.array([q_table.get_q_value(state, a) for a in range(num_actions)], dtype=float)
+        q_values = np.array(
+            [q_table.get_q_value(state, a) for a in range(num_actions)], dtype=float
+        )
 
         # --- Greedy component (ties get equal share) ---
         greedy_probs = np.zeros(num_actions, dtype=float)
@@ -611,10 +640,9 @@ def q_table_to_policy(q_table: QTable,
     return policy
 
 
-
-def blend_policies(target: PolicyTable,
-                   prior: PolicyTable,
-                   weight: float) -> PolicyTable:
+def blend_policies(
+    target: PolicyTable, prior: PolicyTable, weight: float
+) -> PolicyTable:
     """
     Blend two policies using linear interpolation.
 
@@ -662,7 +690,11 @@ class RewardDistributionTable:
     Handles float reward values with configurable precision tie_tol.
     """
 
-    def __init__(self, values: Optional[Dict[float, Union[int, float]]] = None, delta: float = 0.01):
+    def __init__(
+        self,
+        values: Optional[Dict[float, Union[int, float]]] = None,
+        delta: float = 0.01,
+    ):
         """
         Initialize Reward Distribution table.
 
@@ -752,7 +784,7 @@ class RewardDistributionTable:
         """Get all reward values in the distribution table."""
         return list(self.values.keys())
 
-    def normalize_rewards_to_0_1(self) -> 'RewardDistributionTable':
+    def normalize_rewards_to_0_1(self) -> "RewardDistributionTable":
         """
         Normalize the REWARD KEYS to 0-1 range using min-max normalization.
         The values (counts/probabilities) remain unchanged, only reward keys are normalized.
@@ -799,13 +831,17 @@ class RewardDistributionTable:
                 else:
                     normalized_values[normalized_reward] = value
 
-            print(f"REWARDS 0-1 Normalization: [{min_reward:.6f}, {max_reward:.6f}] -> [0.0, 1.0]")
-            print("Values (counts/probabilities) unchanged, only reward keys normalized")
+            print(
+                f"REWARDS 0-1 Normalization: [{min_reward:.6f}, {max_reward:.6f}] -> [0.0, 1.0]"
+            )
+            print(
+                "Values (counts/probabilities) unchanged, only reward keys normalized"
+            )
 
         # Create new table with same tie_tol and normalized reward keys
         return RewardDistributionTable(normalized_values, delta=self.delta)
 
-    def normalize_to_probabilities(self) -> 'RewardDistributionTable':
+    def normalize_to_probabilities(self) -> "RewardDistributionTable":
         """
         Convert count-based distribution to probability distribution.
 
@@ -816,7 +852,9 @@ class RewardDistributionTable:
         if total_count == 0:
             return RewardDistributionTable(delta=self.delta)
 
-        prob_values = {reward: count / total_count for reward, count in self.values.items()}
+        prob_values = {
+            reward: count / total_count for reward, count in self.values.items()
+        }
         return RewardDistributionTable(prob_values, delta=self.delta)
 
     def _is_probability_distribution(self, tolerance: float = 1e-6) -> bool:
@@ -832,10 +870,12 @@ class RewardDistributionTable:
         total = self.get_total_count()
         return abs(total - 1.0) <= tolerance
 
-    def generate_samples(self,
-                         num_samples: int = 10000,
-                         force_count: Optional[bool] = None,
-                         min_samples_per_reward: int = 1) -> np.ndarray:
+    def generate_samples(
+        self,
+        num_samples: int = 10000,
+        force_count: Optional[bool] = None,
+        min_samples_per_reward: int = 1,
+    ) -> np.ndarray:
         """
         Generate samples from the reward distribution for statistical analysis.
 
@@ -877,7 +917,9 @@ class RewardDistributionTable:
 
                 # Ensure minimum samples per reward
                 if len([s for s in samples if s == reward]) < min_samples_per_reward:
-                    needed = min_samples_per_reward - len([s for s in samples if s == reward])
+                    needed = min_samples_per_reward - len(
+                        [s for s in samples if s == reward]
+                    )
                     samples.extend([reward] * needed)
 
         else:
@@ -893,13 +935,17 @@ class RewardDistributionTable:
             for reward, count in zip(rewards, sample_counts):
                 samples.extend([reward] * count)
 
-        print(f"Generated {len(samples)} samples from {len(self.values)} unique reward values")
+        print(
+            f"Generated {len(samples)} samples from {len(self.values)} unique reward values"
+        )
         return np.array(samples)
 
-    def fit_gaussian(self,
-                     num_samples: int = 10000,
-                     force_count: Optional[bool] = None,
-                     min_samples_per_reward: int = 1) -> Tuple[float, float, Dict[str, float]]:
+    def fit_gaussian(
+        self,
+        num_samples: int = 10000,
+        force_count: Optional[bool] = None,
+        min_samples_per_reward: int = 1,
+    ) -> Tuple[float, float, Dict[str, float]]:
         """
         Fit a Gaussian distribution to the reward distribution.
 
@@ -915,15 +961,19 @@ class RewardDistributionTable:
             - fit_statistics: dictionary with fitting statistics and diagnostics
         """
         if not self.values:
-            return 0.0, 0.0, {'error': 'Empty distribution'}
+            return 0.0, 0.0, {"error": "Empty distribution"}
 
         # Determine distribution type
-        is_count = force_count if force_count is not None else not self._is_probability_distribution()
+        is_count = (
+            force_count
+            if force_count is not None
+            else not self._is_probability_distribution()
+        )
 
         # Common fit statistics initialization
         fit_stats = {
-            'unique_rewards': len(self.values),
-            'reward_range': (min(self.values.keys()), max(self.values.keys()))
+            "unique_rewards": len(self.values),
+            "reward_range": (min(self.values.keys()), max(self.values.keys())),
         }
 
         if is_count:
@@ -932,55 +982,71 @@ class RewardDistributionTable:
 
             total_count = sum(self.values.values())
             if total_count == 0:
-                return 0.0, 0.0, {'error': 'Zero total count'}
+                return 0.0, 0.0, {"error": "Zero total count"}
 
             # Calculate weighted mean and variance
             weighted_sum = sum(reward * count for reward, count in self.values.items())
             mu = weighted_sum / total_count
 
-            weighted_var_sum = sum(count * (reward - mu) ** 2 for reward, count in self.values.items())
+            weighted_var_sum = sum(
+                count * (reward - mu) ** 2 for reward, count in self.values.items()
+            )
             variance = weighted_var_sum / total_count
             sigma = np.sqrt(variance)
 
             # Update fit statistics
-            fit_stats.update({
-                'method': 'direct_from_counts',
-                'total_count': total_count,
-                'weighted_mean': mu,
-                'weighted_variance': variance,
-                'fitted_mu': mu,
-                'fitted_sigma': sigma
-            })
+            fit_stats.update(
+                {
+                    "method": "direct_from_counts",
+                    "total_count": total_count,
+                    "weighted_mean": mu,
+                    "weighted_variance": variance,
+                    "fitted_mu": mu,
+                    "fitted_sigma": sigma,
+                }
+            )
 
             # Generate samples for KS test
-            samples = self.generate_samples(num_samples=None, force_count=True,
-                                            min_samples_per_reward=min_samples_per_reward)
+            samples = self.generate_samples(
+                num_samples=None,
+                force_count=True,
+                min_samples_per_reward=min_samples_per_reward,
+            )
             if len(samples) > 1:
-                fit_stats.update({
-                    'num_samples': len(samples),
-                    'sample_mean': np.mean(samples),
-                    'sample_std': np.std(samples, ddof=1)
-                })
+                fit_stats.update(
+                    {
+                        "num_samples": len(samples),
+                        "sample_mean": np.mean(samples),
+                        "sample_std": np.std(samples, ddof=1),
+                    }
+                )
 
                 # KS test
-                ks_statistic, ks_p_value = scipy.stats.kstest(samples,
-                                                              lambda x: scipy.stats.norm.cdf(x, mu, sigma))
-                fit_stats.update({
-                    'ks_statistic': ks_statistic,
-                    'ks_p_value': ks_p_value,
-                    'ks_significant': ks_p_value < 0.05
-                })
+                ks_statistic, ks_p_value = scipy.stats.kstest(
+                    samples, lambda x: scipy.stats.norm.cdf(x, mu, sigma)
+                )
+                fit_stats.update(
+                    {
+                        "ks_statistic": ks_statistic,
+                        "ks_p_value": ks_p_value,
+                        "ks_significant": ks_p_value < 0.05,
+                    }
+                )
 
             print(f"Gaussian fit completed (direct): μ={mu:.6f}, σ={sigma:.6f}")
-            print(f"  Total count: {total_count:.1f}, KS p-value: {fit_stats.get('ks_p_value', 'N/A')}")
+            print(
+                f"  Total count: {total_count:.1f}, KS p-value: {fit_stats.get('ks_p_value', 'N/A')}"
+            )
 
         else:
             # Sample-based fitting for probability distributions
             print(f"Fitting Gaussian from {num_samples} samples")
 
-            samples = self.generate_samples(num_samples, force_count, min_samples_per_reward)
+            samples = self.generate_samples(
+                num_samples, force_count, min_samples_per_reward
+            )
             if len(samples) == 0:
-                return 0.0, 0.0, {'error': 'No samples generated'}
+                return 0.0, 0.0, {"error": "No samples generated"}
 
             # Fit using scipy
             mu, sigma = scipy.stats.norm.fit(samples)
@@ -989,25 +1055,34 @@ class RewardDistributionTable:
             empirical_mean = np.mean(samples)
             empirical_var = np.var(samples, ddof=1)
 
-            fit_stats.update({
-                'method': 'scipy_fit_from_samples',
-                'num_samples': len(samples),
-                'sample_mean': empirical_mean,
-                'sample_std': np.std(samples, ddof=1),
-                'fitted_mu': mu,
-                'fitted_sigma': sigma,
-                'mean_difference': abs(mu - empirical_mean),
-                'variance_ratio': (sigma ** 2) / empirical_var if empirical_var > 0 else float('inf')
-            })
+            fit_stats.update(
+                {
+                    "method": "scipy_fit_from_samples",
+                    "num_samples": len(samples),
+                    "sample_mean": empirical_mean,
+                    "sample_std": np.std(samples, ddof=1),
+                    "fitted_mu": mu,
+                    "fitted_sigma": sigma,
+                    "mean_difference": abs(mu - empirical_mean),
+                    "variance_ratio": (
+                        (sigma**2) / empirical_var
+                        if empirical_var > 0
+                        else float("inf")
+                    ),
+                }
+            )
 
             # KS test
-            ks_statistic, ks_p_value = scipy.stats.kstest(samples,
-                                                          lambda x: scipy.stats.norm.cdf(x, mu, sigma))
-            fit_stats.update({
-                'ks_statistic': ks_statistic,
-                'ks_p_value': ks_p_value,
-                'ks_significant': ks_p_value < 0.05
-            })
+            ks_statistic, ks_p_value = scipy.stats.kstest(
+                samples, lambda x: scipy.stats.norm.cdf(x, mu, sigma)
+            )
+            fit_stats.update(
+                {
+                    "ks_statistic": ks_statistic,
+                    "ks_p_value": ks_p_value,
+                    "ks_significant": ks_p_value < 0.05,
+                }
+            )
 
             print(f"Gaussian fit completed (sampled): μ={mu:.6f}, σ={sigma:.6f}")
             print(f"  Samples: {len(samples)}, KS p-value: {ks_p_value:.6f}")
@@ -1019,9 +1094,9 @@ class RewardDistributionTable:
         Export Reward Distribution table to CSV file.
         CSV format: reward,count_or_probability
         """
-        with open(file_path, 'w', newline='') as csvfile:
+        with open(file_path, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['reward', 'count_or_probability'])
+            writer.writerow(["reward", "count_or_probability"])
 
             for reward in sorted(self.values.keys()):
                 writer.writerow([reward, self.values[reward]])
@@ -1036,12 +1111,12 @@ class RewardDistributionTable:
 
         self.values = {}
 
-        with open(file_path, 'r') as csvfile:
+        with open(file_path, "r") as csvfile:
             reader = csv.DictReader(csvfile)
 
             for row in reader:
-                reward = float(row['reward'])
-                value = float(row['count_or_probability'])
+                reward = float(row["reward"])
+                value = float(row["count_or_probability"])
                 # Use add_count to ensure proper rounding
                 self.add_count(reward, value)
 

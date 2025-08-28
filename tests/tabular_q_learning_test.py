@@ -25,9 +25,17 @@ class PeriodicEvalCallback(BaseCallback):
     Records greedy (det=True) and training-policy (det=False) scores into provided lists.
     Does not interrupt training (always returns True).
     """
-    def __init__(self, eval_env, eval_every: int, n_eval_episodes: int,
-                 greedy_scores_list, train_scores_list,
-                 eval_seed_base: int = 10000, verbose: int = 0):
+
+    def __init__(
+        self,
+        eval_env,
+        eval_every: int,
+        n_eval_episodes: int,
+        greedy_scores_list,
+        train_scores_list,
+        eval_seed_base: int = 10000,
+        verbose: int = 0,
+    ):
         super().__init__(verbose=verbose)
         self.eval_env = eval_env
         self.eval_every = int(eval_every)
@@ -40,31 +48,42 @@ class PeriodicEvalCallback(BaseCallback):
 
     def _do_eval(self, tag: str):
         # control RNG for reproducibility demo
-        self.eval_env.reset(seed=self.eval_seed_base + 2*self._eval_count)
+        self.eval_env.reset(seed=self.eval_seed_base + 2 * self._eval_count)
         mean_greedy, std_greedy = evaluate_policy(
-            model=self.model, env=self.eval_env,
+            model=self.model,
+            env=self.eval_env,
             n_eval_episodes=self.n_eval_episodes,
-            deterministic=True, render=False, warn=False
+            deterministic=True,
+            render=False,
+            warn=False,
         )
-        self.eval_env.reset(seed=self.eval_seed_base + 2*self._eval_count + 1)
+        self.eval_env.reset(seed=self.eval_seed_base + 2 * self._eval_count + 1)
         mean_train, std_train = evaluate_policy(
-            model=self.model, env=self.eval_env,
+            model=self.model,
+            env=self.eval_env,
             n_eval_episodes=self.n_eval_episodes,
-            deterministic=False, render=False, warn=False
+            deterministic=False,
+            render=False,
+            warn=False,
         )
         self.greedy_scores_list.append(float(mean_greedy))
         self.train_scores_list.append(float(mean_train))
         self._last_eval_step = self.model.num_timesteps
         self._eval_count += 1
         if self.verbose:
-            print(f"[Eval:{tag}] step={self.model.num_timesteps}  "
-                  f"Greedy={mean_greedy:.3f}  TrainPol={mean_train:.3f}")
+            print(
+                f"[Eval:{tag}] step={self.model.num_timesteps}  "
+                f"Greedy={mean_greedy:.3f}  TrainPol={mean_train:.3f}"
+            )
 
     def _on_training_start(self):
         self._do_eval(tag="start")
 
     def _on_step(self) -> bool:
-        if self.model.num_timesteps > 0 and self.model.num_timesteps % self.eval_every == 0:
+        if (
+            self.model.num_timesteps > 0
+            and self.model.num_timesteps % self.eval_every == 0
+        ):
             if self._last_eval_step != self.model.num_timesteps:
                 self._do_eval(tag="periodic")
         return True
@@ -80,7 +99,7 @@ def mean_std(curves_list):
     return arr.mean(axis=0), arr.std(axis=0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     output_dir = "./outputs/tabular_q_learning"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -110,20 +129,26 @@ if __name__ == '__main__':
     taxi_mdp = taxi_src_env.get_mdp_network()
     taxi_nx_env_base = TimeLimit(
         NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=None),
-        max_episode_steps=TAXI_MAX_STEPS  # Taxi-v3 default
+        max_episode_steps=TAXI_MAX_STEPS,  # Taxi-v3 default
     )
     print(f"Taxi rainy MDP: |S|={len(taxi_mdp.states)}, |A|={taxi_mdp.num_actions}")
 
     # --- FrozenLake 8x8 (slippery) — build MDP + a base backend with TimeLimit
-    print("\n=== Build stochastic FrozenLake (8x8, slippery) MDP and NetworkX backend ===")
-    fl_src_env = CustomisedFrozenLakeEnv(render_mode=None, map_name="8x8", is_slippery=True)  # slippery confirmed
+    print(
+        "\n=== Build stochastic FrozenLake (8x8, slippery) MDP and NetworkX backend ==="
+    )
+    fl_src_env = CustomisedFrozenLakeEnv(
+        render_mode=None, map_name="8x8", is_slippery=True
+    )  # slippery confirmed
     fl_src_env.reset()
     fl_mdp = fl_src_env.get_mdp_network()
     fl_nx_env_base = TimeLimit(
         NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=None),
-        max_episode_steps=FROZENLAKE_MAX_STEPS  # FrozenLake-v1 default
+        max_episode_steps=FROZENLAKE_MAX_STEPS,  # FrozenLake-v1 default
     )
-    print(f"FrozenLake slippery MDP: |S|={len(fl_mdp.states)}, |A|={fl_mdp.num_actions}")
+    print(
+        f"FrozenLake slippery MDP: |S|={len(fl_mdp.states)}, |A|={fl_mdp.num_actions}"
+    )
 
     taxi_curve_greedy_all, taxi_curve_train_all = [], []
     fl_curve_greedy_all, fl_curve_train_all = [], []
@@ -136,7 +161,7 @@ if __name__ == '__main__':
         print(f"\n[Taxi] Seed = {seed}")
         taxi_train_env = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=seed),
-            max_episode_steps=TAXI_MAX_STEPS
+            max_episode_steps=TAXI_MAX_STEPS,
         )
         taxi_vec_env = DummyVecEnv([lambda: taxi_train_env])
 
@@ -151,8 +176,10 @@ if __name__ == '__main__':
         )
 
         taxi_eval_env = TimeLimit(
-            NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=10_000 + seed),
-            max_episode_steps=TAXI_MAX_STEPS
+            NetworkXMDPEnvironment(
+                mdp_network=taxi_mdp, render_mode=None, seed=10_000 + seed
+            ),
+            max_episode_steps=TAXI_MAX_STEPS,
         )
 
         taxi_curve_greedy, taxi_curve_train = [], []
@@ -162,7 +189,7 @@ if __name__ == '__main__':
             n_eval_episodes=n_eval_episodes,
             greedy_scores_list=taxi_curve_greedy,
             train_scores_list=taxi_curve_train,
-            eval_seed_base=42 + 1000*seed,
+            eval_seed_base=42 + 1000 * seed,
             verbose=1,
         )
 
@@ -170,7 +197,7 @@ if __name__ == '__main__':
             total_timesteps=total_timesteps,
             reset_num_timesteps=True,
             progress_bar=True,
-            callback=eval_cb
+            callback=eval_cb,
         )
 
         taxi_curve_greedy_all.append(np.array(taxi_curve_greedy, dtype=float))
@@ -183,30 +210,44 @@ if __name__ == '__main__':
 
         # ===== After training: export Q -> policy, then record GIF =====
         taxi_policy = q_table_to_policy(
-            agent.q,             # QTable
-            taxi_mdp.states,     # list of states from MDP
+            agent.q,  # QTable
+            taxi_mdp.states,  # list of states from MDP
             taxi_mdp.num_actions,
-            temperature=0.0      # greedy policy
+            temperature=0.0,  # greedy policy
         )
 
         # Renderer env; backend transitions are from NetworkX (TimeLimit applied)
         taxi_gif_backend = TimeLimit(
-            NetworkXMDPEnvironment(mdp_network=taxi_mdp, render_mode=None, seed=50_000 + seed),
-            max_episode_steps=TAXI_MAX_STEPS
+            NetworkXMDPEnvironment(
+                mdp_network=taxi_mdp, render_mode=None, seed=50_000 + seed
+            ),
+            max_episode_steps=TAXI_MAX_STEPS,
         )
         taxi_rgb_env = CustomisedTaxiEnv(
             render_mode="rgb_array",
-            is_rainy=True,                  # rainy visuals
-            networkx_env=taxi_gif_backend   # backend dynamics
+            is_rainy=True,  # rainy visuals
+            networkx_env=taxi_gif_backend,  # backend dynamics
         )
 
         taxi_frames = record_policy_gif(
-            taxi_rgb_env, taxi_policy, taxi_action_names,
-            seed=500 + seed*10, episodes=3, max_steps=200
+            taxi_rgb_env,
+            taxi_policy,
+            taxi_action_names,
+            seed=500 + seed * 10,
+            episodes=3,
+            max_steps=200,
         )
         if taxi_frames:
-            taxi_gif_path = os.path.join(output_dir, f"taxi_qlearn_policy_seed{seed}.gif")
-            taxi_frames[0].save(taxi_gif_path, save_all=True, append_images=taxi_frames[1:], duration=500, loop=0)
+            taxi_gif_path = os.path.join(
+                output_dir, f"taxi_qlearn_policy_seed{seed}.gif"
+            )
+            taxi_frames[0].save(
+                taxi_gif_path,
+                save_all=True,
+                append_images=taxi_frames[1:],
+                duration=500,
+                loop=0,
+            )
             print(f"[Taxi] Saved policy GIF -> {taxi_gif_path}")
         else:
             print("[Taxi] Warning: no frames for GIF")
@@ -219,7 +260,7 @@ if __name__ == '__main__':
         print(f"\n[FrozenLake] Seed = {seed}")
         fl_train_env = TimeLimit(
             NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=seed),
-            max_episode_steps=FROZENLAKE_MAX_STEPS
+            max_episode_steps=FROZENLAKE_MAX_STEPS,
         )
         fl_vec_env = DummyVecEnv([lambda: fl_train_env])
 
@@ -234,8 +275,10 @@ if __name__ == '__main__':
         )
 
         fl_eval_env = TimeLimit(
-            NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=20_000 + seed),
-            max_episode_steps=FROZENLAKE_MAX_STEPS
+            NetworkXMDPEnvironment(
+                mdp_network=fl_mdp, render_mode=None, seed=20_000 + seed
+            ),
+            max_episode_steps=FROZENLAKE_MAX_STEPS,
         )
 
         fl_curve_greedy, fl_curve_train = [], []
@@ -245,7 +288,7 @@ if __name__ == '__main__':
             n_eval_episodes=n_eval_episodes,
             greedy_scores_list=fl_curve_greedy,
             train_scores_list=fl_curve_train,
-            eval_seed_base=142 + 1000*seed,
+            eval_seed_base=142 + 1000 * seed,
             verbose=1,
         )
 
@@ -253,7 +296,7 @@ if __name__ == '__main__':
             total_timesteps=total_timesteps,
             reset_num_timesteps=True,
             progress_bar=True,
-            callback=eval_cb
+            callback=eval_cb,
         )
 
         fl_curve_greedy_all.append(np.array(fl_curve_greedy, dtype=float))
@@ -265,30 +308,44 @@ if __name__ == '__main__':
 
         # ===== After training: export Q -> policy, then record GIF =====
         fl_policy = q_table_to_policy(
-            agent.q,          # QTable
-            fl_mdp.states,    # list of states
+            agent.q,  # QTable
+            fl_mdp.states,  # list of states
             fl_mdp.num_actions,
-            temperature=0.0
+            temperature=0.0,
         )
 
         fl_gif_backend = TimeLimit(
-            NetworkXMDPEnvironment(mdp_network=fl_mdp, render_mode=None, seed=60_000 + seed),
-            max_episode_steps=FROZENLAKE_MAX_STEPS
+            NetworkXMDPEnvironment(
+                mdp_network=fl_mdp, render_mode=None, seed=60_000 + seed
+            ),
+            max_episode_steps=FROZENLAKE_MAX_STEPS,
         )
         fl_rgb_env = CustomisedFrozenLakeEnv(
             render_mode="rgb_array",
             map_name="8x8",
-            is_slippery=True,              # slippery visuals
-            networkx_env=fl_gif_backend
+            is_slippery=True,  # slippery visuals
+            networkx_env=fl_gif_backend,
         )
 
         fl_frames = record_policy_gif(
-            fl_rgb_env, fl_policy, fl_action_names,
-            seed=600 + seed*10, episodes=3, max_steps=100
+            fl_rgb_env,
+            fl_policy,
+            fl_action_names,
+            seed=600 + seed * 10,
+            episodes=3,
+            max_steps=100,
         )
         if fl_frames:
-            fl_gif_path = os.path.join(output_dir, f"frozenlake_qlearn_policy_seed{seed}.gif")
-            fl_frames[0].save(fl_gif_path, save_all=True, append_images=fl_frames[1:], duration=500, loop=0)
+            fl_gif_path = os.path.join(
+                output_dir, f"frozenlake_qlearn_policy_seed{seed}.gif"
+            )
+            fl_frames[0].save(
+                fl_gif_path,
+                save_all=True,
+                append_images=fl_frames[1:],
+                duration=500,
+                loop=0,
+            )
             print(f"[FrozenLake] Saved policy GIF -> {fl_gif_path}")
         else:
             print("[FrozenLake] Warning: no frames for GIF")
@@ -312,9 +369,16 @@ if __name__ == '__main__':
     plt.subplot(2, 1, 1)
     plt.title("Stochastic Taxi (rainy via NetworkX) — Q-learning curves")
     plt.plot(x, taxi_greedy_mean, label="Greedy policy (deterministic=True)")
-    plt.fill_between(x, taxi_greedy_mean - taxi_greedy_std, taxi_greedy_mean + taxi_greedy_std, alpha=0.2)
+    plt.fill_between(
+        x,
+        taxi_greedy_mean - taxi_greedy_std,
+        taxi_greedy_mean + taxi_greedy_std,
+        alpha=0.2,
+    )
     plt.plot(x, taxi_train_mean, label="Training policy (deterministic=False)")
-    plt.fill_between(x, taxi_train_mean - taxi_train_std, taxi_train_mean + taxi_train_std, alpha=0.2)
+    plt.fill_between(
+        x, taxi_train_mean - taxi_train_std, taxi_train_mean + taxi_train_std, alpha=0.2
+    )
     plt.xlabel("Timesteps")
     plt.ylabel(f"Mean return over {n_eval_episodes} eps")
     plt.grid(True, alpha=0.3)
@@ -323,9 +387,13 @@ if __name__ == '__main__':
     plt.subplot(2, 1, 2)
     plt.title("Stochastic FrozenLake 8x8 (slippery via NetworkX) — Q-learning curves")
     plt.plot(x, fl_greedy_mean, label="Greedy policy (deterministic=True)")
-    plt.fill_between(x, fl_greedy_mean - fl_greedy_std, fl_greedy_mean + fl_greedy_std, alpha=0.2)
+    plt.fill_between(
+        x, fl_greedy_mean - fl_greedy_std, fl_greedy_mean + fl_greedy_std, alpha=0.2
+    )
     plt.plot(x, fl_train_mean, label="Training policy (deterministic=False)")
-    plt.fill_between(x, fl_train_mean - fl_train_std, fl_train_mean + fl_train_std, alpha=0.2)
+    plt.fill_between(
+        x, fl_train_mean - fl_train_std, fl_train_mean + fl_train_std, alpha=0.2
+    )
     plt.xlabel("Timesteps")
     plt.ylabel(f"Mean return over {n_eval_episodes} eps")
     plt.grid(True, alpha=0.3)
@@ -337,9 +405,13 @@ if __name__ == '__main__':
     print(f"\nSaved curve figure: {fig_path}")
 
     print("\n=== Summary (mean return at last checkpoint) ===")
-    print(f"Taxi — Greedy: {taxi_greedy_mean[-1]:.3f} ± {taxi_greedy_std[-1]:.3f} | "
-          f"TrainPol: {taxi_train_mean[-1]:.3f} ± {taxi_train_std[-1]:.3f}")
-    print(f"FrozenLake — Greedy: {fl_greedy_mean[-1]:.3f} ± {fl_greedy_std[-1]:.3f} | "
-          f"TrainPol: {fl_train_mean[-1]:.3f} ± {fl_train_std[-1]:.3f}")
+    print(
+        f"Taxi — Greedy: {taxi_greedy_mean[-1]:.3f} ± {taxi_greedy_std[-1]:.3f} | "
+        f"TrainPol: {taxi_train_mean[-1]:.3f} ± {taxi_train_std[-1]:.3f}"
+    )
+    print(
+        f"FrozenLake — Greedy: {fl_greedy_mean[-1]:.3f} ± {fl_greedy_std[-1]:.3f} | "
+        f"TrainPol: {fl_train_mean[-1]:.3f} ± {fl_train_std[-1]:.3f}"
+    )
 
     print("\nDone.")

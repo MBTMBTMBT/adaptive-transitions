@@ -20,6 +20,7 @@ from mdp_network.mdp_tables import QTable
 # - Agent (SB3-like)
 # - check_for_correct_spaces
 
+
 class TabularQAgent(Agent):
     """
     Minimal and stable tabular Q-learning agent.
@@ -36,7 +37,11 @@ class TabularQAgent(Agent):
         *,
         learning_rate: float = 0.5,
         gamma: float = 0.99,
-        policy_mix: Tuple[float, float, float] = (0.7, 0.2, 0.1),  # (greedy, softmax, random)
+        policy_mix: Tuple[float, float, float] = (
+            0.7,
+            0.2,
+            0.1,
+        ),  # (greedy, softmax, random)
         temperature: float = 1.0,
         tie_tol: float = 1e-3,
         seed: Optional[int] = None,
@@ -61,9 +66,7 @@ class TabularQAgent(Agent):
         self.verbose = verbose
 
     def set_policy_parameters(
-        self,
-        policy_mix: Tuple[float, float, float],
-        temperature: float
+        self, policy_mix: Tuple[float, float, float], temperature: float
     ):
         """
         Update policy mixture and temperature at runtime.
@@ -75,16 +78,18 @@ class TabularQAgent(Agent):
         self.policy_mix = self._normalize_mix(policy_mix)
         self.temperature = float(temperature) if temperature > 0 else 1e-6
         if self.verbose:
-            print(f"[TabularQAgent] Updated policy: mix={self.policy_mix}, temperature={self.temperature}")
+            print(
+                f"[TabularQAgent] Updated policy: mix={self.policy_mix}, temperature={self.temperature}"
+            )
 
     # ===== SB3-like core API =====
 
     def learn(
-            self,
-            total_timesteps: int,
-            callback: Union[None, Callable, List[BaseCallback], BaseCallback] = None,
-            reset_num_timesteps: bool = True,
-            progress_bar: bool = False,
+        self,
+        total_timesteps: int,
+        callback: Union[None, Callable, List[BaseCallback], BaseCallback] = None,
+        reset_num_timesteps: bool = True,
+        progress_bar: bool = False,
     ) -> "TabularQAgent":
         if reset_num_timesteps:
             self.num_timesteps = 0
@@ -110,6 +115,7 @@ class TabularQAgent(Agent):
             if progress_bar:
                 try:
                     from tqdm import tqdm
+
                     # total is the target steps; initial is where we start from
                     pbar = tqdm(
                         total=total_timesteps,
@@ -125,7 +131,9 @@ class TabularQAgent(Agent):
             # Main loop
             while self.num_timesteps < total_timesteps:
                 # Select actions per env using stochastic policy mixture
-                actions = np.array([self._stochastic_action(s) for s in states], dtype=int)
+                actions = np.array(
+                    [self._stochastic_action(s) for s in states], dtype=int
+                )
 
                 next_obs, rewards, dones, infos = env.step(actions)
                 next_states = self._obs_to_int_batch(next_obs)
@@ -175,11 +183,11 @@ class TabularQAgent(Agent):
         return self
 
     def predict(
-            self,
-            observation: Union[np.ndarray, Dict[str, np.ndarray], int],
-            state: Optional[Tuple[np.ndarray, ...]] = None,
-            episode_start: Optional[np.ndarray] = None,
-            deterministic: bool = False,
+        self,
+        observation: Union[np.ndarray, Dict[str, np.ndarray], int],
+        state: Optional[Tuple[np.ndarray, ...]] = None,
+        episode_start: Optional[np.ndarray] = None,
+        deterministic: bool = False,
     ):
         """
         VecEnv-friendly predict:
@@ -191,14 +199,20 @@ class TabularQAgent(Agent):
         if isinstance(observation, np.ndarray):
             obs_arr = observation.reshape(-1).astype(int)
             if deterministic:
-                actions = np.array([self._greedy_action(int(s)) for s in obs_arr], dtype=int)
+                actions = np.array(
+                    [self._greedy_action(int(s)) for s in obs_arr], dtype=int
+                )
             else:
-                actions = np.array([self._stochastic_action(int(s)) for s in obs_arr], dtype=int)
+                actions = np.array(
+                    [self._stochastic_action(int(s)) for s in obs_arr], dtype=int
+                )
             return actions, state
 
         # dict obs is not supported for this agent
         if isinstance(observation, dict):
-            raise TypeError("Dict observations are not supported by TabularQAgent (expect Discrete int).")
+            raise TypeError(
+                "Dict observations are not supported by TabularQAgent (expect Discrete int)."
+            )
 
         # single int observation
         s = int(observation)
@@ -279,8 +293,9 @@ class TabularQAgent(Agent):
         )
 
         # Sanity check spaces
-        if agent.observation_space.n != int(meta["observation_space_n"]) or \
-           agent.action_space.n != int(meta["action_space_n"]):
+        if agent.observation_space.n != int(
+            meta["observation_space_n"]
+        ) or agent.action_space.n != int(meta["action_space_n"]):
             raise ValueError("Loaded metadata spaces do not match given env spaces.")
 
         # Set Q-table
@@ -337,7 +352,9 @@ class TabularQAgent(Agent):
         nA = self.action_space.n
         return max(self.q.get_q_value(s, a) for a in range(nA))
 
-    def _normalize_mix(self, mix: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    def _normalize_mix(
+        self, mix: Tuple[float, float, float]
+    ) -> Tuple[float, float, float]:
         arr = np.array(mix, dtype=float)
         if np.any(arr < 0):
             raise ValueError("policy_mix must be non-negative.")

@@ -34,14 +34,17 @@ class Collector:
     - Monotonic guard per series on eval_idx; drop if not strictly increasing.
     - 'series_step' = min(real_step) + step_base over seeds in the bucket (monotone enough).
     """
-    def __init__(self,
-                 seeds: List[int],
-                 keep_intermediate: bool = True,
-                 wandb_actor: Optional[ActorHandle] = None,
-                 step_base: int = 0,
-                 flush_interval_s: float = 0.5,
-                 max_queue: int = 16384,
-                 verbose: int = 0,):
+
+    def __init__(
+        self,
+        seeds: List[int],
+        keep_intermediate: bool = True,
+        wandb_actor: Optional[ActorHandle] = None,
+        step_base: int = 0,
+        flush_interval_s: float = 0.5,
+        max_queue: int = 16384,
+        verbose: int = 0,
+    ):
         self.seeds = list(map(int, seeds))
         self.keep = bool(keep_intermediate)
         self._wb = wandb_actor
@@ -52,12 +55,16 @@ class Collector:
 
         # Separate in-flight buckets for baseline vs curriculum(CL)
         # key: (label, eval_name, eval_idx) -> {seed: (greedy, train, step)}
-        self._bucket_base: Dict[Tuple[str, str, int], Dict[int, Tuple[float, float, int]]] = {}
-        self._bucket_cl:   Dict[Tuple[str, str, int], Dict[int, Tuple[float, float, int]]] = {}
+        self._bucket_base: Dict[
+            Tuple[str, str, int], Dict[int, Tuple[float, float, int]]
+        ] = {}
+        self._bucket_cl: Dict[
+            Tuple[str, str, int], Dict[int, Tuple[float, float, int]]
+        ] = {}
 
         # Per-series last eval_idx accepted (monotonic)
         self._last_idx_base: Dict[Tuple[str, str], int] = {}
-        self._last_idx_cl:   Dict[Tuple[str, str], int] = {}
+        self._last_idx_cl: Dict[Tuple[str, str], int] = {}
 
         # Per-series define_metric guard
         self._defined_series: set[Tuple[str, str]] = set()
@@ -110,8 +117,10 @@ class Collector:
                 if prev is not None and eval_idx <= prev:
                     # Non-monotonic eval index for this series -> drop silently
                     if self.verbose > 0:
-                        print(f"[Collector] drop non-monotonic idx for online/{label}/{eval_name}: "
-                              f"{eval_idx} <= {prev}")
+                        print(
+                            f"[Collector] drop non-monotonic idx for online/{label}/{eval_name}: "
+                            f"{eval_idx} <= {prev}"
+                        )
                     del buckets[key]
                 else:
                     # First time for this series: bind axis to series_step
@@ -119,7 +128,7 @@ class Collector:
                         try:
                             self._wb.define_metric.remote(
                                 f"online/{label}/{eval_name}/*",
-                                step_metric=f"online/{label}/{eval_name}/series_step"
+                                step_metric=f"online/{label}/{eval_name}/series_step",
                             )
                         except Exception:
                             pass
@@ -134,11 +143,11 @@ class Collector:
                     series = f"online/{label}/{eval_name}"
                     payload = {
                         f"{series}/greedy_mean": float(g_arr.mean()),
-                        f"{series}/greedy_std":  float(g_arr.std()),
-                        f"{series}/train_mean":  float(t_arr.mean()),
-                        f"{series}/train_std":   float(t_arr.std()),
+                        f"{series}/greedy_std": float(g_arr.std()),
+                        f"{series}/train_mean": float(t_arr.mean()),
+                        f"{series}/train_std": float(t_arr.std()),
                         f"{series}/series_step": out_step,
-                        f"{series}/series_idx":  int(eval_idx),
+                        f"{series}/series_idx": int(eval_idx),
                     }
 
                     del buckets[key]
@@ -174,18 +183,22 @@ class PeriodicEvalCallback:
     - Must be driven by FunctionCallback: call on_training_start(model) once per phase,
       then repeatedly call on_step() inside learn(), and finally on_training_end().
     """
-    def __init__(self, *,
-                 eval_env,
-                 eval_every: int,
-                 n_eval_episodes: int,
-                 steps_log: List[int],
-                 greedy_log: List[float],
-                 train_log: List[float],
-                 seed_base: int,
-                 label: str,
-                 eval_name: str,
-                 collector: Optional[ActorHandle] = None,
-                 seed_id: Optional[int] = None,):
+
+    def __init__(
+        self,
+        *,
+        eval_env,
+        eval_every: int,
+        n_eval_episodes: int,
+        steps_log: List[int],
+        greedy_log: List[float],
+        train_log: List[float],
+        seed_base: int,
+        label: str,
+        eval_name: str,
+        collector: Optional[ActorHandle] = None,
+        seed_id: Optional[int] = None,
+    ):
         self.model = None
         self.eval_env = eval_env
         self.eval_every = int(eval_every)
@@ -193,7 +206,7 @@ class PeriodicEvalCallback:
         self.n_eval = int(n_eval_episodes)
         self.steps_log = steps_log
         self.greedy_log = greedy_log
-        self.train_log  = train_log
+        self.train_log = train_log
         self.seed_base = int(seed_base)
         self.label = str(label)
         self.eval_name = str(eval_name)
@@ -205,14 +218,24 @@ class PeriodicEvalCallback:
     def _do_eval(self, tag: str):
         # greedy
         self.eval_env.reset(seed=self.seed_base + 2 * self._eval_count)
-        g_mean, _ = evaluate_policy(self.model, self.eval_env,
-                                    n_eval_episodes=self.n_eval,
-                                    deterministic=True, render=False, warn=False)
+        g_mean, _ = evaluate_policy(
+            self.model,
+            self.eval_env,
+            n_eval_episodes=self.n_eval,
+            deterministic=True,
+            render=False,
+            warn=False,
+        )
         # train-policy
         self.eval_env.reset(seed=self.seed_base + 2 * self._eval_count + 1)
-        t_mean, _ = evaluate_policy(self.model, self.eval_env,
-                                    n_eval_episodes=self.n_eval,
-                                    deterministic=False, render=False, warn=False)
+        t_mean, _ = evaluate_policy(
+            self.model,
+            self.eval_env,
+            n_eval_episodes=self.n_eval,
+            deterministic=False,
+            render=False,
+            warn=False,
+        )
 
         step = int(self.model.num_timesteps)
         self.steps_log.append(step)
@@ -221,16 +244,18 @@ class PeriodicEvalCallback:
 
         if self.collector is not None and self.seed_id is not None:
             try:
-                self.collector.report.remote({
-                    "seed": self.seed_id,
-                    "label": self.label,
-                    "eval_name": self.eval_name,
-                    "eval_idx": int(self._eval_count),  # <<< add this line
-                    "step": step,
-                    "greedy": float(g_mean),
-                    "train": float(t_mean),
-                    "wall_time": time.time(),
-                })
+                self.collector.report.remote(
+                    {
+                        "seed": self.seed_id,
+                        "label": self.label,
+                        "eval_name": self.eval_name,
+                        "eval_idx": int(self._eval_count),  # <<< add this line
+                        "step": step,
+                        "greedy": float(g_mean),
+                        "train": float(t_mean),
+                        "wall_time": time.time(),
+                    }
+                )
             except Exception as ex:
                 print(f"[Collector] report failed: {ex}")
 
@@ -259,23 +284,25 @@ class PeriodicEvalCallback:
 @ray.remote
 class SeedTrainer:
     def __init__(
-            self,
-             seed: int,
-             envs: Dict[str, Dict[str, Any]],
-             baseline_phases: List[Dict[str, Any]],
-             baseline_evals: List[Dict[str, Any]],
-             item_phases_map: Dict[str, List[Dict[str, Any]]],
-             evals_map: Dict[str, List[Dict[str, Any]]],
-             agent_ctor_path: str,
-             agent_kwargs: Dict[str, Any],
-             eval_every: int,
-             n_eval_episodes: int,
-             collector: Optional[Any] = None,
-             collect_intermediate: bool = True,
-             media_root: Optional[str] = None,
-             media_opts: Optional[Dict[str, Any]] = None,
-             mode: str = "both",                     # "baseline" | "items" | "both" | "item"
-             single_item_label: Optional[str] = None,  # NEW: run only one item when mode=="item"
+        self,
+        seed: int,
+        envs: Dict[str, Dict[str, Any]],
+        baseline_phases: List[Dict[str, Any]],
+        baseline_evals: List[Dict[str, Any]],
+        item_phases_map: Dict[str, List[Dict[str, Any]]],
+        evals_map: Dict[str, List[Dict[str, Any]]],
+        agent_ctor_path: str,
+        agent_kwargs: Dict[str, Any],
+        eval_every: int,
+        n_eval_episodes: int,
+        collector: Optional[Any] = None,
+        collect_intermediate: bool = True,
+        media_root: Optional[str] = None,
+        media_opts: Optional[Dict[str, Any]] = None,
+        mode: str = "both",  # "baseline" | "items" | "both" | "item"
+        single_item_label: Optional[
+            str
+        ] = None,  # NEW: run only one item when mode=="item"
     ):
         # Keep original assignments
         self.seed = int(seed)
@@ -317,19 +344,27 @@ class SeedTrainer:
     # --- eval helper ---
     def _eval_once(self, model, env, det: bool, seed_base: int) -> float:
         env.reset(seed=seed_base)
-        m, _ = evaluate_policy(model, env, self.n_eval, deterministic=det, render=False, warn=False)
+        m, _ = evaluate_policy(
+            model, env, self.n_eval, deterministic=det, render=False, warn=False
+        )
         return float(m)
 
     # --- media helpers ---
-    def _save_media(self, label: str, eval_name: str, env_key: str, suffix: str, agent) -> Optional[str]:
+    def _save_media(
+        self, label: str, eval_name: str, env_key: str, suffix: str, agent
+    ) -> Optional[str]:
         if not self.media_on:
             return None
-        env = make_env(self._env_spec(env_key), seed=self.seed + self.mo_start_seed_base)
+        env = make_env(
+            self._env_spec(env_key), seed=self.seed + self.mo_start_seed_base
+        )
         # subdir: <media_root>/seed_<id>/<label>/
         subdir = os.path.join(self.media_root, f"seed_{self.seed}", label)
         ensure_dir(Path(subdir))
         fmt = self.mo_fmt.lower()
-        out_path = os.path.join(subdir, f"{eval_name}{suffix}.{fmt if fmt in ('gif','mp4') else 'gif'}")
+        out_path = os.path.join(
+            subdir, f"{eval_name}{suffix}.{fmt if fmt in ('gif','mp4') else 'gif'}"
+        )
         try:
             saved = save_policy_media(
                 model=agent,
@@ -351,18 +386,24 @@ class SeedTrainer:
             print(f"[media] save failed for '{label}/{eval_name}{suffix}': {e}")
             return None
 
-    def _boundary_media_all(self, label: str, eval_specs: List[Dict[str, Any]], agent, phase_idx: int) -> Dict[str, Optional[str]]:
+    def _boundary_media_all(
+        self, label: str, eval_specs: List[Dict[str, Any]], agent, phase_idx: int
+    ) -> Dict[str, Optional[str]]:
         """Record media for all eval envs at a phase boundary (if media_on)."""
         out: Dict[str, Optional[str]] = {}
         if not self.media_on:
             return out
         for es in eval_specs:
             nm = es["name"]
-            p = self._save_media(label, nm, es["env"], suffix=f"_phase{phase_idx}", agent=agent)
+            p = self._save_media(
+                label, nm, es["env"], suffix=f"_phase{phase_idx}", agent=agent
+            )
             out[nm] = p
         return out
 
-    def _final_media_all(self, label: str, eval_specs: List[Dict[str, Any]], agent) -> Dict[str, Optional[str]]:
+    def _final_media_all(
+        self, label: str, eval_specs: List[Dict[str, Any]], agent
+    ) -> Dict[str, Optional[str]]:
         """Record media for all eval envs at training end (if media_on)."""
         out: Dict[str, Optional[str]] = {}
         if not self.media_on:
@@ -374,16 +415,20 @@ class SeedTrainer:
         return out
 
     # --- core schedule ---
-    def _run_schedule(self, label: str,
-                      phases: List[Dict[str, Any]],
-                      evals: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _run_schedule(
+        self, label: str, phases: List[Dict[str, Any]], evals: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         # Build training env & agent on phase-0 env
-        train_env = DummyVecEnv([lambda: make_env(self._env_spec(phases[0]["env"]), seed=self.seed)])
+        train_env = DummyVecEnv(
+            [lambda: make_env(self._env_spec(phases[0]["env"]), seed=self.seed)]
+        )
         agent_cls = _import(self.agent_ctor_path)
         agent = agent_cls(env=train_env, seed=self.seed, **self.agent_kwargs)
 
         # Fixed eval envs + storages
-        eval_envs: Dict[str, Any] = {es["name"]: make_env(self._env_spec(es["env"]), seed=12345) for es in evals}
+        eval_envs: Dict[str, Any] = {
+            es["name"]: make_env(self._env_spec(es["env"]), seed=12345) for es in evals
+        }
         steps_log: Dict[str, List[int]] = {nm: [] for nm in eval_envs}
         greedy_log: Dict[str, List[float]] = {nm: [] for nm in eval_envs}
         trainp_log: Dict[str, List[float]] = {nm: [] for nm in eval_envs}
@@ -392,19 +437,21 @@ class SeedTrainer:
         per_eval_cbs: List[PeriodicEvalCallback] = []
         for es in evals:
             nm = es["name"]
-            per_eval_cbs.append(PeriodicEvalCallback(
-                eval_env=eval_envs[nm],
-                eval_every=self.eval_every,
-                n_eval_episodes=self.n_eval,
-                steps_log=steps_log[nm],
-                greedy_log=greedy_log[nm],
-                train_log=trainp_log[nm],
-                seed_base=int(es.get("seed_base", self.mo_start_seed_base)),
-                label=label,
-                eval_name=nm,
-                collector=self.collector if self.collect_on else None,
-                seed_id=self.seed,
-            ))
+            per_eval_cbs.append(
+                PeriodicEvalCallback(
+                    eval_env=eval_envs[nm],
+                    eval_every=self.eval_every,
+                    n_eval_episodes=self.n_eval,
+                    steps_log=steps_log[nm],
+                    greedy_log=greedy_log[nm],
+                    train_log=trainp_log[nm],
+                    seed_base=int(es.get("seed_base", self.mo_start_seed_base)),
+                    label=label,
+                    eval_name=nm,
+                    collector=self.collector if self.collect_on else None,
+                    seed_id=self.seed,
+                )
+            )
 
         boundary_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
@@ -415,7 +462,9 @@ class SeedTrainer:
         # --- Iterate phases; keep global timesteps continuous ---
         for i, ph in enumerate(phases):
             # Periodic evals during learning
-            step_cb = FunctionCallback(lambda model: all(cb.on_step() for cb in per_eval_cbs))
+            step_cb = FunctionCallback(
+                lambda model: all(cb.on_step() for cb in per_eval_cbs)
+            )
             if not hasattr(step_cb, "n_episodes"):
                 step_cb.n_episodes = 0
 
@@ -423,15 +472,18 @@ class SeedTrainer:
             s0 = int(agent.num_timesteps)
             target_total = s0 + phase_steps
 
-            agent.learn(total_timesteps=target_total,
-                        reset_num_timesteps=False,
-                        callback=step_cb,
-                        progress_bar=False)
+            agent.learn(
+                total_timesteps=target_total,
+                reset_num_timesteps=False,
+                callback=step_cb,
+                progress_bar=False,
+            )
 
             s1 = int(agent.num_timesteps)
-            assert s1 - s0 == phase_steps, \
-                (f"[schedule] steps advanced {s1 - s0} (expect {phase_steps}) "
-                 f"at phase {i} label={label}")
+            assert s1 - s0 == phase_steps, (
+                f"[schedule] steps advanced {s1 - s0} (expect {phase_steps}) "
+                f"at phase {i} label={label}"
+            )
 
             # End-of-phase evals at the boundary step
             for cb in per_eval_cbs:
@@ -442,14 +494,28 @@ class SeedTrainer:
             boundary_cache.setdefault(bkey, {})
             for es in evals:
                 name = es["name"]
-                test_env = make_env(self._env_spec(es["env"]), seed=self.seed + 1000 + i)
+                test_env = make_env(
+                    self._env_spec(es["env"]), seed=self.seed + 1000 + i
+                )
 
                 test_env.reset(seed=self.seed + 1000 + i)
-                g_mean, _ = evaluate_policy(agent, test_env, self.n_eval,
-                                            deterministic=True, render=False, warn=False)
+                g_mean, _ = evaluate_policy(
+                    agent,
+                    test_env,
+                    self.n_eval,
+                    deterministic=True,
+                    render=False,
+                    warn=False,
+                )
                 test_env.reset(seed=self.seed + 1001 + i)
-                t_mean, _ = evaluate_policy(agent, test_env, self.n_eval,
-                                            deterministic=False, render=False, warn=False)
+                t_mean, _ = evaluate_policy(
+                    agent,
+                    test_env,
+                    self.n_eval,
+                    deterministic=False,
+                    render=False,
+                    warn=False,
+                )
                 test_env.close()
 
                 boundary_cache[bkey].setdefault(name, {})
@@ -464,14 +530,26 @@ class SeedTrainer:
 
             # Switch env for next phase (do NOT call on_training_start again)
             if i < len(phases) - 1:
-                next_env = DummyVecEnv([lambda: make_env(self._env_spec(phases[i + 1]["env"]), seed=self.seed)])
+                next_env = DummyVecEnv(
+                    [
+                        lambda: make_env(
+                            self._env_spec(phases[i + 1]["env"]), seed=self.seed
+                        )
+                    ]
+                )
                 agent.set_env(next_env)
 
         # End-of-training media
-        media_paths = self._final_media_all(label, evals, agent) if self.media_on else {}
+        media_paths = (
+            self._final_media_all(label, evals, agent) if self.media_on else {}
+        )
 
         # Pack outputs
-        out: Dict[str, Any] = {"steps": steps_log, "boundary": boundary_cache, "media": media_paths}
+        out: Dict[str, Any] = {
+            "steps": steps_log,
+            "boundary": boundary_cache,
+            "media": media_paths,
+        }
         for nm in eval_envs:
             out[nm] = {"greedy": greedy_log[nm], "train": trainp_log[nm]}
 
@@ -486,19 +564,27 @@ class SeedTrainer:
 
         # Run baseline schedule if requested
         if self.mode in ("baseline", "both"):
-            out["baseline"] = self._run_schedule("baseline", self.base_ph, self.base_evals)
+            out["baseline"] = self._run_schedule(
+                "baseline", self.base_ph, self.base_evals
+            )
 
         # NEW: per-item mode (run exactly one item label)
         if self.mode == "item":
             lb = self.single_item_label
-            assert lb is not None and lb in self.items_ph, f"invalid single_item_label={lb}"
-            out["items"][lb] = self._run_schedule(str(lb), self.items_ph[lb], self.evals_map[lb])
+            assert (
+                lb is not None and lb in self.items_ph
+            ), f"invalid single_item_label={lb}"
+            out["items"][lb] = self._run_schedule(
+                str(lb), self.items_ph[lb], self.evals_map[lb]
+            )
             return out  # Important: do not run other items in this mode
 
         # Original multi-item mode: iterate all items sequentially
         if self.mode in ("items", "both"):
             for label, phases in self.items_ph.items():
-                out["items"][label] = self._run_schedule(str(label), phases, self.evals_map[label])
+                out["items"][label] = self._run_schedule(
+                    str(label), phases, self.evals_map[label]
+                )
         return out
 
 
@@ -507,20 +593,20 @@ class SeedTrainer:
 # ------------------------------
 class RayCurriculumTrainer:
     def __init__(
-             self,
-             agent_ctor_path: str,
-             agent_kwargs: Dict[str, Any],
-             eval_every: int,
-             n_eval_episodes: int,
-             output_dir: Optional[str],
-             *,
-             wandb_step_base: int = 0,
-             save_intermediate: bool = True,
-             wandb_actor: Optional[ActorHandle] = None,
-             media_opts: Optional[Dict[str, Any]] = None,
-             run_baseline: bool = True,
-             run_items: bool = True,
-             metrics_opts: Optional[Dict[str, Any]] = None,
+        self,
+        agent_ctor_path: str,
+        agent_kwargs: Dict[str, Any],
+        eval_every: int,
+        n_eval_episodes: int,
+        output_dir: Optional[str],
+        *,
+        wandb_step_base: int = 0,
+        save_intermediate: bool = True,
+        wandb_actor: Optional[ActorHandle] = None,
+        media_opts: Optional[Dict[str, Any]] = None,
+        run_baseline: bool = True,
+        run_items: bool = True,
+        metrics_opts: Optional[Dict[str, Any]] = None,
     ):
         """
         Slimmed constructor: removed manual concurrency knobs.
@@ -552,8 +638,9 @@ class RayCurriculumTrainer:
         self.verbose = int(self.agent_kwargs.get("verbose", 0))
 
     # --- compute metrics independent of CSV/plots ---
-    def _compute_metrics(self, summary: Dict[str, Any],
-                         item_phases_map: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    def _compute_metrics(
+        self, summary: Dict[str, Any], item_phases_map: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, Any]:
         """
         Compute offline metrics from the aggregated summary.
 
@@ -572,41 +659,51 @@ class RayCurriculumTrainer:
             "compute_train": self.metrics_opts["compute_train"],
             "js_baseline_first_k": self.metrics_opts["js_baseline_first_k"],
         }
-        out = {"config": cfg, "baseline": {}, "items": {}}
+        out: Dict[str, Any] = {"config": cfg, "baseline": {}, "items": {}}
 
-        # ---------------- Baseline (use the primary eval in summary["baseline"]) ----------------
-        base_key = next(iter(summary["baseline"].keys()))
-        steps_base = np.asarray(summary["steps"], int)
-        b = summary["baseline"][base_key]
-        b_g = np.asarray(b["greedy_mean"], float)
-        b_t = np.asarray(b["train_mean"], float)
+        # ---------------- optional baseline ----------------
+        b_g = b_t = None
+        steps_base = None
+        base_block = summary.get("baseline", {})
+        has_baseline = isinstance(base_block, dict) and len(base_block) > 0
 
-        if cfg["compute_greedy"]:
-            out["baseline"]["greedy"] = {
-                "auc": _auc(steps_base, b_g, cfg["use_max_step"]),
-                "ap": _ap(steps_base, b_g, cfg["ap_last_k"], cfg["use_max_step"]),
-                "ttt": _ttt(steps_base, b_g, cfg["ttt_fraction"], cfg["use_max_step"]),
-            }
-        if cfg["compute_train"]:
-            out["baseline"]["train"] = {
-                "auc": _auc(steps_base, b_t, cfg["use_max_step"]),
-                "ap": _ap(steps_base, b_t, cfg["ap_last_k"], cfg["use_max_step"]),
-                "ttt": _ttt(steps_base, b_t, cfg["ttt_fraction"], cfg["use_max_step"]),
-            }
+        if has_baseline:
+            base_key = next(iter(base_block.keys()))
+            b = base_block[base_key]
+            steps_base = np.asarray(summary.get("steps", []), int)
+            if steps_base.size == 0:
+                raise ValueError("summary['steps'] is empty while baseline exists.")
 
-        # ------------ Helper: trapezoidal AUC on a closed interval [lo, hi] via interpolation ------------
+            b_g = np.asarray(b["greedy_mean"], float)
+            b_t = np.asarray(b["train_mean"], float)
+
+            if cfg["compute_greedy"]:
+                out["baseline"]["greedy"] = {
+                    "auc": _auc(steps_base, b_g, cfg["use_max_step"]),
+                    "ap": _ap(steps_base, b_g, cfg["ap_last_k"], cfg["use_max_step"]),
+                    "ttt": _ttt(
+                        steps_base, b_g, cfg["ttt_fraction"], cfg["use_max_step"]
+                    ),
+                }
+            if cfg["compute_train"]:
+                out["baseline"]["train"] = {
+                    "auc": _auc(steps_base, b_t, cfg["use_max_step"]),
+                    "ap": _ap(steps_base, b_t, cfg["ap_last_k"], cfg["use_max_step"]),
+                    "ttt": _ttt(
+                        steps_base, b_t, cfg["ttt_fraction"], cfg["use_max_step"]
+                    ),
+                }
+
+        # ------------ helper: trapezoidal AUC on [lo, hi] ------------
         def _segmented_auc(xs: np.ndarray, ys: np.ndarray, lo: float, hi: float) -> float:
-            """
-            Compute AUC restricted to [lo, hi]. Endpoints are included by linear interpolation.
-            Assumes xs is strictly increasing with len>=2.
-            """
             if hi <= lo:
                 return 0.0
             xs = np.asarray(xs, dtype=float)
             ys = np.asarray(ys, dtype=float)
-            assert xs.ndim == 1 and ys.ndim == 1 and xs.size == ys.size and xs.size >= 2, "invalid curve"
-            # Clip to domain
-            lo = max(lo, xs[0])
+            assert (
+                    xs.ndim == 1 and ys.ndim == 1 and xs.size == ys.size and xs.size >= 2
+            ), "invalid curve"
+            lo = max(lo, xs[0]);
             hi = min(hi, xs[-1])
             if hi <= lo:
                 return 0.0
@@ -617,9 +714,8 @@ class RayCurriculumTrainer:
             Y = np.concatenate(([y_lo], ys[mask], [y_hi]))
             return float(np.trapz(Y, X))
 
-        # ---------------- Items (Target eval preferred) + phase-wise AUCs ----------------
-        for lb, eval_dict in summary["items"].items():
-            # Select the eval to compute metrics on (Target preferred)
+        # ---------------- items (Target preferred) + phase-wise AUCs ----------------
+        for lb, eval_dict in summary.get("items", {}).items():
             eval_name = "Target" if "Target" in eval_dict else next(iter(eval_dict.keys()))
             e = eval_dict[eval_name]
             xs = np.asarray(e["steps"], int)
@@ -628,7 +724,7 @@ class RayCurriculumTrainer:
 
             mi: Dict[str, Any] = {}
 
-            # ----- whole-curve metrics -----
+            # whole-curve metrics
             if cfg["compute_greedy"]:
                 mi.setdefault("greedy", {})
                 mi["greedy"]["auc"] = _auc(xs, g, cfg["use_max_step"])
@@ -640,37 +736,42 @@ class RayCurriculumTrainer:
                 mi["train"]["ap"] = _ap(xs, t, cfg["ap_last_k"], cfg["use_max_step"])
                 mi["train"]["ttt"] = _ttt(xs, t, cfg["ttt_fraction"], cfg["use_max_step"])
 
-            # ----- phase-wise AUCs (only when item has >= 2 phases) -----
+            # phase-wise AUCs (>=2 phases)
             phs = item_phases_map.get(lb, [])
             if len(phs) >= 2 and xs.size >= 2:
-                # boundary between phase-0 and phase-1 in the global training step space
                 boundary = float(int(phs[0].get("steps", 0)))
-                start_s = float(xs[0])
+                start_s = float(xs[0]);
                 end_s = float(xs[-1])
 
-                # Compute segmented AUCs for greedy/train over [start,boundary] and [boundary,end]
                 if cfg["compute_greedy"]:
                     p1 = _segmented_auc(xs, g, start_s, boundary)
                     p2 = _segmented_auc(xs, g, boundary, end_s)
                     mi.setdefault("greedy", {})
-                    mi["greedy"]["auc_phase"] = {"p1": float(p1), "p2": float(p2), "boundary_step": int(boundary)}
-
+                    mi["greedy"]["auc_phase"] = {
+                        "p1": float(p1),
+                        "p2": float(p2),
+                        "boundary_step": int(boundary),
+                    }
                 if cfg["compute_train"]:
                     p1 = _segmented_auc(xs, t, start_s, boundary)
                     p2 = _segmented_auc(xs, t, boundary, end_s)
                     mi.setdefault("train", {})
-                    mi["train"]["auc_phase"] = {"p1": float(p1), "p2": float(p2), "boundary_step": int(boundary)}
+                    mi["train"]["auc_phase"] = {
+                        "p1": float(p1),
+                        "p2": float(p2),
+                        "boundary_step": int(boundary),
+                    }
 
-            # ----- jumpstart: item 2nd-phase start vs baseline start (avg first K) -----
+            # jumpstart: only if baseline present
             js: Dict[str, Any] = {}
-            if len(phs) >= 2:
-                second_phase_start = int(phs[0].get("steps", 0))  # boundary after phase-0
+            if len(phs) >= 2 and has_baseline and steps_base is not None:
+                second_phase_start = int(phs[0].get("steps", 0))
                 k0 = max(1, int(cfg["js_baseline_first_k"]))
-                if cfg["compute_greedy"]:
+                if cfg["compute_greedy"] and b_g is not None:
                     base_start_g = float(np.mean(b_g[:k0]))
                     item_p2_g = _value_at(xs, g, second_phase_start)
                     js["greedy"] = float(item_p2_g - base_start_g)
-                if cfg["compute_train"]:
+                if cfg["compute_train"] and b_t is not None:
                     base_start_t = float(np.mean(b_t[:k0]))
                     item_p2_t = _value_at(xs, t, second_phase_start)
                     js["train"] = float(item_p2_t - base_start_t)
@@ -682,13 +783,16 @@ class RayCurriculumTrainer:
 
         return out
 
-    def run(self,
+
+    def run(
+            self,
             seeds: List[int],
             envs: Dict[str, Dict[str, Any]],
             baseline_phases: List[Dict[str, Any]],
             baseline_evals: List[Dict[str, Any]],
             item_phases_map: Dict[str, List[Dict[str, Any]]],
-            evals_map: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+            evals_map: Dict[str, List[Dict[str, Any]]],
+        ) -> Dict[str, Any]:
         """
         Submit all per-(seed, task) actors at once (fire-and-forget).
         Print on submit and on completion; no manual throttling.
@@ -715,11 +819,17 @@ class RayCurriculumTrainer:
                 delta = max_item_total - base_total
                 new_phases = [dict(p) for p in baseline_phases]
                 if not new_phases:
-                    raise ValueError("baseline_phases is empty; cannot normalize steps.")
+                    raise ValueError(
+                        "baseline_phases is empty; cannot normalize steps."
+                    )
                 if delta > 0:
-                    new_phases[-1]["steps"] = int(new_phases[-1].get("steps", 0)) + delta
+                    new_phases[-1]["steps"] = (
+                        int(new_phases[-1].get("steps", 0)) + delta
+                    )
                     if self.verbose > 0:
-                        print(f"[info] baseline steps extended by {delta} to {max_item_total}.")
+                        print(
+                            f"[info] baseline steps extended by {delta} to {max_item_total}."
+                        )
                 else:
                     need_cut = -delta
                     idx = len(new_phases) - 1
@@ -732,7 +842,9 @@ class RayCurriculumTrainer:
                             new_phases.pop(idx)
                         idx -= 1
                     if self.verbose > 0:
-                        print(f"[info] baseline steps trimmed by {-delta} to {max_item_total}.")
+                        print(
+                            f"[info] baseline steps trimmed by {-delta} to {max_item_total}."
+                        )
                 baseline_phases = new_phases
 
         # ===== Shared collector (0 CPU; serial queue) =====
@@ -750,7 +862,9 @@ class RayCurriculumTrainer:
         item_labels = list(item_phases_map.keys()) if self.run_items else []
 
         futures2meta: Dict[Any, Tuple[int, str, Optional[str]]] = {}
-        media_root = os.path.join(self.outdir, "media") if self.outdir is not None else None
+        media_root = (
+            os.path.join(self.outdir, "media") if self.outdir is not None else None
+        )
         if media_root is not None:
             ensure_dir(Path(media_root))
 
@@ -759,11 +873,16 @@ class RayCurriculumTrainer:
         def submit(seed: int, mode: str, item_label: Optional[str], save_media: bool):
             """Create one SeedTrainer actor and submit its run() call."""
             actor = SeedTrainer.options(num_cpus=1).remote(
-                seed=seed, envs=envs,
-                baseline_phases=baseline_phases, baseline_evals=baseline_evals,
-                item_phases_map=item_phases_map, evals_map=evals_map,
-                agent_ctor_path=self.agent_ctor_path, agent_kwargs=self.agent_kwargs,
-                eval_every=self.eval_every, n_eval_episodes=self.n_eval,
+                seed=seed,
+                envs=envs,
+                baseline_phases=baseline_phases,
+                baseline_evals=baseline_evals,
+                item_phases_map=item_phases_map,
+                evals_map=evals_map,
+                agent_ctor_path=self.agent_ctor_path,
+                agent_kwargs=self.agent_kwargs,
+                eval_every=self.eval_every,
+                n_eval_episodes=self.n_eval,
                 collector=collector if self.save_intermediate else None,
                 collect_intermediate=self.save_intermediate,
                 media_root=(media_root if save_media else None),
@@ -777,18 +896,22 @@ class RayCurriculumTrainer:
         # Submit all baseline tasks (one per seed)
         if self.run_baseline:
             for s in seeds:
-                save_media = (s == first_seed)  # only the first seed records media
+                save_media = s == first_seed  # only the first seed records media
                 if self.verbose > 0:
-                    print(f"[seed {s}] submit (baseline) [media={'on' if save_media else 'off'}].")
+                    print(
+                        f"[seed {s}] submit (baseline) [media={'on' if save_media else 'off'}]."
+                    )
                 submit(s, "baseline", None, save_media)
 
         # Submit all per-item tasks (one task per (seed, item))
         if self.run_items:
             for s in seeds:
                 for lb in item_labels:
-                    save_media = (s == first_seed)  # only the first seed records media
+                    save_media = s == first_seed  # only the first seed records media
                     if self.verbose > 0:
-                        print(f"[seed {s}] submit (item/{lb}) [media={'on' if save_media else 'off'}].")
+                        print(
+                            f"[seed {s}] submit (item/{lb}) [media={'on' if save_media else 'off'}]."
+                        )
                     submit(s, "item", lb, save_media)
 
         # ===== Wait for completion and print who finished =====
@@ -814,7 +937,9 @@ class RayCurriculumTrainer:
                 tgt["baseline"] = r["baseline"]
             if "items" in r and isinstance(r["items"], dict):
                 for lb, dd in r["items"].items():
-                    assert lb not in tgt["items"], f"duplicate items[{lb}] for seed {sid}"
+                    assert (
+                        lb not in tgt["items"]
+                    ), f"duplicate items[{lb}] for seed {sid}"
                     tgt["items"][lb] = dd
 
         if self.run_baseline:
@@ -824,7 +949,9 @@ class RayCurriculumTrainer:
             missing = [s for s, v in by_seed.items() if not v["items"]]
             assert not missing, f"items missing for seeds: {missing}"
 
-        merged_results: List[Dict[str, Any]] = [by_seed[s] for s in sorted(by_seed.keys())]
+        merged_results: List[Dict[str, Any]] = [
+            by_seed[s] for s in sorted(by_seed.keys())
+        ]
 
         # ===== Optional timeline dump =====
         if self.outdir is not None and self.save_intermediate:
@@ -859,14 +986,20 @@ class RayCurriculumTrainer:
             if os.path.isdir(media_root_dir):
                 to_log = []
 
-                def _enqueue(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
+                def _enqueue(
+                    seed_id: int, label: str, media_map: Dict[str, Optional[str]]
+                ):
                     if not isinstance(media_map, dict):
                         return
                     for name, path in media_map.items():
                         if path:
-                            to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
+                            to_log.append(
+                                (f"media/seed_{seed_id}/{label}/{name}", path)
+                            )
 
-                def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
+                def _enqueue_boundary(
+                    seed_id: int, label: str, boundary_map: Dict[str, Any]
+                ):
                     if not isinstance(boundary_map, dict):
                         return
                     for phase_key, per_eval in boundary_map.items():
@@ -875,18 +1008,27 @@ class RayCurriculumTrainer:
                         for eval_name, rec in per_eval.items():
                             p = (rec or {}).get("media_path", None)
                             if p:
-                                to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", p))
+                                to_log.append(
+                                    (
+                                        f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}",
+                                        p,
+                                    )
+                                )
 
                 for r in merged_results:
                     sd = int(r.get("seed", 0))
                     base = r.get("baseline", None)
                     if base and self.run_baseline:
                         _enqueue(sd, "baseline", base.get("media", {}) or {})
-                        _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
+                        _enqueue_boundary(
+                            sd, "baseline", base.get("boundary", {}) or {}
+                        )
                     items = r.get("items", {}) or {}
                     for lb, d in items.items():
                         _enqueue(sd, str(lb), (d or {}).get("media", {}) or {})
-                        _enqueue_boundary(sd, str(lb), (d or {}).get("boundary", {}) or {})
+                        _enqueue_boundary(
+                            sd, str(lb), (d or {}).get("boundary", {}) or {}
+                        )
 
                 fps = int(self.media_opts.get("fps", 8))
                 for key, path in to_log:
@@ -926,7 +1068,11 @@ class RayCurriculumTrainer:
                 for ph in phs[:-1]:
                     acc += int(ph.get("steps", 0))
                     item_boundaries.append(acc)
-                boundaries_str = "-".join(str(b) for b in item_boundaries) if item_boundaries else "none"
+                boundaries_str = (
+                    "-".join(str(b) for b in item_boundaries)
+                    if item_boundaries
+                    else "none"
+                )
 
                 tgt = dd["Target"] if "Target" in dd else dd[next(iter(dd.keys()))]
 
@@ -936,12 +1082,29 @@ class RayCurriculumTrainer:
                 tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
                 tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
 
-                save_csv(os.path.join(item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
-                         steps_tgt, tgt_g_mean, tgt_g_std, header="greedy")
-                save_csv(os.path.join(item_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
-                         steps_tgt, tgt_t_mean, tgt_t_std, header="train")
+                save_csv(
+                    os.path.join(
+                        item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"
+                    ),
+                    steps_tgt,
+                    tgt_g_mean,
+                    tgt_g_std,
+                    header="greedy",
+                )
+                save_csv(
+                    os.path.join(
+                        item_dir,
+                        f"curriculum_eval_target_train_phase_{boundaries_str}.csv",
+                    ),
+                    steps_tgt,
+                    tgt_t_mean,
+                    tgt_t_std,
+                    header="train",
+                )
 
-                src_name = next((k for k in dd.keys() if k.lower().startswith("source")), None)
+                src_name = next(
+                    (k for k in dd.keys() if k.lower().startswith("source")), None
+                )
                 if src_name is not None:
                     src = dd[src_name]
                     steps_src = np.asarray(src["steps"], dtype=int)
@@ -949,12 +1112,32 @@ class RayCurriculumTrainer:
                     src_g_std = np.asarray(src["greedy_std"], dtype=float)
                     src_t_mean = np.asarray(src["train_mean"], dtype=float)
                     src_t_std = np.asarray(src["train_std"], dtype=float)
-                    save_csv(os.path.join(item_dir, f"curriculum_eval_source_phase_{boundaries_str}.csv"),
-                             steps_src, src_g_mean, src_g_std, header="greedy")
-                    save_csv(os.path.join(item_dir, f"curriculum_eval_source_train_phase_{boundaries_str}.csv"),
-                             steps_src, src_t_mean, src_t_std, header="train")
+                    save_csv(
+                        os.path.join(
+                            item_dir,
+                            f"curriculum_eval_source_phase_{boundaries_str}.csv",
+                        ),
+                        steps_src,
+                        src_g_mean,
+                        src_g_std,
+                        header="greedy",
+                    )
+                    save_csv(
+                        os.path.join(
+                            item_dir,
+                            f"curriculum_eval_source_train_phase_{boundaries_str}.csv",
+                        ),
+                        steps_src,
+                        src_t_mean,
+                        src_t_std,
+                        header="train",
+                    )
 
-                if self.run_baseline and base_curves is not None and steps_base is not None:
+                if (
+                    self.run_baseline
+                    and base_curves is not None
+                    and steps_base is not None
+                ):
                     item_total_steps = sum(int(p.get("steps", 0)) for p in phs)
                     assert item_total_steps > 0, f"empty phases for item {lb}"
 
@@ -963,54 +1146,84 @@ class RayCurriculumTrainer:
 
                     msg_base = f"[plot-check] baseline tail={_tail(steps_base)} len={len(steps_base)}"
                     msg_tgt = f"[plot-check] tgt({lb}) tail={_tail(steps_tgt)} len={len(steps_tgt)}"
-                    assert _tail(steps_base) == item_total_steps, \
-                        f"baseline total({_tail(steps_base)}) != item_total({item_total_steps}). {msg_base}"
-                    assert _tail(steps_tgt) == item_total_steps, \
-                        f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
+                    assert (
+                        _tail(steps_base) == item_total_steps
+                    ), f"baseline total({_tail(steps_base)}) != item_total({item_total_steps}). {msg_base}"
+                    assert (
+                        _tail(steps_tgt) == item_total_steps
+                    ), f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
 
                     X = steps_base
 
                     def _interp_strict(x_old, mean, std, x_new, name):
                         assert x_old[0] <= x_new[0], f"{name}: x_old starts after x_new"
-                        assert x_old[-1] >= x_new[-1], f"{name}: x_old ends before x_new"
-                        return (np.interp(x_new, x_old, mean), np.interp(x_new, x_old, std))
+                        assert (
+                            x_old[-1] >= x_new[-1]
+                        ), f"{name}: x_old ends before x_new"
+                        return (
+                            np.interp(x_new, x_old, mean),
+                            np.interp(x_new, x_old, std),
+                        )
 
                     base_g_mean_i, base_g_std_i = _interp_strict(
-                        steps_base, base_curves["greedy_mean"], base_curves["greedy_std"], X, "baseline/greedy")
+                        steps_base,
+                        base_curves["greedy_mean"],
+                        base_curves["greedy_std"],
+                        X,
+                        "baseline/greedy",
+                    )
                     base_t_mean_i, base_t_std_i = _interp_strict(
-                        steps_base, base_curves["train_mean"], base_curves["train_std"], X, "baseline/train")
+                        steps_base,
+                        base_curves["train_mean"],
+                        base_curves["train_std"],
+                        X,
+                        "baseline/train",
+                    )
 
                     tgt_g_mean_i, tgt_g_std_i = _interp_strict(
-                        steps_tgt, tgt_g_mean, tgt_g_std, X, f"tgt({lb})/greedy")
+                        steps_tgt, tgt_g_mean, tgt_g_std, X, f"tgt({lb})/greedy"
+                    )
                     tgt_t_mean_i, tgt_t_std_i = _interp_strict(
-                        steps_tgt, tgt_t_mean, tgt_t_std, X, f"tgt({lb})/train")
+                        steps_tgt, tgt_t_mean, tgt_t_std, X, f"tgt({lb})/train"
+                    )
 
                     curves_source_i = None
                     if src_name is not None:
-                        assert steps_src[-1] == item_total_steps, \
-                            f"source total({steps_src[-1]}) != item_total({item_total_steps}) for {lb}/{src_name}"
+                        assert (
+                            steps_src[-1] == item_total_steps
+                        ), f"source total({steps_src[-1]}) != item_total({item_total_steps}) for {lb}/{src_name}"
                         src_g_mean_i, src_g_std_i = _interp_strict(
-                            steps_src, src_g_mean, src_g_std, X, f"src({lb})/greedy")
+                            steps_src, src_g_mean, src_g_std, X, f"src({lb})/greedy"
+                        )
                         src_t_mean_i, src_t_std_i = _interp_strict(
-                            steps_src, src_t_mean, src_t_std, X, f"src({lb})/train")
+                            steps_src, src_t_mean, src_t_std, X, f"src({lb})/train"
+                        )
                         curves_source_i = {
-                            "greedy_mean": src_g_mean_i, "greedy_std": src_g_std_i,
-                            "train_mean": src_t_mean_i, "train_std": src_t_std_i,
+                            "greedy_mean": src_g_mean_i,
+                            "greedy_std": src_g_std_i,
+                            "train_mean": src_t_mean_i,
+                            "train_std": src_t_std_i,
                         }
 
-                    png_path = os.path.join(item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
+                    png_path = os.path.join(
+                        item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png"
+                    )
                     plot_pairwise(
                         out_png_path=png_path,
                         checkpoints=X,
                         phase_boundaries=item_boundaries,
                         title_prefix=f"Pairwise for '{lb}'",
                         baseline={
-                            "greedy_mean": base_g_mean_i, "greedy_std": base_g_std_i,
-                            "train_mean": base_t_mean_i, "train_std": base_t_std_i,
+                            "greedy_mean": base_g_mean_i,
+                            "greedy_std": base_g_std_i,
+                            "train_mean": base_t_mean_i,
+                            "train_std": base_t_std_i,
                         },
                         curves_target={
-                            "greedy_mean": tgt_g_mean_i, "greedy_std": tgt_g_std_i,
-                            "train_mean": tgt_t_mean_i, "train_std": tgt_t_std_i,
+                            "greedy_mean": tgt_g_mean_i,
+                            "greedy_std": tgt_g_std_i,
+                            "train_mean": tgt_t_mean_i,
+                            "train_std": tgt_t_std_i,
                         },
                         curves_source=curves_source_i,
                     )
@@ -1019,14 +1232,17 @@ class RayCurriculumTrainer:
                         self.wb.log_image.remote(
                             key=f"images/pairwise_{lb}_phase_{boundaries_str}",
                             path=png_path,
-                            caption=f"pairwise {lb} (phase boundaries: {boundaries_str})"
+                            caption=f"pairwise {lb} (phase boundaries: {boundaries_str})",
                         )
 
         return summary
 
-    # --- offline aggregation (simple, readable) ---
-    def _aggregate(self, per_seed: List[Dict[str, Any]],
-                   item_phases_map: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    # --- offline aggregation ---
+    def _aggregate(
+            self,
+            per_seed: List[Dict[str, Any]],
+            item_phases_map: Dict[str, List[Dict[str, Any]]],
+        ) -> Dict[str, Any]:
         assert per_seed, "no results"
         labels = sorted(item_phases_map.keys())
 
@@ -1034,41 +1250,75 @@ class RayCurriculumTrainer:
             arr = np.asarray([np.asarray(x, float) for x in ll])
             return arr.mean(0).tolist(), arr.std(0).tolist()
 
-        # baseline: choose the first eval name as primary
-        base_names = list(per_seed[0]["baseline"]["steps"].keys())
-        assert base_names, "no baseline evals"
-        base_primary = base_names[0]
-        ref_steps = per_seed[0]["baseline"]["steps"][base_primary]
-        for r in per_seed:
-            assert r["baseline"]["steps"][base_primary] == ref_steps, "baseline steps mismatch"
+        # -------- detect whether baseline exists --------
+        first_base = per_seed[0].get("baseline", None)
+        has_baseline = (
+                isinstance(first_base, dict)
+                and "steps" in first_base
+                and isinstance(first_base["steps"], dict)
+                and len(first_base["steps"]) > 0
+        )
 
-        g_mean, g_std = _stack([r["baseline"][base_primary]["greedy"] for r in per_seed])
-        t_mean, t_std = _stack([r["baseline"][base_primary]["train"]  for r in per_seed])
+        out: Dict[str, Any] = {"steps": None, "baseline": {}, "items": {}}
 
-        out = {
-            "steps": ref_steps,
-            "baseline": {
-                base_primary: {
-                    "greedy_mean": g_mean, "greedy_std": g_std,
-                    "train_mean":  t_mean, "train_std":  t_std,
-                }
-            },
-            "items": {}
-        }
+        # -------- aggregate baseline only when present --------
+        if has_baseline:
+            base_names = list(first_base["steps"].keys())
+            assert base_names, "no baseline evals"
+            base_primary = base_names[0]
 
-        for lb in labels:
-            eval_names = [k for k in per_seed[0]["items"][lb].keys() if k not in ("steps", "boundary", "media")]
-            steps_ref = per_seed[0]["items"][lb]["steps"]
+            ref_steps = per_seed[0]["baseline"]["steps"][base_primary]
             for r in per_seed:
+                assert (
+                        r["baseline"]["steps"][base_primary] == ref_steps
+                ), "baseline steps mismatch"
+
+            g_mean, g_std = _stack(
+                [r["baseline"][base_primary]["greedy"] for r in per_seed]
+            )
+            t_mean, t_std = _stack(
+                [r["baseline"][base_primary]["train"] for r in per_seed]
+            )
+
+            out["steps"] = ref_steps
+            out["baseline"] = {
+                base_primary: {
+                    "greedy_mean": g_mean,
+                    "greedy_std": g_std,
+                    "train_mean": t_mean,
+                    "train_std": t_std,
+                }
+            }
+
+        # -------- aggregate items (unchanged) --------
+        if labels:
+            for lb in labels:
+                # available eval names for this item (skip helper keys)
+                eval_names = [
+                    k
+                    for k in per_seed[0]["items"][lb].keys()
+                    if k not in ("steps", "boundary", "media")
+                ]
+                steps_ref = per_seed[0]["items"][lb]["steps"]
+                for r in per_seed:
+                    for nm in eval_names:
+                        assert (
+                                r["items"][lb]["steps"][nm] == steps_ref[nm]
+                        ), f"steps mismatch for {lb}/{nm}"
+
+                agg = {}
                 for nm in eval_names:
-                    assert r["items"][lb]["steps"][nm] == steps_ref[nm], f"steps mismatch for {lb}/{nm}"
-            agg = {}
-            for nm in eval_names:
-                gm, gs = _stack([r["items"][lb][nm]["greedy"] for r in per_seed])
-                tm, ts = _stack([r["items"][lb][nm]["train"]  for r in per_seed])
-                agg[nm] = {"steps": steps_ref[nm], "greedy_mean": gm, "greedy_std": gs,
-                           "train_mean": tm, "train_std": ts}
-            out["items"][lb] = agg
+                    gm, gs = _stack([r["items"][lb][nm]["greedy"] for r in per_seed])
+                    tm, ts = _stack([r["items"][lb][nm]["train"] for r in per_seed])
+                    agg[nm] = {
+                        "steps": steps_ref[nm],
+                        "greedy_mean": gm,
+                        "greedy_std": gs,
+                        "train_mean": tm,
+                        "train_std": ts,
+                    }
+                out["items"][lb] = agg
+
         return out
 
 
@@ -1087,7 +1337,7 @@ def run_curriculum(
     agent_kwargs: Dict[str, Any],
     eval_every: int,
     n_eval_episodes: int,
-    output_dir: Optional[str] = None,            # keep default
+    output_dir: Optional[str] = None,  # keep default
     save_intermediate: bool = True,
     wandb_actor: Optional[ActorHandle] = None,
     media_opts: Optional[Dict[str, Any]] = None,

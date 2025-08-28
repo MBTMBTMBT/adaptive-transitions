@@ -6,12 +6,13 @@ from .mdp_network import MDPNetwork
 from .mdp_tables import ValueTable
 
 
-def gaussian_bayesian_update(prior_mu: Union[float, np.ndarray],
-                             prior_sigma: Union[float, np.ndarray],
-                             observation: Union[float, np.ndarray],
-                             observation_sigma: Union[float, np.ndarray],
-                             min_sigma: float = 1e-8) -> tuple[
-    Union[float, np.ndarray], Union[float, np.ndarray]]:
+def gaussian_bayesian_update(
+    prior_mu: Union[float, np.ndarray],
+    prior_sigma: Union[float, np.ndarray],
+    observation: Union[float, np.ndarray],
+    observation_sigma: Union[float, np.ndarray],
+    min_sigma: float = 1e-8,
+) -> tuple[Union[float, np.ndarray], Union[float, np.ndarray]]:
     """
     Bayesian update for Gaussian distributions with numerical stability.
 
@@ -38,8 +39,8 @@ def gaussian_bayesian_update(prior_mu: Union[float, np.ndarray],
     observation_sigma = np.maximum(observation_sigma, min_sigma)
 
     # Convert to precision (inverse variance)
-    prior_precision = 1.0 / (prior_sigma ** 2)
-    obs_precision = 1.0 / (observation_sigma ** 2)
+    prior_precision = 1.0 / (prior_sigma**2)
+    obs_precision = 1.0 / (observation_sigma**2)
 
     # Compute posterior precision and variance
     posterior_precision = prior_precision + obs_precision
@@ -47,7 +48,9 @@ def gaussian_bayesian_update(prior_mu: Union[float, np.ndarray],
     posterior_sigma = np.sqrt(posterior_variance)
 
     # Compute posterior mean
-    posterior_mu = (prior_precision * prior_mu + obs_precision * observation) / posterior_precision
+    posterior_mu = (
+        prior_precision * prior_mu + obs_precision * observation
+    ) / posterior_precision
 
     # Ensure posterior sigma is not too small
     posterior_sigma = np.maximum(posterior_sigma, min_sigma)
@@ -55,12 +58,14 @@ def gaussian_bayesian_update(prior_mu: Union[float, np.ndarray],
     return posterior_mu, posterior_sigma
 
 
-def gaussian_kl_divergence(mu1: Union[float, np.ndarray],
-                           sigma1: Union[float, np.ndarray],
-                           mu2: Union[float, np.ndarray],
-                           sigma2: Union[float, np.ndarray],
-                           min_sigma: float = 1e-8,
-                           max_kl: float = 1e10) -> Union[float, np.ndarray]:
+def gaussian_kl_divergence(
+    mu1: Union[float, np.ndarray],
+    sigma1: Union[float, np.ndarray],
+    mu2: Union[float, np.ndarray],
+    sigma2: Union[float, np.ndarray],
+    min_sigma: float = 1e-8,
+    max_kl: float = 1e10,
+) -> Union[float, np.ndarray]:
     """
     Compute KL divergence between two Gaussian distributions KL(P||Q) with numerical stability.
 
@@ -85,17 +90,17 @@ def gaussian_kl_divergence(mu1: Union[float, np.ndarray],
     sigma2 = np.maximum(sigma2, min_sigma)
 
     # Compute variance terms
-    var1 = sigma1 ** 2
-    var2 = sigma2 ** 2
+    var1 = sigma1**2
+    var2 = sigma2**2
 
     # Compute mean difference
     mu_diff = mu1 - mu2
 
     # KL divergence formula for Gaussians
     # Handle potential numerical issues with log and division
-    with np.errstate(divide='ignore', invalid='ignore'):
+    with np.errstate(divide="ignore", invalid="ignore"):
         log_term = np.log(sigma2 / sigma1)
-        variance_term = (var1 + mu_diff ** 2) / (2 * var2)
+        variance_term = (var1 + mu_diff**2) / (2 * var2)
         kl_div = log_term + variance_term - 0.5
 
     # Handle edge cases and clip extreme values
@@ -123,12 +128,14 @@ def gaussian_kl_divergence(mu1: Union[float, np.ndarray],
     return kl_div
 
 
-def compute_information_surprise(mdp: MDPNetwork,
-                                 occupancy: ValueTable,
-                                 prior_mu: float,
-                                 prior_sigma: float,
-                                 observation_sigma: float = 1e-8,
-                                 delta: float = 1e-4) -> dict:
+def compute_information_surprise(
+    mdp: MDPNetwork,
+    occupancy: ValueTable,
+    prior_mu: float,
+    prior_sigma: float,
+    observation_sigma: float = 1e-8,
+    delta: float = 1e-4,
+) -> dict:
     """
     Compute information surprise for terminal states using both KL divergence and interval-based -logP surprise.
 
@@ -145,9 +152,11 @@ def compute_information_surprise(mdp: MDPNetwork,
     """
     terminal_states = list(mdp.terminal_states)
     if not terminal_states:
-        return {'error': 'No terminal states found'}
+        return {"error": "No terminal states found"}
 
-    print(f"Computing information surprise for {len(terminal_states)} terminal states...")
+    print(
+        f"Computing information surprise for {len(terminal_states)} terminal states..."
+    )
 
     terminal_info = []
     total_weighted_kl = 0.0
@@ -168,7 +177,9 @@ def compute_information_surprise(mdp: MDPNetwork,
         # Compute interval probability under prior using CDF
         lower = reward - delta / 2
         upper = reward + delta / 2
-        prob = norm.cdf(upper, loc=prior_mu, scale=prior_sigma) - norm.cdf(lower, loc=prior_mu, scale=prior_sigma)
+        prob = norm.cdf(upper, loc=prior_mu, scale=prior_sigma) - norm.cdf(
+            lower, loc=prior_mu, scale=prior_sigma
+        )
 
         # Avoid log(0)
         nll = -np.log(max(prob, 1e-12))
@@ -179,41 +190,51 @@ def compute_information_surprise(mdp: MDPNetwork,
         total_weighted_kl += weighted_kl
         total_weighted_nll += weighted_nll
 
-        terminal_info.append({
-            'state': state,
-            'reward': reward,
-            'occupancy': state_occupancy,
-            'posterior_mu': posterior_mu,
-            'posterior_sigma': posterior_sigma,
-            'kl_divergence': kl_divergence,
-            'weighted_kl': weighted_kl,
-            'negative_log_likelihood': nll,
-            'weighted_nll': weighted_nll
-        })
+        terminal_info.append(
+            {
+                "state": state,
+                "reward": reward,
+                "occupancy": state_occupancy,
+                "posterior_mu": posterior_mu,
+                "posterior_sigma": posterior_sigma,
+                "kl_divergence": kl_divergence,
+                "weighted_kl": weighted_kl,
+                "negative_log_likelihood": nll,
+                "weighted_nll": weighted_nll,
+            }
+        )
 
-        print(f"  State {state}: reward={reward:.4f}, occupancy={state_occupancy:.6f}, "
-              f"KL={kl_divergence:.6f}, weighted_kl={weighted_kl:.6f}, "
-              f"-logP={nll:.6f}, weighted_nll={weighted_nll:.6f}")
+        print(
+            f"  State {state}: reward={reward:.4f}, occupancy={state_occupancy:.6f}, "
+            f"KL={kl_divergence:.6f}, weighted_kl={weighted_kl:.6f}, "
+            f"-logP={nll:.6f}, weighted_nll={weighted_nll:.6f}"
+        )
 
-    terminal_info.sort(key=lambda x: x['weighted_nll'], reverse=True)
+    terminal_info.sort(key=lambda x: x["weighted_nll"], reverse=True)
 
     results = {
-        'prior_mu': prior_mu,
-        'prior_sigma': prior_sigma,
-        'observation_sigma': observation_sigma,
-        'tie_tol': delta,
-        'total_information_surprise_kl': total_weighted_kl,
-        'total_information_surprise_nll': total_weighted_nll,
-        'num_terminal_states': len(terminal_states),
-        'terminal_state_analysis': terminal_info,
-        'max_surprise_state': terminal_info[0]['state'] if terminal_info else None,
-        'max_surprise_value_nll': terminal_info[0]['weighted_nll'] if terminal_info else 0.0,
-        'max_surprise_value_kl': terminal_info[0]['weighted_kl'] if terminal_info else 0.0
+        "prior_mu": prior_mu,
+        "prior_sigma": prior_sigma,
+        "observation_sigma": observation_sigma,
+        "tie_tol": delta,
+        "total_information_surprise_kl": total_weighted_kl,
+        "total_information_surprise_nll": total_weighted_nll,
+        "num_terminal_states": len(terminal_states),
+        "terminal_state_analysis": terminal_info,
+        "max_surprise_state": terminal_info[0]["state"] if terminal_info else None,
+        "max_surprise_value_nll": (
+            terminal_info[0]["weighted_nll"] if terminal_info else 0.0
+        ),
+        "max_surprise_value_kl": (
+            terminal_info[0]["weighted_kl"] if terminal_info else 0.0
+        ),
     }
 
     print(f"Total Information Surprise (KL): {total_weighted_kl:.6f}")
     print(f"Total Information Surprise (-logP): {total_weighted_nll:.6f}")
-    print(f"Most surprising state (by -logP): {results['max_surprise_state']} "
-          f"(surprise={results['max_surprise_value_nll']:.6f})")
+    print(
+        f"Most surprising state (by -logP): {results['max_surprise_state']} "
+        f"(surprise={results['max_surprise_value_nll']:.6f})"
+    )
 
     return results

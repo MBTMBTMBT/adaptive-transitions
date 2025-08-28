@@ -9,12 +9,14 @@ import argparse
 from pathlib import Path
 from typing import List
 
-from customised_minigrid_env import (               # your package providing maps & env
+from customised_minigrid_env import (  # your package providing maps & env
     CustomMiniGridEnv,
     list_builtin_maps,
 )
-from customised_minigrid_env.customised_minigrid_env import plot_minigrid_scalar_overlay, \
-    plot_minigrid_scalar_diff_overlay
+from customised_minigrid_env.customised_minigrid_env import (
+    plot_minigrid_scalar_overlay,
+    plot_minigrid_scalar_diff_overlay,
+)
 
 from experiment_utils.utils import (
     ensure_dir,
@@ -22,7 +24,7 @@ from experiment_utils.utils import (
     parse_tuple3,
     save_json,
     load_json,
-    resolve_args,                                  # your generic resolver
+    resolve_args,  # your generic resolver
 )
 from experiment_utils.wandb_utils import wandb_init, wandb_log_image
 
@@ -61,6 +63,7 @@ def _build_native_mdp(map_name: str) -> MDPNetwork:
 # Visualization Stage (Overlays)
 # =============================================================================
 
+
 def stage_visualize(args, run, json_files: List[Path]):
     vis_out = Path(args.outdir) / "vis_minigrid"
     ensure_dir(vis_out)
@@ -84,21 +87,36 @@ def stage_visualize(args, run, json_files: List[Path]):
 
         native_policy_rand = create_random_policy(native_mdp)
         native_occ_random = compute_occupancy_measure(
-            mdp_network=native_mdp, policy=native_policy_rand,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            policy=native_policy_rand,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         _, Q_star = optimal_value_iteration(
-            mdp_network=native_mdp, gamma=args.vis_gamma, theta=args.vis_theta,
-            max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
         native_policy_opt_greedy = q_table_to_policy(
-            q_table=Q_star, states=native_mdp.states, num_actions=native_mdp.num_actions,
-            mixing=(1.0, 0.0, 0.0), temperature=1.0, tie_tol=args.vis_tie_tol,
+            q_table=Q_star,
+            states=native_mdp.states,
+            num_actions=native_mdp.num_actions,
+            mixing=(1.0, 0.0, 0.0),
+            temperature=1.0,
+            tie_tol=args.vis_tie_tol,
         )
         native_V_opt_greedy = policy_evaluation(
-            mdp_network=native_mdp, policy=native_policy_opt_greedy,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            policy=native_policy_opt_greedy,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         native_out = vis_out / f"__native_minigrid__{args.map}__"
@@ -106,38 +124,69 @@ def stage_visualize(args, run, json_files: List[Path]):
 
         # Occupancy — Random
         plot_minigrid_scalar_overlay(
-            env=env, value_map=native_occ_random, output_dir=str(native_out),
+            env=env,
+            value_map=native_occ_random,
+            output_dir=str(native_out),
             filename_prefix="native_minigrid_occupancy_random",
-            alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            font_scale=args.vis_occ_font_scale, cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-            min_abs_label=0.0, vmin=0.0, vmax=None,
-            title="State Occupancy — Random", cbar_label="Occupancy measure",
+            alpha=args.vis_occ_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            font_scale=args.vis_occ_font_scale,
+            cmap_name=args.vis_occ_cmap,
+            gamma=args.vis_occ_gamma,
+            min_abs_label=0.0,
+            vmin=0.0,
+            vmax=None,
+            title="State Occupancy — Random",
+            cbar_label="Occupancy measure",
             value_format=None,
         )
 
         # V(s) — Random
         V_rand = policy_evaluation(
-            mdp_network=native_mdp, policy=create_random_policy(native_mdp),
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            policy=create_random_policy(native_mdp),
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
         plot_minigrid_scalar_overlay(
-            env=env, value_map=V_rand, output_dir=str(native_out),
+            env=env,
+            value_map=V_rand,
+            output_dir=str(native_out),
             filename_prefix="native_minigrid_VALUE_random",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            font_scale=args.vis_val_font_scale, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Random", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Random",
+            cbar_label="V(s)",
             value_format=None,
         )
 
         # V(s) — Optimal (greedy)
         plot_minigrid_scalar_overlay(
-            env=env, value_map=native_V_opt_greedy, output_dir=str(native_out),
+            env=env,
+            value_map=native_V_opt_greedy,
+            output_dir=str(native_out),
             filename_prefix="native_minigrid_VALUE_optimal_greedy",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            font_scale=args.vis_val_font_scale, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Optimal (greedy)",
+            cbar_label="V(s)",
             value_format=None,
         )
 
@@ -159,98 +208,177 @@ def stage_visualize(args, run, json_files: List[Path]):
         # Random policy occupancy
         policy_rand = create_random_policy(mdp)
         occ_rand = compute_occupancy_measure(
-            mdp_network=mdp, policy=policy_rand,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=policy_rand,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         # Optimal Q*
         _, Q_star = optimal_value_iteration(
-            mdp_network=mdp, gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         # Training policy (mixed): derived from Q* but with exploration
         policy_train_mixed = q_table_to_policy(
-            q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
-            mixing=tuple(args.vis_mix_loop), temperature=args.vis_temperature, tie_tol=args.vis_tie_tol,
+            q_table=Q_star,
+            states=mdp.states,
+            num_actions=mdp.num_actions,
+            mixing=tuple(args.vis_mix_loop),
+            temperature=args.vis_temperature,
+            tie_tol=args.vis_tie_tol,
         )
         occ_train_mixed = compute_occupancy_measure(
-            mdp_network=mdp, policy=policy_train_mixed,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=policy_train_mixed,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         # Optimal greedy policy
         policy_opt_greedy = q_table_to_policy(
-            q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
-            mixing=(1.0, 0.0, 0.0), temperature=1.0, tie_tol=args.vis_tie_tol,
+            q_table=Q_star,
+            states=mdp.states,
+            num_actions=mdp.num_actions,
+            mixing=(1.0, 0.0, 0.0),
+            temperature=1.0,
+            tie_tol=args.vis_tie_tol,
         )
         V_opt_greedy = policy_evaluation(
-            mdp_network=mdp, policy=policy_opt_greedy,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=policy_opt_greedy,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         # Occupancy — random
         plot_minigrid_scalar_overlay(
-            env=env, value_map=occ_rand, output_dir=str(out_dir),
+            env=env,
+            value_map=occ_rand,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_random",
-            alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            font_scale=args.vis_occ_font_scale, cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-            min_abs_label=0.0, vmin=0.0, vmax=None,
-            title="State Occupancy", cbar_label="Occupancy measure",
+            alpha=args.vis_occ_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            font_scale=args.vis_occ_font_scale,
+            cmap_name=args.vis_occ_cmap,
+            gamma=args.vis_occ_gamma,
+            min_abs_label=0.0,
+            vmin=0.0,
+            vmax=None,
+            title="State Occupancy",
+            cbar_label="Occupancy measure",
             value_format=None,
         )
 
         # Occupancy — training policy (mixed)
-        mix_suffix = f"mix_g{args.vis_mix_loop[0]:.2f}_s{args.vis_mix_loop[1]:.2f}_u{args.vis_mix_loop[2]:.2f}" + \
-                     (f"_T{args.vis_temperature:g}" if args.vis_mix_loop[1] > 0.0 else "")
+        mix_suffix = (
+            f"mix_g{args.vis_mix_loop[0]:.2f}_s{args.vis_mix_loop[1]:.2f}_u{args.vis_mix_loop[2]:.2f}"
+            + (f"_T{args.vis_temperature:g}" if args.vis_mix_loop[1] > 0.0 else "")
+        )
         plot_minigrid_scalar_overlay(
-            env=env, value_map=occ_train_mixed, output_dir=str(out_dir),
+            env=env,
+            value_map=occ_train_mixed,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_trainPolicy_{mix_suffix}",
-            alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            font_scale=args.vis_occ_font_scale, cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-            min_abs_label=0.0, vmin=0.0, vmax=None,
-            title="State Occupancy — Training policy (mixed)", cbar_label="Occupancy measure",
+            alpha=args.vis_occ_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            font_scale=args.vis_occ_font_scale,
+            cmap_name=args.vis_occ_cmap,
+            gamma=args.vis_occ_gamma,
+            min_abs_label=0.0,
+            vmin=0.0,
+            vmax=None,
+            title="State Occupancy — Training policy (mixed)",
+            cbar_label="Occupancy measure",
             value_format=None,
         )
 
         # V(s) — random
         V_rand = policy_evaluation(
-            mdp_network=mdp, policy=policy_rand,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=policy_rand,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
         plot_minigrid_scalar_overlay(
-            env=env, value_map=V_rand, output_dir=str(out_dir),
+            env=env,
+            value_map=V_rand,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_random",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            font_scale=args.vis_val_font_scale, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Random", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Random",
+            cbar_label="V(s)",
             value_format=None,
         )
 
         # V(s) — optimal (greedy)
         plot_minigrid_scalar_overlay(
-            env=env, value_map=V_opt_greedy, output_dir=str(out_dir),
+            env=env,
+            value_map=V_opt_greedy,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_optimal_greedy",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            font_scale=args.vis_val_font_scale, cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Optimal (greedy)",
+            cbar_label="V(s)",
             value_format=None,
         )
 
         # Optional: Cross/Δ pages vs native
         if native_mdp is not None:
             occ_cross_native = compute_occupancy_measure(
-                mdp_network=native_mdp, policy=policy_train_mixed,
-                gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+                mdp_network=native_mdp,
+                policy=policy_train_mixed,
+                gamma=args.vis_gamma,
+                theta=args.vis_theta,
+                max_iterations=args.vis_max_iters,
+                verbose=False,
             )
             plot_minigrid_scalar_overlay(
-                env=env, value_map=occ_cross_native, output_dir=str(out_dir),
+                env=env,
+                value_map=occ_cross_native,
+                output_dir=str(out_dir),
                 filename_prefix=f"{stem}_occupancy_trainPolicy_on_NATIVE_{mix_suffix}",
-                alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                font_scale=args.vis_occ_font_scale, cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-                min_abs_label=0.0, vmin=0.0, vmax=None,
-                title="State Occupancy — Training policy on NATIVE", cbar_label="Occupancy measure",
+                alpha=args.vis_occ_alpha,
+                annotate=True,
+                dpi=args.vis_dpi,
+                font_scale=args.vis_occ_font_scale,
+                cmap_name=args.vis_occ_cmap,
+                gamma=args.vis_occ_gamma,
+                min_abs_label=0.0,
+                vmin=0.0,
+                vmax=None,
+                title="State Occupancy — Training policy on NATIVE",
+                cbar_label="Occupancy measure",
                 value_format=None,
             )
             if native_occ_random is not None:
@@ -260,9 +388,14 @@ def stage_visualize(args, run, json_files: List[Path]):
                     values_b=native_occ_random,
                     output_dir=str(out_dir),
                     filename_prefix=f"{stem}_occupancy_DIFF_trainPolicyMINUS_nativeRandom_{mix_suffix}",
-                    alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                    font_scale=args.vis_occ_font_scale, cmap_name="coolwarm",
-                    min_abs_label=0.0, vmin=None, vmax=None,
+                    alpha=args.vis_occ_alpha,
+                    annotate=True,
+                    dpi=args.vis_dpi,
+                    font_scale=args.vis_occ_font_scale,
+                    cmap_name="coolwarm",
+                    min_abs_label=0.0,
+                    vmin=None,
+                    vmax=None,
                     title="Δ State Occupancy (training − native-random)",
                     cbar_label="Δ occupancy (A − B)",
                     value_format="+.2e",
@@ -276,15 +409,20 @@ def stage_visualize(args, run, json_files: List[Path]):
 # Argparse / main
 # =============================================================================
 
+
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="MiniGrid: GA → Curriculum → Visualization with W&B (images only).")
+    p = argparse.ArgumentParser(
+        description="MiniGrid: GA → Curriculum → Visualization with W&B (images only)."
+    )
 
     # W&B
     p.add_argument("--outdir", type=str, default="./outputs_minigrid")
     p.add_argument("--run-name", type=str, default=None)
     p.add_argument("--wandb-project", type=str, default="full-minigrid")
     p.add_argument("--wandb-entity", type=str, default=None)
-    p.add_argument("--wandb-mode", type=str, choices=["online", "offline"], default="online")
+    p.add_argument(
+        "--wandb-mode", type=str, choices=["online", "offline"], default="online"
+    )
 
     # Pipeline toggles
     p.add_argument("--skip-ga", action="store_true")
@@ -292,8 +430,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-vis", action="store_true")
 
     # Env
-    p.add_argument("--map", type=str, default="door-key",
-                   help=f"Built-in maps: {', '.join(list_builtin_maps())}")
+    p.add_argument(
+        "--map",
+        type=str,
+        default="door-key",
+        help=f"Built-in maps: {', '.join(list_builtin_maps())}",
+    )
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (kept modest; MiniGrid state space is typically larger than Taxi, tune as needed)
@@ -343,10 +485,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Training (flattened agent kwargs)
     p.add_argument("--agent-learning-rate", type=float, default=0.1)
     p.add_argument("--agent-gamma", type=float, default=0.99)
-    p.add_argument("--agent-policy-mix", type=parse_tuple3, default=(0.9, 0.0, 0.1),
-                   help="Tuple 'g,s,u' for (greedy, softmax, uniform)")
-    p.add_argument("--agent-temperature", type=float, default=0.01,
-                   help="Used only if softmax weight > 0")
+    p.add_argument(
+        "--agent-policy-mix",
+        type=parse_tuple3,
+        default=(0.9, 0.0, 0.1),
+        help="Tuple 'g,s,u' for (greedy, softmax, uniform)",
+    )
+    p.add_argument(
+        "--agent-temperature",
+        type=float,
+        default=0.01,
+        help="Used only if softmax weight > 0",
+    )
     p.add_argument("--agent-tie-tol", type=float, default=1e-2)
     p.add_argument("--agent-verbose", type=int, default=0)
 
@@ -355,7 +505,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-eval-episodes", type=int, default=10)
 
     # Train seeds as COUNT -> seeds [0..N-1]
-    p.add_argument("--train-seeds", type=int, default=50, help="Use N to get seeds [0..N-1].")
+    p.add_argument(
+        "--train-seeds", type=int, default=50, help="Use N to get seeds [0..N-1]."
+    )
     p.add_argument("--train-workers", type=int, default=0)
 
     p.add_argument("--eval-seed-base-target", type=int, default=0)
@@ -387,21 +539,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main():
     parser = build_arg_parser()
-    args = resolve_args(parser)   # your resolver builds agent_kwargs, seeds, phase_steps, etc.
+    args = resolve_args(
+        parser
+    )  # your resolver builds agent_kwargs, seeds, phase_steps, etc.
 
     # Validate map name early for clearer error messages
     if args.map not in set(list_builtin_maps()):
-        raise ValueError(f"Unknown --map '{args.map}'. Available: {', '.join(list_builtin_maps())}")
+        raise ValueError(
+            f"Unknown --map '{args.map}'. Available: {', '.join(list_builtin_maps())}"
+        )
 
     run = wandb_init(args)
-    save_json(Path(args.outdir) / "meta" / "config.json", {k: getattr(args, k) for k in vars(args)})
+    save_json(
+        Path(args.outdir) / "meta" / "config.json",
+        {k: getattr(args, k) for k in vars(args)},
+    )
 
     # GA Stage
     if args.json_dir:
         json_dir = Path(args.json_dir)
         json_files = sorted(json_dir.glob("*.json"))
         if args.json_max > 0:
-            json_files = json_files[:args.json_max]
+            json_files = json_files[: args.json_max]
         print(f"[MAIN] Using external JSON dir: {json_dir} ({len(json_files)} files).")
     else:
         if not args.skip_ga:
@@ -412,11 +571,13 @@ def main():
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
-                json_files = json_files[:args.json_max]
-            print(f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}.")
+                json_files = json_files[: args.json_max]
+            print(
+                f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}."
+            )
 
     if args.json_max > 0:
-        json_files = json_files[:args.json_max]
+        json_files = json_files[: args.json_max]
 
     # Training Stage (environment-agnostic)
     if not args.skip_train and json_files:
@@ -426,7 +587,9 @@ def main():
             run=run,
             json_files=json_files,
             target_factory_path=TARGET_FACTORY_PATH,
-            target_factory_kwargs=dict(map_name=args.map, max_steps=int(args.max_steps)),
+            target_factory_kwargs=dict(
+                map_name=args.map, max_steps=int(args.max_steps)
+            ),
             source_factory_path=SOURCE_FACTORY_PATH,
             source_env_base_kwargs=dict(max_steps=int(args.max_steps)),
             phase_steps=args.phase_steps,

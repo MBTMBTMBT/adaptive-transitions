@@ -37,16 +37,13 @@ if __name__ == "__main__":
 
     # Sample MDPs from environments (small to large)
     env_configs = [
-        {
-            'name': "door-key-fixed",
-            'prefix': 'door-key-fixed'
-        },
+        {"name": "door-key-fixed", "prefix": "door-key-fixed"},
     ]
 
     for env_config in env_configs:
         try:
             env = CustomMiniGridEnv(
-                map_name=env_config['name'],
+                map_name=env_config["name"],
                 config=None,
                 display_size=None,
                 display_mode="middle",
@@ -57,7 +54,7 @@ if __name__ == "__main__":
             )
             sampled_mdp = deterministic_mdp_sampling(env)
             mdps.append(sampled_mdp)
-            prefixes.append(env_config['prefix'])
+            prefixes.append(env_config["prefix"])
             print(f"Successfully loaded environment: {env_config['name']}")
         except Exception as e:
             print(f"Warning: Could not load environment {env_config['name']}: {e}")
@@ -97,15 +94,27 @@ if __name__ == "__main__":
             print(f"  State {state}: {value:.6f}")
 
         # Save CSV files for Policy Evaluation
-        random_policy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_random_policy.csv"))
-        pe_values.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_policy_evaluation_values.csv"))
+        random_policy.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_random_policy.csv")
+        )
+        pe_values.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_policy_evaluation_values.csv")
+        )
 
         # Plot or print results
         if use_plots:
-            plot_policy(mdp, random_policy, "Input: Random Probabilistic Policy",
-                        os.path.join(output_dir, f"{prefix}_{i}_random_policy.png"))
-            plot_values(mdp, pe_values, "Output: State Values from Policy Evaluation",
-                        os.path.join(output_dir, f"{prefix}_{i}_policy_evaluation_values.png"))
+            plot_policy(
+                mdp,
+                random_policy,
+                "Input: Random Probabilistic Policy",
+                os.path.join(output_dir, f"{prefix}_{i}_random_policy.png"),
+            )
+            plot_values(
+                mdp,
+                pe_values,
+                "Output: State Values from Policy Evaluation",
+                os.path.join(output_dir, f"{prefix}_{i}_policy_evaluation_values.png"),
+            )
         else:
             print("Random Policy:")
             print(random_policy)
@@ -114,7 +123,9 @@ if __name__ == "__main__":
 
         # Test 2: Optimal Value Iteration
         print("\n=== Test 2: Optimal Value Iteration ===")
-        opt_values, opt_q_table = optimal_value_iteration(mdp, gamma, theta, max_iterations)
+        opt_values, opt_q_table = optimal_value_iteration(
+            mdp, gamma, theta, max_iterations
+        )
 
         print("Optimal Value Iteration Results:")
         for state in sorted(mdp.states)[:5]:
@@ -122,21 +133,41 @@ if __name__ == "__main__":
             print(f"  State {state}: Value={value:.6f}")
 
         # Convert Q-table to greedy policy
-        greedy_policy = q_table_to_policy(opt_q_table, mdp.states, mdp.num_actions, temperature=0.0)
+        greedy_policy = q_table_to_policy(
+            opt_q_table, mdp.states, mdp.num_actions, temperature=0.0
+        )
 
         # Save CSV files for Value Iteration
-        opt_values.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_optimal_values.csv"))
-        opt_q_table.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_optimal_q_values.csv"))
-        greedy_policy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_optimal_policy.csv"))
+        opt_values.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_optimal_values.csv")
+        )
+        opt_q_table.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_optimal_q_values.csv")
+        )
+        greedy_policy.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_optimal_policy.csv")
+        )
 
         # Plot or print results
         if use_plots:
-            plot_values(mdp, opt_values, "Output: Optimal State Values from Value Iteration",
-                        os.path.join(output_dir, f"{prefix}_{i}_optimal_values.png"))
-            plot_q_values(mdp, opt_q_table, "Output: Optimal Q-Values from Value Iteration",
-                          os.path.join(output_dir, f"{prefix}_{i}_optimal_q_values.png"))
-            plot_policy(mdp, greedy_policy, "Output: Optimal Greedy Policy from Q-Values",
-                        os.path.join(output_dir, f"{prefix}_{i}_optimal_policy.png"))
+            plot_values(
+                mdp,
+                opt_values,
+                "Output: Optimal State Values from Value Iteration",
+                os.path.join(output_dir, f"{prefix}_{i}_optimal_values.png"),
+            )
+            plot_q_values(
+                mdp,
+                opt_q_table,
+                "Output: Optimal Q-Values from Value Iteration",
+                os.path.join(output_dir, f"{prefix}_{i}_optimal_q_values.png"),
+            )
+            plot_policy(
+                mdp,
+                greedy_policy,
+                "Output: Optimal Greedy Policy from Q-Values",
+                os.path.join(output_dir, f"{prefix}_{i}_optimal_policy.png"),
+            )
         else:
             print("Optimal Values:")
             print(opt_values)
@@ -148,8 +179,14 @@ if __name__ == "__main__":
         # Test 3: Q-Learning
         print("\n=== Test 3: Q-Learning ===")
         ql_q_table, ql_values = q_learning(
-            mdp, alpha=0.1, gamma=gamma, epsilon=0.1,
-            num_episodes=5000, max_steps_per_episode=100, seed=42)
+            mdp,
+            alpha=0.1,
+            gamma=gamma,
+            epsilon=0.1,
+            num_episodes=5000,
+            max_steps_per_episode=100,
+            seed=42,
+        )
 
         print("Q-Learning Results:")
         for state in sorted(mdp.states)[:5]:
@@ -157,21 +194,41 @@ if __name__ == "__main__":
             print(f"  State {state}: Value={value:.6f}")
 
         # Create policy from Q-learning results
-        ql_policy = q_table_to_policy(ql_q_table, mdp.states, mdp.num_actions, temperature=0.0)
+        ql_policy = q_table_to_policy(
+            ql_q_table, mdp.states, mdp.num_actions, temperature=0.0
+        )
 
         # Save CSV files for Q-Learning
-        ql_values.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_qlearning_values.csv"))
-        ql_q_table.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_qlearning_q_values.csv"))
-        ql_policy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_qlearning_policy.csv"))
+        ql_values.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_qlearning_values.csv")
+        )
+        ql_q_table.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_qlearning_q_values.csv")
+        )
+        ql_policy.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_qlearning_policy.csv")
+        )
 
         # Plot or print results
         if use_plots:
-            plot_values(mdp, ql_values, "Output: State Values from Q-Learning",
-                        os.path.join(output_dir, f"{prefix}_{i}_qlearning_values.png"))
-            plot_q_values(mdp, ql_q_table, "Output: Learned Q-Values from Q-Learning",
-                          os.path.join(output_dir, f"{prefix}_{i}_qlearning_q_values.png"))
-            plot_policy(mdp, ql_policy, "Output: Learned Greedy Policy from Q-Learning",
-                        os.path.join(output_dir, f"{prefix}_{i}_qlearning_policy.png"))
+            plot_values(
+                mdp,
+                ql_values,
+                "Output: State Values from Q-Learning",
+                os.path.join(output_dir, f"{prefix}_{i}_qlearning_values.png"),
+            )
+            plot_q_values(
+                mdp,
+                ql_q_table,
+                "Output: Learned Q-Values from Q-Learning",
+                os.path.join(output_dir, f"{prefix}_{i}_qlearning_q_values.png"),
+            )
+            plot_policy(
+                mdp,
+                ql_policy,
+                "Output: Learned Greedy Policy from Q-Learning",
+                os.path.join(output_dir, f"{prefix}_{i}_qlearning_policy.png"),
+            )
         else:
             print("Q-Learning Values:")
             print(ql_values)
@@ -182,7 +239,9 @@ if __name__ == "__main__":
 
         # Test 4: Occupancy Measure
         print("\n=== Test 4: Occupancy Measure ===")
-        occupancy = compute_occupancy_measure(mdp, random_policy, gamma, theta, max_iterations)
+        occupancy = compute_occupancy_measure(
+            mdp, random_policy, gamma, theta, max_iterations
+        )
 
         print("Occupancy Measure Results:")
         for state in sorted(mdp.states)[:5]:
@@ -190,20 +249,31 @@ if __name__ == "__main__":
             print(f"  State {state}: {occ_val:.6f}")
 
         # Save CSV files for Occupancy Measure
-        occupancy.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_occupancy_measure.csv"))
+        occupancy.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_occupancy_measure.csv")
+        )
 
         # Plot or print occupancy measure
         if use_plots:
-            plot_values(mdp, occupancy, "Output: State Occupancy Frequencies",
-                        os.path.join(output_dir, f"{prefix}_{i}_occupancy_measure.png"))
+            plot_values(
+                mdp,
+                occupancy,
+                "Output: State Occupancy Frequencies",
+                os.path.join(output_dir, f"{prefix}_{i}_occupancy_measure.png"),
+            )
         else:
             print("Occupancy Measure:")
             print(occupancy)
 
         # Test 5: Reward Distribution
         print("\n=== Test 5: Reward Distribution ===")
-        reward_count_dist, reward_prob_dist = compute_reward_distribution(mdp, occupancy, policy=random_policy, delta=1e-6)
-        reward_count_dist, reward_prob_dist = reward_count_dist.normalize_rewards_to_0_1(), reward_prob_dist.normalize_rewards_to_0_1()
+        reward_count_dist, reward_prob_dist = compute_reward_distribution(
+            mdp, occupancy, policy=random_policy, delta=1e-6
+        )
+        reward_count_dist, reward_prob_dist = (
+            reward_count_dist.normalize_rewards_to_0_1(),
+            reward_prob_dist.normalize_rewards_to_0_1(),
+        )
 
         print("Reward Distribution Results:")
         print("Reward Count Distribution:")
@@ -212,8 +282,12 @@ if __name__ == "__main__":
         print(reward_prob_dist)
 
         # Save CSV files for Reward Distribution
-        reward_count_dist.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_reward_count_distribution.csv"))
-        reward_prob_dist.export_to_csv(os.path.join(output_dir, f"{prefix}_{i}_reward_prob_distribution.csv"))
+        reward_count_dist.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_reward_count_distribution.csv")
+        )
+        reward_prob_dist.export_to_csv(
+            os.path.join(output_dir, f"{prefix}_{i}_reward_prob_distribution.csv")
+        )
 
         # Print reward distribution tables if not too large
         if not use_plots or len(reward_count_dist.get_all_rewards()) <= 20:
@@ -226,7 +300,9 @@ if __name__ == "__main__":
         print("\n=== Test 6: Gaussian Fitting for Reward Distribution ===")
 
         # Fit Gaussian to count distribution (more accurate)
-        mu_count, sigma_count, fit_stats_count = reward_count_dist.fit_gaussian(force_count=True)
+        mu_count, sigma_count, fit_stats_count = reward_count_dist.fit_gaussian(
+            force_count=True
+        )
 
         print("Gaussian Fitting Results (Count Distribution):")
         print(f"  Fitted parameters: μ={mu_count:.6f}, σ={sigma_count:.6f}")
@@ -235,17 +311,22 @@ if __name__ == "__main__":
         print(f"  Unique rewards: {fit_stats_count.get('unique_rewards', 'N/A')}")
         print(f"  Reward range: {fit_stats_count.get('reward_range', 'N/A')}")
 
-        if 'ks_p_value' in fit_stats_count:
-            ks_result = "GOOD" if fit_stats_count['ks_p_value'] > 0.05 else "POOR"
-            print(f"  KS test p-value: {fit_stats_count['ks_p_value']:.6f} ({ks_result} fit)")
-
-        if 'sample_mean' in fit_stats_count and 'sample_std' in fit_stats_count:
+        if "ks_p_value" in fit_stats_count:
+            ks_result = "GOOD" if fit_stats_count["ks_p_value"] > 0.05 else "POOR"
             print(
-                f"  Sample statistics: mean={fit_stats_count['sample_mean']:.6f}, std={fit_stats_count['sample_std']:.6f}")
+                f"  KS test p-value: {fit_stats_count['ks_p_value']:.6f} ({ks_result} fit)"
+            )
+
+        if "sample_mean" in fit_stats_count and "sample_std" in fit_stats_count:
+            print(
+                f"  Sample statistics: mean={fit_stats_count['sample_mean']:.6f}, std={fit_stats_count['sample_std']:.6f}"
+            )
 
         # Save Gaussian fitting results to text file
-        gaussian_results_path = os.path.join(output_dir, f"{prefix}_{i}_gaussian_fit_results.txt")
-        with open(gaussian_results_path, 'w') as f:
+        gaussian_results_path = os.path.join(
+            output_dir, f"{prefix}_{i}_gaussian_fit_results.txt"
+        )
+        with open(gaussian_results_path, "w") as f:
             f.write(f"Gaussian Fitting Results for {prefix}_{i}\n")
             f.write("=" * 50 + "\n\n")
             f.write("Count Distribution Gaussian Fit:\n")
@@ -253,19 +334,29 @@ if __name__ == "__main__":
             f.write(f"  Fitted σ (std):  {sigma_count:.6f}\n")
             f.write(f"  Method: {fit_stats_count.get('method', 'N/A')}\n")
             f.write(f"  Total count: {fit_stats_count.get('total_count', 'N/A')}\n")
-            f.write(f"  Unique rewards: {fit_stats_count.get('unique_rewards', 'N/A')}\n")
+            f.write(
+                f"  Unique rewards: {fit_stats_count.get('unique_rewards', 'N/A')}\n"
+            )
             f.write(f"  Reward range: {fit_stats_count.get('reward_range', 'N/A')}\n")
 
-            if 'ks_p_value' in fit_stats_count:
-                f.write(f"  KS test statistic: {fit_stats_count.get('ks_statistic', 'N/A'):.6f}\n")
+            if "ks_p_value" in fit_stats_count:
+                f.write(
+                    f"  KS test statistic: {fit_stats_count.get('ks_statistic', 'N/A'):.6f}\n"
+                )
                 f.write(f"  KS test p-value: {fit_stats_count['ks_p_value']:.6f}\n")
-                f.write(f"  KS test significant: {fit_stats_count.get('ks_significant', 'N/A')}\n")
+                f.write(
+                    f"  KS test significant: {fit_stats_count.get('ks_significant', 'N/A')}\n"
+                )
 
-            if 'sample_mean' in fit_stats_count:
+            if "sample_mean" in fit_stats_count:
                 f.write(f"  Sample mean: {fit_stats_count['sample_mean']:.6f}\n")
                 f.write(f"  Sample std: {fit_stats_count['sample_std']:.6f}\n")
-                f.write(f"  Weighted mean: {fit_stats_count.get('weighted_mean', 'N/A'):.6f}\n")
-                f.write(f"  Weighted variance: {fit_stats_count.get('weighted_variance', 'N/A'):.6f}\n")
+                f.write(
+                    f"  Weighted mean: {fit_stats_count.get('weighted_mean', 'N/A'):.6f}\n"
+                )
+                f.write(
+                    f"  Weighted variance: {fit_stats_count.get('weighted_variance', 'N/A'):.6f}\n"
+                )
 
             f.write("\nAll Fit Statistics:\n")
             for key, value in fit_stats_count.items():
@@ -336,11 +427,14 @@ if __name__ == "__main__":
             ql_val = ql_values.get_value(state)
             pe_diff = abs(pe_val - opt_val)
             ql_diff = abs(ql_val - opt_val)
-            print(f"  State {state}: Random Policy diff={pe_diff:.6f}, Q-Learning diff={ql_diff:.6f}")
+            print(
+                f"  State {state}: Random Policy diff={pe_diff:.6f}, Q-Learning diff={ql_diff:.6f}"
+            )
 
     print(f"\n=== All tests completed! ===")
     print(
-        f"Generated plots, CSV files, JSON networks, Gaussian fit results, and surprise analysis in '{output_dir}' with prefixes: {prefixes}")
+        f"Generated plots, CSV files, JSON networks, Gaussian fit results, and surprise analysis in '{output_dir}' with prefixes: {prefixes}"
+    )
 
     print("\nGenerated JSON files (MDP Networks):")
     json_files = []
@@ -353,19 +447,21 @@ if __name__ == "__main__":
     print("\nGenerated CSV files:")
     csv_files = []
     for i, prefix in enumerate(prefixes):
-        csv_files.extend([
-            f"{prefix}_{i}_random_policy.csv",
-            f"{prefix}_{i}_policy_evaluation_values.csv",
-            f"{prefix}_{i}_optimal_values.csv",
-            f"{prefix}_{i}_optimal_q_values.csv",
-            f"{prefix}_{i}_optimal_policy.csv",
-            f"{prefix}_{i}_qlearning_values.csv",
-            f"{prefix}_{i}_qlearning_q_values.csv",
-            f"{prefix}_{i}_qlearning_policy.csv",
-            f"{prefix}_{i}_occupancy_measure.csv",
-            # f"{prefix}_{i}_reward_count_distribution.csv",
-            # f"{prefix}_{i}_reward_prob_distribution.csv"
-        ])
+        csv_files.extend(
+            [
+                f"{prefix}_{i}_random_policy.csv",
+                f"{prefix}_{i}_policy_evaluation_values.csv",
+                f"{prefix}_{i}_optimal_values.csv",
+                f"{prefix}_{i}_optimal_q_values.csv",
+                f"{prefix}_{i}_optimal_policy.csv",
+                f"{prefix}_{i}_qlearning_values.csv",
+                f"{prefix}_{i}_qlearning_q_values.csv",
+                f"{prefix}_{i}_qlearning_policy.csv",
+                f"{prefix}_{i}_occupancy_measure.csv",
+                # f"{prefix}_{i}_reward_count_distribution.csv",
+                # f"{prefix}_{i}_reward_prob_distribution.csv"
+            ]
+        )
 
     for csv_file in csv_files:
         print(f"  - {csv_file}")
@@ -373,10 +469,12 @@ if __name__ == "__main__":
     print("\nGenerated Analysis Result files:")
     analysis_files = []
     for i, prefix in enumerate(prefixes):
-        analysis_files.extend([
-            f"{prefix}_{i}_gaussian_fit_results.txt",
-            f"{prefix}_{i}_information_surprise.txt"
-        ])
+        analysis_files.extend(
+            [
+                f"{prefix}_{i}_gaussian_fit_results.txt",
+                f"{prefix}_{i}_information_surprise.txt",
+            ]
+        )
 
     for analysis_file in analysis_files:
         print(f"  - {analysis_file}")

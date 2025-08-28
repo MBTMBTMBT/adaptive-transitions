@@ -42,26 +42,45 @@ def plot_pairwise(
     ax2.set_title(f"{title_prefix} (Training-policy)")
 
     # ----------- Greedy curves -----------
-    ax1.plot(checkpoints, baseline["greedy_mean"], label="Target-only baseline", linewidth=1.8)
+    ax1.plot(
+        checkpoints,
+        baseline["greedy_mean"],
+        label="Target-only baseline",
+        linewidth=1.8,
+    )
     ax1.fill_between(
         checkpoints,
         np.asarray(baseline["greedy_mean"]) - np.asarray(baseline["greedy_std"]),
         np.asarray(baseline["greedy_mean"]) + np.asarray(baseline["greedy_std"]),
         alpha=0.2,
     )
-    ax1.plot(checkpoints, curves_target["greedy_mean"], label="Curriculum → Target (primary)", linewidth=2.2)
+    ax1.plot(
+        checkpoints,
+        curves_target["greedy_mean"],
+        label="Curriculum → Target (primary)",
+        linewidth=2.2,
+    )
     ax1.fill_between(
         checkpoints,
-        np.asarray(curves_target["greedy_mean"]) - np.asarray(curves_target["greedy_std"]),
-        np.asarray(curves_target["greedy_mean"]) + np.asarray(curves_target["greedy_std"]),
+        np.asarray(curves_target["greedy_mean"])
+        - np.asarray(curves_target["greedy_std"]),
+        np.asarray(curves_target["greedy_mean"])
+        + np.asarray(curves_target["greedy_std"]),
         alpha=0.15,
     )
     if curves_source is not None:
-        ax1.plot(checkpoints, curves_source["greedy_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
+        ax1.plot(
+            checkpoints,
+            curves_source["greedy_mean"],
+            label="Curriculum (eval on Source)",
+            linewidth=1.6,
+        )
         ax1.fill_between(
             checkpoints,
-            np.asarray(curves_source["greedy_mean"]) - np.asarray(curves_source["greedy_std"]),
-            np.asarray(curves_source["greedy_mean"]) + np.asarray(curves_source["greedy_std"]),
+            np.asarray(curves_source["greedy_mean"])
+            - np.asarray(curves_source["greedy_std"]),
+            np.asarray(curves_source["greedy_mean"])
+            + np.asarray(curves_source["greedy_std"]),
             alpha=0.12,
         )
     ax1.set_xlabel("Timesteps")
@@ -70,26 +89,42 @@ def plot_pairwise(
     ax1.legend()
 
     # ----------- Train-policy curves -----------
-    ax2.plot(checkpoints, baseline["train_mean"], label="Target-only baseline", linewidth=1.8)
+    ax2.plot(
+        checkpoints, baseline["train_mean"], label="Target-only baseline", linewidth=1.8
+    )
     ax2.fill_between(
         checkpoints,
         np.asarray(baseline["train_mean"]) - np.asarray(baseline["train_std"]),
         np.asarray(baseline["train_mean"]) + np.asarray(baseline["train_std"]),
         alpha=0.2,
     )
-    ax2.plot(checkpoints, curves_target["train_mean"], label="Curriculum → Target (primary)", linewidth=2.2)
+    ax2.plot(
+        checkpoints,
+        curves_target["train_mean"],
+        label="Curriculum → Target (primary)",
+        linewidth=2.2,
+    )
     ax2.fill_between(
         checkpoints,
-        np.asarray(curves_target["train_mean"]) - np.asarray(curves_target["train_std"]),
-        np.asarray(curves_target["train_mean"]) + np.asarray(curves_target["train_std"]),
+        np.asarray(curves_target["train_mean"])
+        - np.asarray(curves_target["train_std"]),
+        np.asarray(curves_target["train_mean"])
+        + np.asarray(curves_target["train_std"]),
         alpha=0.15,
     )
     if curves_source is not None:
-        ax2.plot(checkpoints, curves_source["train_mean"], label="Curriculum (eval on Source)", linewidth=1.6)
+        ax2.plot(
+            checkpoints,
+            curves_source["train_mean"],
+            label="Curriculum (eval on Source)",
+            linewidth=1.6,
+        )
         ax2.fill_between(
             checkpoints,
-            np.asarray(curves_source["train_mean"]) - np.asarray(curves_source["train_std"]),
-            np.asarray(curves_source["train_mean"]) + np.asarray(curves_source["train_std"]),
+            np.asarray(curves_source["train_mean"])
+            - np.asarray(curves_source["train_std"]),
+            np.asarray(curves_source["train_mean"])
+            + np.asarray(curves_source["train_std"]),
             alpha=0.12,
         )
     ax2.set_xlabel("Timesteps")
@@ -116,7 +151,9 @@ def plot_pairwise(
     # Draw lines with solid color + high zorder to ensure visibility
     for ax in (ax1, ax2):
         for b in b_valid:
-            ax.axvline(b, linestyle="--", color="k", linewidth=1.6, alpha=0.9, zorder=10)
+            ax.axvline(
+                b, linestyle="--", color="k", linewidth=1.6, alpha=0.9, zorder=10
+            )
 
         # Optional zone labels (kept consistent with the older version)
         if b_valid:
@@ -124,8 +161,24 @@ def plot_pairwise(
             ytxt = ymin + 0.06 * (ymax - ymin)
             left_mid = (b_valid[0] + x_min) * 0.5
             right_mid = (b_valid[-1] + x_max) * 0.5
-            ax.text(left_mid, ytxt, "Phase 1 (Source)", ha="center", va="bottom", fontsize=9, alpha=0.85)
-            ax.text(right_mid, ytxt, "Later Phases (Target/others)", ha="center", va="bottom", fontsize=9, alpha=0.85)
+            ax.text(
+                left_mid,
+                ytxt,
+                "Phase 1 (Source)",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                alpha=0.85,
+            )
+            ax.text(
+                right_mid,
+                ytxt,
+                "Later Phases (Target/others)",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                alpha=0.85,
+            )
 
     # ----------- Save & close -----------
     fig.tight_layout()
@@ -133,7 +186,9 @@ def plot_pairwise(
     plt.close(fig)
 
 
-def save_csv(path: str, steps: np.ndarray, mean: np.ndarray, std: np.ndarray, header: str) -> None:
+def save_csv(
+    path: str, steps: np.ndarray, mean: np.ndarray, std: np.ndarray, header: str
+) -> None:
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow([header])

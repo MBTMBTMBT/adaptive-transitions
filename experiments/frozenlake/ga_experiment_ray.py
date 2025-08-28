@@ -26,7 +26,7 @@ from experiment_utils.utils import (
     parse_tuple3,
     save_json,
     load_json,
-    resolve_args,
+    resolve_args, _timestamped_outdir,
 )
 
 # New W&B writer actor and new GA entrypoint
@@ -48,7 +48,9 @@ SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_nx_env_from_mdp"
 
 def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
     """Build the native FrozenLake MDP from the environment."""
-    env = CustomisedFrozenLakeEnv(render_mode=None, map_name=map_name, is_slippery=slippery)
+    env = CustomisedFrozenLakeEnv(
+        render_mode=None, map_name=map_name, is_slippery=slippery
+    )
     env.reset(seed=0)
     return env.get_mdp_network()
 
@@ -57,11 +59,14 @@ def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
 # Visualization Stage (Overlays) — logs images through WandbWriter
 # =============================================================================
 
+
 def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[Path]):
     vis_out = Path(args.outdir) / "vis"
     ensure_dir(vis_out)
 
-    env = CustomisedFrozenLakeEnv(render_mode="rgb_array", map_name=args.map, is_slippery=bool(args.slippery))
+    env = CustomisedFrozenLakeEnv(
+        render_mode="rgb_array", map_name=args.map, is_slippery=bool(args.slippery)
+    )
     env.reset()
 
     native_mdp = None
@@ -73,65 +78,117 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
 
         native_policy_rand = create_random_policy(native_mdp)
         native_occ_random = compute_occupancy_measure(
-            mdp_network=native_mdp, policy=native_policy_rand,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            policy=native_policy_rand,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         _, Q_star = optimal_value_iteration(
-            mdp_network=native_mdp, gamma=args.vis_gamma, theta=args.vis_theta,
-            max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
         native_policy_opt_greedy = q_table_to_policy(
-            q_table=Q_star, states=native_mdp.states, num_actions=native_mdp.num_actions,
-            mixing=(1.0, 0.0, 0.0), temperature=1.0, tie_tol=args.vis_tie_tol,
+            q_table=Q_star,
+            states=native_mdp.states,
+            num_actions=native_mdp.num_actions,
+            mixing=(1.0, 0.0, 0.0),
+            temperature=1.0,
+            tie_tol=args.vis_tie_tol,
         )
         native_V_opt_greedy = policy_evaluation(
-            mdp_network=native_mdp, policy=native_policy_opt_greedy,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            policy=native_policy_opt_greedy,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         native_out = vis_out / "__native_frozenlake__"
         ensure_dir(native_out)
 
         plot_frozenlake_transition_overlays(
-            env=env, mdp=native_mdp, output_dir=str(native_out), filename_prefix="native_frozenlake",
-            min_prob=args.vis_min_prob, alpha=args.vis_alpha, annotate=True,
-            show_self_loops=args.vis_show_self_loops, dpi=args.vis_dpi,
+            env=env,
+            mdp=native_mdp,
+            output_dir=str(native_out),
+            filename_prefix="native_frozenlake",
+            min_prob=args.vis_min_prob,
+            alpha=args.vis_alpha,
+            annotate=True,
+            show_self_loops=args.vis_show_self_loops,
+            dpi=args.vis_dpi,
         )
 
         plot_frozenlake_scalar_overlay(
-            env=env, value_map=native_occ_random, output_dir=str(native_out),
+            env=env,
+            value_map=native_occ_random,
+            output_dir=str(native_out),
             filename_prefix="native_frozenlake_occupancy_random",
-            alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
-            cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-            min_abs_label=0.0, vmin=0.0, vmax=None,
-            title="State Occupancy — Random", cbar_label="Occupancy measure",
+            alpha=args.vis_occ_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            target_cell_px=args.vis_occ_cell_px,
+            font_scale=args.vis_occ_font_scale,
+            cmap_name=args.vis_occ_cmap,
+            gamma=args.vis_occ_gamma,
+            min_abs_label=0.0,
+            vmin=0.0,
+            vmax=None,
+            title="State Occupancy — Random",
+            cbar_label="Occupancy measure",
             value_format=None,
         )
 
         V_rand = policy_evaluation(
-            mdp_network=native_mdp, policy=create_random_policy(native_mdp),
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=native_mdp,
+            policy=create_random_policy(native_mdp),
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
         plot_frozenlake_scalar_overlay(
-            env=env, value_map=V_rand, output_dir=str(native_out),
+            env=env,
+            value_map=V_rand,
+            output_dir=str(native_out),
             filename_prefix="native_frozenlake_VALUE_random",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
-            cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Random", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            target_cell_px=args.vis_val_cell_px,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Random",
+            cbar_label="V(s)",
             value_format=None,
         )
         plot_frozenlake_scalar_overlay(
-            env=env, value_map=native_V_opt_greedy, output_dir=str(native_out),
+            env=env,
+            value_map=native_V_opt_greedy,
+            output_dir=str(native_out),
             filename_prefix="native_frozenlake_VALUE_optimal_greedy",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
-            cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            target_cell_px=args.vis_val_cell_px,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Optimal (greedy)",
+            cbar_label="V(s)",
             value_format=None,
         )
 
@@ -153,104 +210,187 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
         ensure_dir(out_dir)
 
         plot_frozenlake_transition_overlays(
-            env=env, mdp=mdp, output_dir=str(out_dir), filename_prefix=stem,
-            min_prob=args.vis_min_prob, alpha=args.vis_alpha, annotate=True,
-            show_self_loops=args.vis_show_self_loops, dpi=args.vis_dpi,
+            env=env,
+            mdp=mdp,
+            output_dir=str(out_dir),
+            filename_prefix=stem,
+            min_prob=args.vis_min_prob,
+            alpha=args.vis_alpha,
+            annotate=True,
+            show_self_loops=args.vis_show_self_loops,
+            dpi=args.vis_dpi,
         )
 
         policy_rand = create_random_policy(mdp)
         occ_rand = compute_occupancy_measure(
-            mdp_network=mdp, policy=policy_rand,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=policy_rand,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         _, Q_star = optimal_value_iteration(
-            mdp_network=mdp, gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         # Mixed policy derived from optimal Q: this is the training policy with exploration.
         policy_opt_mixed = q_table_to_policy(
-            q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
-            mixing=tuple(args.vis_mix_loop), temperature=args.vis_temperature, tie_tol=args.vis_tie_tol,
+            q_table=Q_star,
+            states=mdp.states,
+            num_actions=mdp.num_actions,
+            mixing=tuple(args.vis_mix_loop),
+            temperature=args.vis_temperature,
+            tie_tol=args.vis_tie_tol,
         )
         occ_opt_mixed = compute_occupancy_measure(
-            mdp_network=mdp, policy=policy_opt_mixed,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=policy_opt_mixed,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         # Pure greedy policy from optimal Q (kept as "optimal (greedy)").
         policy_opt_greedy = q_table_to_policy(
-            q_table=Q_star, states=mdp.states, num_actions=mdp.num_actions,
-            mixing=(1.0, 0.0, 0.0), temperature=1.0, tie_tol=args.vis_tie_tol,
+            q_table=Q_star,
+            states=mdp.states,
+            num_actions=mdp.num_actions,
+            mixing=(1.0, 0.0, 0.0),
+            temperature=1.0,
+            tie_tol=args.vis_tie_tol,
         )
         V_opt_greedy = policy_evaluation(
-            mdp_network=mdp, policy=policy_opt_greedy,
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=policy_opt_greedy,
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
 
         plot_frozenlake_scalar_overlay(
-            env=env, value_map=occ_rand, output_dir=str(out_dir),
+            env=env,
+            value_map=occ_rand,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_random",
-            alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
-            cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-            min_abs_label=0.0, vmin=0.0, vmax=None,
-            title="State Occupancy", cbar_label="Occupancy measure",
+            alpha=args.vis_occ_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            target_cell_px=args.vis_occ_cell_px,
+            font_scale=args.vis_occ_font_scale,
+            cmap_name=args.vis_occ_cmap,
+            gamma=args.vis_occ_gamma,
+            min_abs_label=0.0,
+            vmin=0.0,
+            vmax=None,
+            title="State Occupancy",
+            cbar_label="Occupancy measure",
             value_format=None,
         )
 
-        mix_suffix = f"mix_g{args.vis_mix_loop[0]:.2f}_s{args.vis_mix_loop[1]:.2f}_u{args.vis_mix_loop[2]:.2f}" + \
-                     (f"_T{args.vis_temperature:g}" if args.vis_mix_loop[1] > 0.0 else "")
+        mix_suffix = (
+            f"mix_g{args.vis_mix_loop[0]:.2f}_s{args.vis_mix_loop[1]:.2f}_u{args.vis_mix_loop[2]:.2f}"
+            + (f"_T{args.vis_temperature:g}" if args.vis_mix_loop[1] > 0.0 else "")
+        )
         plot_frozenlake_scalar_overlay(
-            env=env, value_map=occ_opt_mixed, output_dir=str(out_dir),
+            env=env,
+            value_map=occ_opt_mixed,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_occupancy_trainPolicy_{mix_suffix}",
-            alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
-            cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-            min_abs_label=0.0, vmin=0.0, vmax=None,
+            alpha=args.vis_occ_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            target_cell_px=args.vis_occ_cell_px,
+            font_scale=args.vis_occ_font_scale,
+            cmap_name=args.vis_occ_cmap,
+            gamma=args.vis_occ_gamma,
+            min_abs_label=0.0,
+            vmin=0.0,
+            vmax=None,
             title="State Occupancy — Training policy (mixed)",
             cbar_label="Occupancy measure",
             value_format=None,
         )
 
         V_rand = policy_evaluation(
-            mdp_network=mdp, policy=create_random_policy(mdp),
-            gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+            mdp_network=mdp,
+            policy=create_random_policy(mdp),
+            gamma=args.vis_gamma,
+            theta=args.vis_theta,
+            max_iterations=args.vis_max_iters,
+            verbose=False,
         )
         plot_frozenlake_scalar_overlay(
-            env=env, value_map=V_rand, output_dir=str(out_dir),
+            env=env,
+            value_map=V_rand,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_random",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
-            cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Random", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            target_cell_px=args.vis_val_cell_px,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Random",
+            cbar_label="V(s)",
             value_format=None,
         )
         plot_frozenlake_scalar_overlay(
-            env=env, value_map=V_opt_greedy, output_dir=str(out_dir),
+            env=env,
+            value_map=V_opt_greedy,
+            output_dir=str(out_dir),
             filename_prefix=f"{stem}_VALUE_optimal_greedy",
-            alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-            target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
-            cmap_name=args.vis_val_cmap, gamma=args.vis_val_gamma,
-            min_abs_label=0.0, vmin=None, vmax=None,
-            title="State Value V(s) — Optimal (greedy)", cbar_label="V(s)",
+            alpha=args.vis_val_alpha,
+            annotate=True,
+            dpi=args.vis_dpi,
+            target_cell_px=args.vis_val_cell_px,
+            font_scale=args.vis_val_font_scale,
+            cmap_name=args.vis_val_cmap,
+            gamma=args.vis_val_gamma,
+            min_abs_label=0.0,
+            vmin=None,
+            vmax=None,
+            title="State Value V(s) — Optimal (greedy)",
+            cbar_label="V(s)",
             value_format=None,
         )
 
         # Cross-visualizations against native env (if present)
         if native_mdp is not None:
             occ_cross_native = compute_occupancy_measure(
-                mdp_network=native_mdp, policy=policy_opt_mixed,
-                gamma=args.vis_gamma, theta=args.vis_theta, max_iterations=args.vis_max_iters, verbose=False,
+                mdp_network=native_mdp,
+                policy=policy_opt_mixed,
+                gamma=args.vis_gamma,
+                theta=args.vis_theta,
+                max_iterations=args.vis_max_iters,
+                verbose=False,
             )
             plot_frozenlake_scalar_overlay(
-                env=env, value_map=occ_cross_native, output_dir=str(out_dir),
+                env=env,
+                value_map=occ_cross_native,
+                output_dir=str(out_dir),
                 filename_prefix=f"{stem}_occupancy_trainPolicy_on_NATIVE_{mix_suffix}",
-                alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
-                cmap_name=args.vis_occ_cmap, gamma=args.vis_occ_gamma,
-                min_abs_label=0.0, vmin=0.0, vmax=None,
+                alpha=args.vis_occ_alpha,
+                annotate=True,
+                dpi=args.vis_dpi,
+                target_cell_px=args.vis_occ_cell_px,
+                font_scale=args.vis_occ_font_scale,
+                cmap_name=args.vis_occ_cmap,
+                gamma=args.vis_occ_gamma,
+                min_abs_label=0.0,
+                vmin=0.0,
+                vmax=None,
                 title="State Occupancy — Training policy on NATIVE",
                 cbar_label="Occupancy measure",
                 value_format=None,
@@ -262,9 +402,15 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
                     values_b=native_occ_random,
                     output_dir=str(out_dir),
                     filename_prefix=f"{stem}_occupancy_DIFF_trainPolicyMINUS_nativeRandom_{mix_suffix}",
-                    alpha=args.vis_occ_alpha, annotate=True, dpi=args.vis_dpi,
-                    target_cell_px=args.vis_occ_cell_px, font_scale=args.vis_occ_font_scale,
-                    cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
+                    alpha=args.vis_occ_alpha,
+                    annotate=True,
+                    dpi=args.vis_dpi,
+                    target_cell_px=args.vis_occ_cell_px,
+                    font_scale=args.vis_occ_font_scale,
+                    cmap_name="coolwarm",
+                    min_abs_label=0.0,
+                    vmin=None,
+                    vmax=None,
                     title="Δ State Occupancy (training − native-random)",
                     cbar_label="Δ occupancy (A − B)",
                     value_format="+.2e",
@@ -277,9 +423,15 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
                 values_b=native_V_opt_greedy,
                 output_dir=str(out_dir),
                 filename_prefix=f"{stem}_VALUE_DIFF_optGreedyMINUS_nativeOptGreedy",
-                alpha=args.vis_val_alpha, annotate=True, dpi=args.vis_dpi,
-                target_cell_px=args.vis_val_cell_px, font_scale=args.vis_val_font_scale,
-                cmap_name="coolwarm", min_abs_label=0.0, vmin=None, vmax=None,
+                alpha=args.vis_val_alpha,
+                annotate=True,
+                dpi=args.vis_dpi,
+                target_cell_px=args.vis_val_cell_px,
+                font_scale=args.vis_val_font_scale,
+                cmap_name="coolwarm",
+                min_abs_label=0.0,
+                vmin=None,
+                vmax=None,
                 title="Δ State Value: optGreedy(loop) − optGreedy(native)",
                 cbar_label="Δ V(s) (loop − native)",
                 value_format="+.2f",
@@ -295,15 +447,20 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
 # Argparse / main
 # =============================================================================
 
+
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="End-to-end GA → Curriculum → Visualization with W&B (via WandbWriter).")
+    p = argparse.ArgumentParser(
+        description="End-to-end GA → Curriculum → Visualization with W&B (via WandbWriter)."
+    )
 
     # W&B
     p.add_argument("--outdir", type=str, default="./outputs")
     p.add_argument("--run-name", type=str, default=None)
     p.add_argument("--wandb-project", type=str, default="full-frozenlake")
     p.add_argument("--wandb-entity", type=str, default=None)
-    p.add_argument("--wandb-mode", type=str, choices=["online", "offline"], default="online")
+    p.add_argument(
+        "--wandb-mode", type=str, choices=["online", "offline"], default="online"
+    )
 
     # Pipeline toggles
     p.add_argument("--skip-ga", action="store_true")
@@ -316,10 +473,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=25)
+    p.add_argument("--ga-pop-size", type=int, default=20)
     p.add_argument("--ga-generations", type=int, default=25)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=5)
+    p.add_argument("--ga-elitism", type=int, default=2)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=str2bool, default=True)
@@ -357,24 +514,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-perf-max-iters", type=int, default=1000)
 
     # Training (flattened agent kwargs; fed to CL API)
-    p.add_argument("--agent-ctor-path", type=str, default="simple_agents.tabular_q_agent:TabularQAgent",
-                   help="Dotted path 'module:factory_or_class' used by CL to construct the agent.")
+    p.add_argument(
+        "--agent-ctor-path",
+        type=str,
+        default="simple_agents.tabular_q_agent:TabularQAgent",
+        help="Dotted path 'module:factory_or_class' used by CL to construct the agent.",
+    )
     p.add_argument("--agent-learning-rate", type=float, default=0.1)
     p.add_argument("--agent-gamma", type=float, default=0.99)
-    p.add_argument("--agent-policy-mix", type=parse_tuple3, default=(0.9, 0.0, 0.1),
-                   help="Tuple 'g,s,u' for (greedy, softmax, uniform).")
-    p.add_argument("--agent-temperature", type=float, default=0.01,
-                   help="Used only if softmax weight > 0.")
+    p.add_argument(
+        "--agent-policy-mix",
+        type=parse_tuple3,
+        default=(0.9, 0.0, 0.1),
+        help="Tuple 'g,s,u' for (greedy, softmax, uniform).",
+    )
+    p.add_argument(
+        "--agent-temperature",
+        type=float,
+        default=0.01,
+        help="Used only if softmax weight > 0.",
+    )
     p.add_argument("--agent-tie-tol", type=float, default=1e-2)
     p.add_argument("--agent-verbose", type=int, default=1)
 
-    p.add_argument("--phase-steps", type=str, default="10000,40000",
-                   help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.")
+    p.add_argument(
+        "--phase-steps",
+        type=str,
+        default="10000,40000",
+        help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
+    )
     p.add_argument("--eval-every", type=int, default=2000)
     p.add_argument("--n-eval-episodes", type=int, default=100)
 
     # Seeds and parallelism for training
-    p.add_argument("--train-seeds", type=int, default=5, help="Use N to get seeds [0..N-1].")
+    p.add_argument(
+        "--train-seeds", type=int, default=25, help="Use N to get seeds [0..N-1]."
+    )
     p.add_argument("--train-save-intermediate", type=str2bool, default=True)
 
     # External JSON loops (optional)
@@ -411,16 +586,30 @@ def main():
     parser = build_arg_parser()
     args = resolve_args(parser)
 
-    # Save full config for reproducibility
+    # # Place Ray's temp/session directory under the timestamped outdir
+    # ray_tmp_dir = Path(args.outdir).parents[1]
+    # ensure_dir(ray_tmp_dir)
+    # os.environ["RAY_TMPDIR"] = str(ray_tmp_dir)
+
+    # Wrap outdir with a timestamped run folder: <outdir>/ga-frozenlake/<ts>
+    run_dir = _timestamped_outdir(args.outdir, leaf="ga-frozenlake")
+    ensure_dir(run_dir)
+    # Overwrite args.outdir so all subsequent code writes under the timestamped path
+    args.outdir = str(run_dir)
+
+    print(f"[SETUP] Results outdir: {args.outdir}")
+    # print(f"[SETUP] Ray tmp base:   {os.environ['RAY_TMPDIR']}")
+
+    # Save full config for reproducibility (now under the timestamped outdir)
     meta_dir = Path(args.outdir) / "meta"
     ensure_dir(meta_dir)
     save_json(meta_dir / "config.json", {k: getattr(args, k) for k in vars(args)})
 
-    # Init Ray once up front, since we will create a WandbWriter actor
+    # Init Ray after RAY_TMPDIR is set
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, log_to_driver=False)
 
-    # Create WandbWriter actor (pass-through to run_ga & run_curriculum)
+    # Create WandbWriter actor (unchanged)
     init_kwargs: Dict[str, Any] = {
         "project": args.wandb_project,
         "name": args.run_name,
@@ -438,7 +627,7 @@ def main():
         json_dir = Path(args.json_dir)
         json_files = sorted(json_dir.glob("*.json"))
         if args.json_max > 0:
-            json_files = json_files[:args.json_max]
+            json_files = json_files[: args.json_max]
         print(f"[MAIN] Using external JSON dir: {json_dir} ({len(json_files)} files).")
     else:
         if not args.skip_ga:
@@ -480,7 +669,36 @@ def main():
                 "perf_theta": args.ga_perf_theta,
                 "perf_max_iterations": args.ga_perf_max_iters,
             }
-            score = ("obj_multi_perf", {"blend_weight": args.ga_blend_weight})
+            # score = ("obj_multi_perf", {"blend_weight": args.ga_blend_weight})  # Keep this for reference
+            score = (
+                "obj_cl_phase_auc",
+                {
+                    "target_factory_path": TARGET_FACTORY_PATH,
+                    "target_cfg": {
+                        "map_name": "8x8",
+                        "is_slippery": True,
+                        "max_steps": 1000,
+                    },
+                    "item_factory_path": SOURCE_FACTORY_PATH,
+                    "item_max_steps": 1000,
+                    "phase_steps": (10_000, 40_000),  # p1 on item, p2 on target
+                    "seeds": 5,
+                    "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
+                    "agent_kwargs": {
+                        "learning_rate": 0.1,
+                        "gamma": 0.99,
+                        "policy_mix": (0.9, 0.0, 0.1),
+                        "temperature": 0.01,
+                        "tie_tol": 1e-2,
+                        "verbose": 0,
+                    },
+                    "eval_every": 2000,
+                    "n_eval_episodes": 100,
+                    # optional, default "greedy"
+                    # "curve": "greedy",
+                    # "evals": [{"name":"Target","env":"target"}],
+                },
+            )
 
             _ = run_ga(
                 base_mdp=base_mdp,
@@ -492,21 +710,28 @@ def main():
                 crossover_rate=args.ga_crossover,
                 output_dir=args.outdir,
                 wandb_writer=wandb_actor,
-                ops=ops, distance=distance, solver=solver, score=score,
+                ops=ops,
+                distance=distance,
+                solver=solver,
+                score=score,
             )
 
             # Collect saved JSONs
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
-                json_files = json_files[:args.json_max]
-            print(f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}.")
+                json_files = json_files[: args.json_max]
+            print(
+                f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}."
+            )
         else:
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
-                json_files = json_files[:args.json_max]
-            print(f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}.")
+                json_files = json_files[: args.json_max]
+            print(
+                f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}."
+            )
 
     # ----------------------------- Curriculum Training -----------------------------
     if not args.skip_train and json_files:

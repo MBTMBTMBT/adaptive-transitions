@@ -10,7 +10,14 @@ from matplotlib import patheffects as pe
 import matplotlib.colors as mcolors
 
 from mdp_network.mdp_network import MDPNetwork
-from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv, generate_random_map, LEFT, DOWN, RIGHT, UP
+from gymnasium.envs.toy_text.frozen_lake import (
+    FrozenLakeEnv,
+    generate_random_map,
+    LEFT,
+    DOWN,
+    RIGHT,
+    UP,
+)
 from apis.customisable import CustomisableEnvAbs
 
 MAPS = {
@@ -204,10 +211,10 @@ class CustomisedFrozenLakeEnv(FrozenLakeEnv, CustomisableEnvAbs):
         return super().step(action)
 
     def reset(
-            self,
-            *,
-            seed: int | None = None,
-            options: dict | None = None,
+        self,
+        *,
+        seed: int | None = None,
+        options: dict | None = None,
     ):
         """
         If a NetworkX-backed env is provided, delegate start-state sampling to it,
@@ -256,7 +263,9 @@ class CustomisedFrozenLakeEnv(FrozenLakeEnv, CustomisableEnvAbs):
         Resets lastaction to None for a clean render.
         """
         if not (0 <= int(state) < self.nrow * self.ncol):
-            raise ValueError(f"Invalid state {state}, must be in [0, {self.nrow * self.ncol - 1}]")
+            raise ValueError(
+                f"Invalid state {state}, must be in [0, {self.nrow * self.ncol - 1}]"
+            )
 
         self.s = int(state)
         self.lastaction = None
@@ -334,7 +343,11 @@ class CustomisedFrozenLakeEnv(FrozenLakeEnv, CustomisableEnvAbs):
                     sp = int(sp)
                     acc = accum.setdefault(sp, {"p": 0.0, "r": 0.0})
                     new_p = acc["p"] + float(p)
-                    acc["r"] = (acc["r"] * acc["p"] + float(r) * float(p)) / new_p if new_p > 0.0 else float(r)
+                    acc["r"] = (
+                        (acc["r"] * acc["p"] + float(r) * float(p)) / new_p
+                        if new_p > 0.0
+                        else float(r)
+                    )
                     acc["p"] = new_p
 
                 if accum:
@@ -428,15 +441,15 @@ def plot_frozenlake_transition_overlays(
     output_dir: str,
     filename_prefix: str = "frozenlake_transitions",
     min_prob: float = 0.05,
-    alpha: float = 0.90,              # constant transparency
-    annotate: bool = True,            # draw probability labels
-    show_self_loops: bool = False,    # draw s->s arcs
+    alpha: float = 0.90,  # constant transparency
+    annotate: bool = True,  # draw probability labels
+    show_self_loops: bool = False,  # draw s->s arcs
     dpi: int = 200,
-    target_cell_px: int = 240,        # target cell size in pixels for readability
-    arrow_scale: float = 0.04,        # arrow linewidth as fraction of cell size
-    font_scale: float = 0.16,         # label font size as fraction of cell size
-    cmap_name: str = "viridis",       # colormap for probability -> color
-    gamma: float = 1.0                # gamma correction for probability mapping
+    target_cell_px: int = 240,  # target cell size in pixels for readability
+    arrow_scale: float = 0.04,  # arrow linewidth as fraction of cell size
+    font_scale: float = 0.16,  # label font size as fraction of cell size
+    cmap_name: str = "viridis",  # colormap for probability -> color
+    gamma: float = 1.0,  # gamma correction for probability mapping
 ):
     """
     Draw per-action overlays of MDP transition probabilities on a FrozenLake board.
@@ -455,7 +468,9 @@ def plot_frozenlake_transition_overlays(
         print("[WARN] mdp.states does not match 0..nS-1")
 
     if getattr(mdp, "num_actions", 4) != 4:
-        raise ValueError("This visualizer assumes exactly 4 actions (LEFT/DOWN/RIGHT/UP).")
+        raise ValueError(
+            "This visualizer assumes exactly 4 actions (LEFT/DOWN/RIGHT/UP)."
+        )
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -486,8 +501,11 @@ def plot_frozenlake_transition_overlays(
     if upscale > 1:
         try:
             from PIL import Image
+
             bg_img = np.array(
-                Image.fromarray(bg_img).resize((int(W * upscale), int(H * upscale)), resample=Image.BICUBIC)
+                Image.fromarray(bg_img).resize(
+                    (int(W * upscale), int(H * upscale)), resample=Image.BICUBIC
+                )
             )
         except Exception:
             # fallback: nearest-neighbor upscale
@@ -516,12 +534,19 @@ def plot_frozenlake_transition_overlays(
     title_pt = max(9.0, min(14.0, px_to_pt(0.18 * cell_min)))
 
     # text style for labels
-    text_bbox = dict(facecolor="white", alpha=0.50, edgecolor="none", boxstyle="round,pad=0.15")
-    text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
+    text_bbox = dict(
+        facecolor="white", alpha=0.50, edgecolor="none", boxstyle="round,pad=0.15"
+    )
+    text_effects = [
+        pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)
+    ]
 
     # probability -> RGBA color using colormap
     cmap = cm.get_cmap(cmap_name)
-    norm = mcolors.PowerNorm(gamma=gamma, vmin=0.0, vmax=1.0)  # NEW: gamma-consistent normalization
+    norm = mcolors.PowerNorm(
+        gamma=gamma, vmin=0.0, vmax=1.0
+    )  # NEW: gamma-consistent normalization
+
     def prob_to_color(p: float):
         """Map probability to RGBA using cmap and gamma-corrected norm."""
         return cmap(norm(np.clip(p, 0, 1)))
@@ -530,10 +555,18 @@ def plot_frozenlake_transition_overlays(
         """Draw a small self-loop arc with color from probability."""
         color = prob_to_color(p)
         radius = 0.28 * cell_min
-        arc = Arc((x + 0.4 * radius, y - 0.4 * radius),
-                  width=radius, height=radius,
-                  angle=0, theta1=30, theta2=320,
-                  linewidth=ARROW_LW_PT, color=color, alpha=alpha, zorder=3)
+        arc = Arc(
+            (x + 0.4 * radius, y - 0.4 * radius),
+            width=radius,
+            height=radius,
+            angle=0,
+            theta1=30,
+            theta2=320,
+            linewidth=ARROW_LW_PT,
+            color=color,
+            alpha=alpha,
+            zorder=3,
+        )
         ax.add_patch(arc)
         arr = FancyArrowPatch(
             (x + 0.78 * radius, y - 0.55 * radius),
@@ -541,8 +574,12 @@ def plot_frozenlake_transition_overlays(
             arrowstyle="->",
             mutation_scale=mutation_scale,
             linewidth=ARROW_LW_PT,
-            facecolor=color, edgecolor=color,
-            alpha=alpha, zorder=4, shrinkA=0.0, shrinkB=0.0
+            facecolor=color,
+            edgecolor=color,
+            alpha=alpha,
+            zorder=4,
+            shrinkA=0.0,
+            shrinkB=0.0,
         )
         ax.add_patch(arr)
 
@@ -585,31 +622,57 @@ def plot_frozenlake_transition_overlays(
                     if show_self_loops:
                         draw_self_loop(ax, x0, y0, p)
                         if annotate:
-                            ax.text(x0, y0 - 0.33 * cell_h, f"{p:.2f}",
-                                    ha="center", va="center", fontsize=font_pt,
-                                    bbox=text_bbox, alpha=alpha, zorder=5,
-                                    path_effects=text_effects)
+                            ax.text(
+                                x0,
+                                y0 - 0.33 * cell_h,
+                                f"{p:.2f}",
+                                ha="center",
+                                va="center",
+                                fontsize=font_pt,
+                                bbox=text_bbox,
+                                alpha=alpha,
+                                zorder=5,
+                                path_effects=text_effects,
+                            )
                     continue
 
                 arrow = FancyArrowPatch(
-                    (x0, y0), (x1, y1),
-                    arrowstyle="->", mutation_scale=mutation_scale,
+                    (x0, y0),
+                    (x1, y1),
+                    arrowstyle="->",
+                    mutation_scale=mutation_scale,
                     linewidth=ARROW_LW_PT,
-                    facecolor=color, edgecolor=color,
-                    alpha=alpha, zorder=3,
-                    shrinkA=shrink_pt, shrinkB=shrink_pt
+                    facecolor=color,
+                    edgecolor=color,
+                    alpha=alpha,
+                    zorder=3,
+                    shrinkA=shrink_pt,
+                    shrinkB=shrink_pt,
                 )
                 ax.add_patch(arrow)
 
                 if annotate:
                     mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-                    ax.text(mx, my, f"{p:.2f}",
-                            ha="center", va="center", fontsize=font_pt,
-                            bbox=text_bbox, alpha=alpha, zorder=4,
-                            path_effects=text_effects)
+                    ax.text(
+                        mx,
+                        my,
+                        f"{p:.2f}",
+                        ha="center",
+                        va="center",
+                        fontsize=font_pt,
+                        bbox=text_bbox,
+                        alpha=alpha,
+                        zorder=4,
+                        path_effects=text_effects,
+                    )
 
         out_name = f"{filename_prefix}_a{a}_{_get_action_name(a).lower()}.png"
-        plt.savefig(os.path.join(output_dir, out_name), bbox_inches="tight", pad_inches=0.05, dpi=dpi)
+        plt.savefig(
+            os.path.join(output_dir, out_name),
+            bbox_inches="tight",
+            pad_inches=0.05,
+            dpi=dpi,
+        )
         plt.close(fig)
 
     print(f"[OK] Saved overlays to: {os.path.abspath(output_dir)}")
@@ -617,22 +680,22 @@ def plot_frozenlake_transition_overlays(
 
 def plot_frozenlake_scalar_overlay(
     env: Union[FrozenLakeEnv, CustomisedFrozenLakeEnv],
-    value_map: "ValueTable",                # supports .get_value(s); dict-like also works
+    value_map: "ValueTable",  # supports .get_value(s); dict-like also works
     output_dir: str,
     filename_prefix: str = "frozenlake_scalar",
-    alpha: float = 0.65,                    # overlay transparency for the heat layer
-    annotate: bool = True,                  # draw per-cell numeric labels
+    alpha: float = 0.65,  # overlay transparency for the heat layer
+    annotate: bool = True,  # draw per-cell numeric labels
     dpi: int = 200,
-    target_cell_px: int = 240,              # target cell size in pixels for readability
-    font_scale: float = 0.18,               # label font size as fraction of cell size
-    cmap_name: str = "magma",               # colormap for scalar values
-    gamma: float = 1.0,                     # gamma for color normalization (PowerNorm)
-    min_abs_label: float = 0.0,             # do not draw labels if |value| < threshold
-    vmin: float | None = None,              # color scale min; defaults to data min
-    vmax: float | None = None,              # color scale max; defaults to data max
-    title: str = "State Value",             # title text
-    cbar_label: str = "Value",              # colorbar label
-    value_format: str | None = None,        # e.g. ".2f" or ".2e"; None -> auto (2f / 2e)
+    target_cell_px: int = 240,  # target cell size in pixels for readability
+    font_scale: float = 0.18,  # label font size as fraction of cell size
+    cmap_name: str = "magma",  # colormap for scalar values
+    gamma: float = 1.0,  # gamma for color normalization (PowerNorm)
+    min_abs_label: float = 0.0,  # do not draw labels if |value| < threshold
+    vmin: float | None = None,  # color scale min; defaults to data min
+    vmax: float | None = None,  # color scale max; defaults to data max
+    title: str = "State Value",  # title text
+    cbar_label: str = "Value",  # colorbar label
+    value_format: str | None = None,  # e.g. ".2f" or ".2e"; None -> auto (2f / 2e)
 ) -> str:
     """
     Overlay an arbitrary per-state scalar (e.g., V(s) or occupancy) as a semi-transparent heat layer
@@ -678,8 +741,11 @@ def plot_frozenlake_scalar_overlay(
     if upscale > 1:
         try:
             from PIL import Image
+
             bg_img = np.array(
-                Image.fromarray(bg_img).resize((int(W * upscale), int(H * upscale)), resample=Image.BICUBIC)
+                Image.fromarray(bg_img).resize(
+                    (int(W * upscale), int(H * upscale)), resample=Image.BICUBIC
+                )
             )
         except Exception:
             bg_img = np.kron(bg_img, np.ones((upscale, upscale, 1), dtype=bg_img.dtype))
@@ -699,15 +765,19 @@ def plot_frozenlake_scalar_overlay(
         if value_format is not None:
             return format(v, value_format)
         # auto: tiny -> scientific; else fixed 2 decimals
-        return (f"{v:.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:.2f}")
+        return f"{v:.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:.2f}"
 
     cell_min = min(cell_w, cell_h)
     font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
     title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
 
     # Text style
-    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
-    text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
+    text_bbox = dict(
+        facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15"
+    )
+    text_effects = [
+        pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)
+    ]
 
     # -------- Build value grid --------
     def val_get(s: int) -> float:
@@ -771,9 +841,16 @@ def plot_frozenlake_scalar_overlay(
                 continue
             x, y = state_to_center_xy(s)
             ax.text(
-                x, y, fmt_val(val),
-                ha="center", va="center", fontsize=font_pt,
-                bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects,
+                x,
+                y,
+                fmt_val(val),
+                ha="center",
+                va="center",
+                fontsize=font_pt,
+                bbox=text_bbox,
+                alpha=0.95,
+                zorder=2,
+                path_effects=text_effects,
             )
 
     out_name = f"{filename_prefix}.png"
@@ -787,22 +864,24 @@ def plot_frozenlake_scalar_overlay(
 
 def plot_frozenlake_scalar_diff_overlay(
     env: Union[FrozenLakeEnv, CustomisedFrozenLakeEnv],
-    values_a: "ValueTable",                 # supports .get_value(s); dict-like also works
-    values_b: "ValueTable",                 # supports .get_value(s); dict-like also works
+    values_a: "ValueTable",  # supports .get_value(s); dict-like also works
+    values_b: "ValueTable",  # supports .get_value(s); dict-like also works
     output_dir: str,
     filename_prefix: str = "frozenlake_scalar_diff",
-    alpha: float = 0.65,                    # overlay transparency for the heat layer
-    annotate: bool = True,                  # draw per-cell numeric labels
+    alpha: float = 0.65,  # overlay transparency for the heat layer
+    annotate: bool = True,  # draw per-cell numeric labels
     dpi: int = 200,
-    target_cell_px: int = 240,              # target cell size in pixels for readability
-    font_scale: float = 0.18,               # label font size as fraction of cell size
-    cmap_name: str = "coolwarm",            # diverging colormap for signed differences
-    min_abs_label: float = 0.0,             # do not draw labels if |Δ| < threshold
-    vmin: float | None = None,              # color scale min; defaults to symmetric about 0
-    vmax: float | None = None,              # color scale max; defaults to symmetric about 0
-    title: str = "Δ State Value (A − B)",   # title text
-    cbar_label: str = "Δ value (A − B)",    # colorbar label
-    value_format: str | None = "+.2f",      # default signed fixed 2 decimals; None -> auto with sign
+    target_cell_px: int = 240,  # target cell size in pixels for readability
+    font_scale: float = 0.18,  # label font size as fraction of cell size
+    cmap_name: str = "coolwarm",  # diverging colormap for signed differences
+    min_abs_label: float = 0.0,  # do not draw labels if |Δ| < threshold
+    vmin: float | None = None,  # color scale min; defaults to symmetric about 0
+    vmax: float | None = None,  # color scale max; defaults to symmetric about 0
+    title: str = "Δ State Value (A − B)",  # title text
+    cbar_label: str = "Δ value (A − B)",  # colorbar label
+    value_format: (
+        str | None
+    ) = "+.2f",  # default signed fixed 2 decimals; None -> auto with sign
 ) -> str:
     """
     Overlay the difference between two per-state scalars (A − B) as a semi-transparent
@@ -848,9 +927,11 @@ def plot_frozenlake_scalar_diff_overlay(
     if upscale > 1:
         try:
             from PIL import Image
+
             bg_img = np.array(
-                Image.fromarray(bg_img).resize((int(W * upscale), int(H * upscale)),
-                                               resample=Image.BICUBIC)
+                Image.fromarray(bg_img).resize(
+                    (int(W * upscale), int(H * upscale)), resample=Image.BICUBIC
+                )
             )
         except Exception:
             bg_img = np.kron(bg_img, np.ones((upscale, upscale, 1), dtype=bg_img.dtype))
@@ -870,15 +951,19 @@ def plot_frozenlake_scalar_diff_overlay(
         if value_format is not None:
             return format(v, value_format)
         # auto with explicit sign
-        return (f"{v:+.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:+.2f}")
+        return f"{v:+.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:+.2f}"
 
     cell_min = min(cell_w, cell_h)
     font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
     title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
 
     # Text style
-    text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
-    text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
+    text_bbox = dict(
+        facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15"
+    )
+    text_effects = [
+        pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)
+    ]
 
     # -------- Build grids and difference --------
     def val_get(tbl, s: int) -> float:
@@ -900,7 +985,9 @@ def plot_frozenlake_scalar_diff_overlay(
 
     # Default symmetric vmin/vmax around zero
     finite_mask = np.isfinite(diff_grid)
-    max_abs = float(np.nanmax(np.abs(diff_grid[finite_mask]))) if finite_mask.any() else 1.0
+    max_abs = (
+        float(np.nanmax(np.abs(diff_grid[finite_mask]))) if finite_mask.any() else 1.0
+    )
     if vmin is None or vmax is None:
         vmin = -max_abs
         vmax = max_abs
@@ -954,9 +1041,16 @@ def plot_frozenlake_scalar_diff_overlay(
                 continue
             x, y = state_to_center_xy(s)
             ax.text(
-                x, y, fmt_val(val),
-                ha="center", va="center", fontsize=font_pt,
-                bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects,
+                x,
+                y,
+                fmt_val(val),
+                ha="center",
+                va="center",
+                fontsize=font_pt,
+                bbox=text_bbox,
+                alpha=0.95,
+                zorder=2,
+                path_effects=text_effects,
             )
 
     out_name = f"{filename_prefix}.png"

@@ -6,8 +6,13 @@ from pathlib import Path
 from typing import List
 
 from experiment_utils.utils import ensure_dir
-from genetic_algorithms.ga_mdp_search import register_score_fn, obj_multi_perf, GAConfig, MDPEvolutionGA, \
-    evaluate_mdp_objectives
+from genetic_algorithms.ga_mdp_search import (
+    register_score_fn,
+    obj_multi_perf,
+    GAConfig,
+    MDPEvolutionGA,
+    evaluate_mdp_objectives,
+)
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import q_table_to_policy
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
@@ -35,7 +40,6 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
         tournament_k=args.ga_tournament_k,
         elitism_num=args.ga_elitism,
         crossover_rate=args.ga_crossover,
-
         allow_self_loops=args.ga_allow_self_loops,
         min_out_degree=args.ga_min_out_degree,
         max_out_degree=args.ga_max_out_degree,
@@ -51,7 +55,6 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
         reward_k_percent=args.ga_reward_k_percent,
         reward_ref_floor=args.ga_reward_ref_floor,
         add_edge_allow_out_of_scope=args.ga_add_edge_allow_out_of_scope,
-
         n_workers=workers,
         score_fn_names=["obj_multi_perf"],
         score_args=None,
@@ -60,14 +63,11 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
             "policy_tie_tol": args.ga_tie_tol,
             "blend_weight": args.ga_blend_weight,
         },
-
         mutation_n_workers=workers,
-
         dist_max_hops=args.ga_dist_max_hops,
         dist_node_cap=args.ga_dist_node_cap,
         dist_weight_eps=args.ga_dist_weight_eps,
         dist_unreachable=args.ga_dist_unreachable,
-
         vi_gamma=args.ga_vi_gamma,
         vi_theta=args.ga_vi_theta,
         vi_max_iterations=args.ga_vi_max_iters,
@@ -76,14 +76,18 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
         perf_gamma=args.ga_perf_gamma,
         perf_theta=args.ga_perf_theta,
         perf_max_iterations=args.ga_perf_max_iters,
-
         seed=args.ga_seed,
     )
 
     run.config.update({"ga_config": asdict(cfg)}, allow_val_change=True)
 
     print("[GA] Precomputing baseline policy & occupancy…")
-    _, Q = optimal_value_iteration(mdp, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations)
+    _, Q = optimal_value_iteration(
+        mdp,
+        gamma=cfg.vi_gamma,
+        theta=cfg.vi_theta,
+        max_iterations=cfg.vi_max_iterations,
+    )
     base_policy = q_table_to_policy(
         Q,
         states=list(mdp.states),
@@ -93,7 +97,11 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
         tie_tol=args.ga_tie_tol,
     )
     base_occupancy = compute_occupancy_measure(
-        mdp, base_policy, gamma=cfg.vi_gamma, theta=cfg.vi_theta, max_iterations=cfg.vi_max_iterations
+        mdp,
+        base_policy,
+        gamma=cfg.vi_gamma,
+        theta=cfg.vi_theta,
+        max_iterations=cfg.vi_max_iterations,
     )
 
     ga = MDPEvolutionGA(base_mdp=mdp, cfg=cfg, wb_run=run)
@@ -119,9 +127,15 @@ def stage_ga(args, run, mdp: MDPNetwork) -> List[Path]:
                 "perf_theta": cfg.perf_theta,
                 "perf_max_iterations": cfg.perf_max_iterations,
             },
-            precomputed_portables=[base_policy.to_portable(), base_occupancy.to_portable()],
+            precomputed_portables=[
+                base_policy.to_portable(),
+                base_occupancy.to_portable(),
+            ],
         )
-        print("  Batch objective vectors (head):", [[round(x, 6) for x in v] for v in obj_vecs[:3]])
+        print(
+            "  Batch objective vectors (head):",
+            [[round(x, 6) for x in v] for v in obj_vecs[:3]],
+        )
 
     print("[GA] Running NSGA-II…")
     pareto_mdps, pareto_objs, pop, _ = ga.run()

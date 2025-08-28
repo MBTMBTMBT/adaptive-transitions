@@ -56,13 +56,19 @@ def record_policy_gif(
         for t in range(max_steps):
             # Greedy action from policy distribution
             action_probs = policy.get_action_probabilities(state)
-            action = max(action_probs.items(), key=lambda x: x[1])[0] if action_probs else env.action_space.sample()
+            action = (
+                max(action_probs.items(), key=lambda x: x[1])[0]
+                if action_probs
+                else env.action_space.sample()
+            )
 
             obs_next, reward, terminated, truncated, info = env.step(action)
             ep_reward += reward
 
             frame = env.render()
-            an = action_names[action] if 0 <= action < len(action_names) else str(action)
+            an = (
+                action_names[action] if 0 <= action < len(action_names) else str(action)
+            )
             img = _overlay_label(frame, f"state={state}, action={an}")
             if img:
                 frames.append(img)

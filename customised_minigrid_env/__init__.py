@@ -17,23 +17,25 @@ MAPS: Dict[str, str] = {
     "2-doors-2-keys": "two-doors-two-keys.json",
 }
 
+
 def list_builtin_maps() -> List[str]:
     """Return the list of available built-in map names (keys of MAPS)."""
     return sorted(MAPS.keys())
+
 
 def _resource_for(name: str):
     """Return a Traversable resource for the given map name."""
     try:
         return _MAPS_DIR / MAPS[name]
     except KeyError as e:
-        raise KeyError(
-            f"Unknown map '{name}'. Available: {list_builtin_maps()}"
-        ) from e
+        raise KeyError(f"Unknown map '{name}'. Available: {list_builtin_maps()}") from e
+
 
 def load_map_config_by_name(name: str) -> dict:
     """Load the JSON config from packaged resources by 'name'."""
     res = _resource_for(name)
     return json.loads(res.read_text(encoding="utf-8"))
+
 
 @contextmanager
 def open_map_path(name: str):
@@ -44,6 +46,7 @@ def open_map_path(name: str):
     res = _resource_for(name)
     with as_file(res) as real_path:
         yield Path(real_path)
+
 
 # Re-export your env class for convenient imports like:
 #   from customised_minigrid_env import CustomMiniGridEnv

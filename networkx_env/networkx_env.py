@@ -8,12 +8,14 @@ from mdp_network import MDPNetwork
 
 
 class NetworkXMDPEnvironment(gym.Env):
-    def __init__(self,
-                 mdp_network: Optional[MDPNetwork] = None,
-                 config_path: Optional[str] = None,
-                 render_mode: Optional[str] = None,
-                 output_string_states: bool = False,
-                 seed: Optional[int] = None):
+    def __init__(
+        self,
+        mdp_network: Optional[MDPNetwork] = None,
+        config_path: Optional[str] = None,
+        render_mode: Optional[str] = None,
+        output_string_states: bool = False,
+        seed: Optional[int] = None,
+    ):
         super().__init__()
 
         # Init MDP
@@ -41,7 +43,9 @@ class NetworkXMDPEnvironment(gym.Env):
         # State
         self.current_state: Optional[Union[int, str]] = None
 
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+    def reset(
+        self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
+    ):
         """
         Reset to a random start state.
         Uses numpy Generator self.rng for reproducible randomness.
@@ -51,7 +55,9 @@ class NetworkXMDPEnvironment(gym.Env):
             # Re-seed numpy generator for reproducibility
             self.rng = np.random.default_rng(seed)
 
-        self.current_state = self.mdp.sample_start_state(self.rng, as_string=self.output_string_states)
+        self.current_state = self.mdp.sample_start_state(
+            self.rng, as_string=self.output_string_states
+        )
 
         if self.render_mode == "human":
             self.render()
@@ -67,7 +73,7 @@ class NetworkXMDPEnvironment(gym.Env):
             self.current_state,
             int(action),
             self.rng,  # use numpy RNG
-            as_string=self.output_string_states
+            as_string=self.output_string_states,
         )
 
         self.current_state = next_state
@@ -78,7 +84,6 @@ class NetworkXMDPEnvironment(gym.Env):
             self.render()
 
         return next_state, float(reward), bool(terminated), bool(truncated), {}
-
 
     def render(self):
         """Pygame render of the underlying graph."""
@@ -114,7 +119,7 @@ class NetworkXMDPEnvironment(gym.Env):
             x, y = pos[node]
             pos[node] = (
                 margin + (x + 1) * (graph_area_size - 2 * margin) / 2,
-                margin + (y + 1) * (graph_area_size - 2 * margin) / 2
+                margin + (y + 1) * (graph_area_size - 2 * margin) / 2,
             )
 
         # Draw edges
@@ -141,8 +146,20 @@ class NetworkXMDPEnvironment(gym.Env):
             if node == render_current_state:
                 color = (255, 0, 0)  # Current
                 pygame.draw.circle(canvas, color, (int(x), int(y)), 25)
-                pygame.draw.line(canvas, (255, 255, 255), (int(x - 15), int(y - 15)), (int(x + 15), int(y + 15)), 3)
-                pygame.draw.line(canvas, (255, 255, 255), (int(x - 15), int(y + 15)), (int(x + 15), int(y - 15)), 3)
+                pygame.draw.line(
+                    canvas,
+                    (255, 255, 255),
+                    (int(x - 15), int(y - 15)),
+                    (int(x + 15), int(y + 15)),
+                    3,
+                )
+                pygame.draw.line(
+                    canvas,
+                    (255, 255, 255),
+                    (int(x - 15), int(y + 15)),
+                    (int(x + 15), int(y - 15)),
+                    3,
+                )
             elif node in self.mdp.terminal_states:
                 color = (0, 255, 0)  # Terminal
                 pygame.draw.circle(canvas, color, (int(x), int(y)), 25)
@@ -180,12 +197,28 @@ class NetworkXMDPEnvironment(gym.Env):
         legend_y += 35
 
         legend_items = [
-            ((255, 0, 0), lambda x, y: [
-                pygame.draw.line(canvas, (255, 255, 255), (x - 8, y - 8), (x + 8, y + 8), 2),
-                pygame.draw.line(canvas, (255, 255, 255), (x - 8, y + 8), (x + 8, y - 8), 2)
-            ], "Current"),
-            ((0, 255, 0), lambda x, y: pygame.draw.circle(canvas, (255, 255, 255), (x, y), 8, 2), "Terminal"),
-            ((0, 0, 255), lambda x, y: pygame.draw.circle(canvas, (255, 255, 255), (x, y), 4), "Start"),
+            (
+                (255, 0, 0),
+                lambda x, y: [
+                    pygame.draw.line(
+                        canvas, (255, 255, 255), (x - 8, y - 8), (x + 8, y + 8), 2
+                    ),
+                    pygame.draw.line(
+                        canvas, (255, 255, 255), (x - 8, y + 8), (x + 8, y - 8), 2
+                    ),
+                ],
+                "Current",
+            ),
+            (
+                (0, 255, 0),
+                lambda x, y: pygame.draw.circle(canvas, (255, 255, 255), (x, y), 8, 2),
+                "Terminal",
+            ),
+            (
+                (0, 0, 255),
+                lambda x, y: pygame.draw.circle(canvas, (255, 255, 255), (x, y), 4),
+                "Start",
+            ),
             ((200, 200, 200), lambda x, y: None, "Regular"),
         ]
 
@@ -204,7 +237,9 @@ class NetworkXMDPEnvironment(gym.Env):
             pygame.display.update()
             self.clock.tick(self.metadata["render_fps"])
         else:  # "rgb_array"
-            return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
+            return np.transpose(
+                np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
+            )
 
     def close(self):
         """Close rendering."""
@@ -232,11 +267,15 @@ def test_environment(config_path: str, num_episodes: int = 3):
 
             total_reward += float(reward)
             step_count += 1
-            print(f"Step {step_count}: Action={action}, State={state}->{next_state}, Reward={reward:.3f}")
+            print(
+                f"Step {step_count}: Action={action}, State={state}->{next_state}, Reward={reward:.3f}"
+            )
 
             state = next_state
             if terminated or truncated:
-                print(f"Episode finished. Total reward: {total_reward:.3f}, Steps: {step_count}")
+                print(
+                    f"Episode finished. Total reward: {total_reward:.3f}, Steps: {step_count}"
+                )
                 break
             if step_count > 50:
                 print("Episode truncated due to step limit")

@@ -19,7 +19,7 @@ from two_stage_cl.tabular_curriculum_trainer import (
 # User knobs
 # -----------------------------
 OUTPUT_DIR = "./outputs/ga_cl_generic"
-JSON_DIR = "./outputs/ga_test"     # folder containing multiple *.json MDPs
+JSON_DIR = "./outputs/ga_test"  # folder containing multiple *.json MDPs
 
 # Seeds and schedule
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
@@ -59,6 +59,7 @@ def make_frozenlake_target(seed: int, **kwargs):
     Signature must be: (seed: int, **kwargs) -> gym.Env
     """
     from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
+
     env = CustomisedFrozenLakeEnv(
         render_mode=None,
         map_name=kwargs.get("map_name", "8x8"),
@@ -78,6 +79,7 @@ def make_nx_env_from_mdp(mdp, seed: int, **kwargs):
     """
     from networkx_env.networkx_env import NetworkXMDPEnvironment
     from gymnasium.wrappers import TimeLimit as TL
+
     env = NetworkXMDPEnvironment(mdp_network=mdp, render_mode=None, seed=seed)
     env = TL(env, max_episode_steps=kwargs.get("max_steps", 500))
     if seed is not None:
@@ -110,13 +112,16 @@ def _maybe_init_wandb():
         return None
 
     import wandb
+
     project = os.environ.get("WANDB_PROJECT", "curriculum-frozenlake")
     entity = os.environ.get("WANDB_ENTITY", None)  # optional
     run_name = os.environ.get("WANDB_RUN_NAME", None)
     if run_name is None:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"frozenlake_cl_{FROZENLAKE_MAP}_slip{int(FROZENLAKE_IS_SLIPPERY)}_" \
-                   f"steps{STEPS_JSON_PHASE}-{STEPS_TARGET_PHASE}_seeds{len(SEEDS)}_{ts}"
+        run_name = (
+            f"frozenlake_cl_{FROZENLAKE_MAP}_slip{int(FROZENLAKE_IS_SLIPPERY)}_"
+            f"steps{STEPS_JSON_PHASE}-{STEPS_TARGET_PHASE}_seeds{len(SEEDS)}_{ts}"
+        )
 
     run = wandb.init(
         project=project,
@@ -140,7 +145,9 @@ def _maybe_init_wandb():
             "output_dir": str(OUTPUT_DIR),
         },
         reinit=True,
-        settings=wandb.Settings(start_method="fork")  # safe for Linux; use "thread" if needed.
+        settings=wandb.Settings(
+            start_method="fork"
+        ),  # safe for Linux; use "thread" if needed.
     )
     return run
 
@@ -153,6 +160,7 @@ def _log_outputs_as_artifact(wandb_run, output_dir: str, boundaries: List[int]):
         return
     try:
         import wandb
+
         boundaries_str = "-".join(str(b) for b in boundaries) if boundaries else "none"
         art_name = f"curriculum_outputs_boundaries_{boundaries_str}"
         art = wandb.Artifact(name=art_name, type="results")
@@ -173,13 +181,21 @@ def main():
     # ---------- Build generic specs ----------
     target_env_spec = EnvFactorySpec(
         factory_path=TARGET_FACTORY_PATH,
-        kwargs=dict(map_name=FROZENLAKE_MAP, is_slippery=FROZENLAKE_IS_SLIPPERY, max_steps=FROZENLAKE_MAX_STEPS),
+        kwargs=dict(
+            map_name=FROZENLAKE_MAP,
+            is_slippery=FROZENLAKE_IS_SLIPPERY,
+            max_steps=FROZENLAKE_MAX_STEPS,
+        ),
     ).as_dict()
 
     # Baseline: both phases on Target (boundaries still exist and show in plots)
     baseline_phase_specs: List[PhaseSpec] = [
-        PhaseSpec(name="Phase-A(Target)", steps=STEPS_JSON_PHASE, env_spec=target_env_spec),
-        PhaseSpec(name="Phase-B(Target)", steps=STEPS_TARGET_PHASE, env_spec=target_env_spec),
+        PhaseSpec(
+            name="Phase-A(Target)", steps=STEPS_JSON_PHASE, env_spec=target_env_spec
+        ),
+        PhaseSpec(
+            name="Phase-B(Target)", steps=STEPS_TARGET_PHASE, env_spec=target_env_spec
+        ),
     ]
 
     # Curriculum items: per JSON label, Phase-A(Source mdp) -> Phase-B(Target)
@@ -193,8 +209,14 @@ def main():
             kwargs=dict(max_steps=FROZENLAKE_MAX_STEPS),
         ).as_dict()
         item_phase_specs_map[label] = [
-            PhaseSpec(name="Phase-A(Source)", steps=STEPS_JSON_PHASE, env_spec=source_env_spec),
-            PhaseSpec(name="Phase-B(Target)", steps=STEPS_TARGET_PHASE, env_spec=target_env_spec),
+            PhaseSpec(
+                name="Phase-A(Source)", steps=STEPS_JSON_PHASE, env_spec=source_env_spec
+            ),
+            PhaseSpec(
+                name="Phase-B(Target)",
+                steps=STEPS_TARGET_PHASE,
+                env_spec=target_env_spec,
+            ),
         ]
         # Two eval contexts: Target (primary), Source (aux)
         eval_specs_map[label] = [
@@ -234,15 +256,21 @@ def main():
 
         tgt = item["Target"]
         print(f"[{label}]")
-        print(f"  Target-only baseline — Greedy: {b_g:.3f} ± {b_gs:.3f} | TrainPol: {b_t:.3f} ± {b_ts:.3f}")
-        print(f"  Curriculum → Target  — Greedy: {tgt['greedy_mean'][-1]:.3f} ± {tgt['greedy_std'][-1]:.3f} | "
-              f"TrainPol: {tgt['train_mean'][-1]:.3f} ± {tgt['train_std'][-1]:.3f}")
+        print(
+            f"  Target-only baseline — Greedy: {b_g:.3f} ± {b_gs:.3f} | TrainPol: {b_t:.3f} ± {b_ts:.3f}"
+        )
+        print(
+            f"  Curriculum → Target  — Greedy: {tgt['greedy_mean'][-1]:.3f} ± {tgt['greedy_std'][-1]:.3f} | "
+            f"TrainPol: {tgt['train_mean'][-1]:.3f} ± {tgt['train_std'][-1]:.3f}"
+        )
 
         src_key = "Source-A"
         if src_key in item:
             src = item[src_key]
-            print(f"  Curriculum (Source) — Greedy: {src['greedy_mean'][-1]:.3f} ± {src['greedy_std'][-1]:.3f} | "
-                  f"TrainPol: {src['train_mean'][-1]:.3f} ± {src['train_std'][-1]:.3f}")
+            print(
+                f"  Curriculum (Source) — Greedy: {src['greedy_mean'][-1]:.3f} ± {src['greedy_std'][-1]:.3f} | "
+                f"TrainPol: {src['train_mean'][-1]:.3f} ± {src['train_std'][-1]:.3f}"
+            )
 
     # Log outputs as a W&B artifact for reproducibility
     _log_outputs_as_artifact(run, OUTPUT_DIR, aggregated.get("boundaries", []))

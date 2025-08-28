@@ -53,6 +53,7 @@ def _directed_prob_distance(
         return float(unreachable)
 
     import heapq
+
     INF = float("inf")
     dist: Dict[int, float] = {s: 0.0}
     heap: List[Tuple[float, int]] = [(0.0, s)]
@@ -79,7 +80,9 @@ def _directed_prob_distance(
     return float(unreachable)
 
 
-def _get_outgoing_for_action(mdp: MDPNetwork, s: int, a: int) -> Dict[int, Tuple[float, float]]:
+def _get_outgoing_for_action(
+    mdp: MDPNetwork, s: int, a: int
+) -> Dict[int, Tuple[float, float]]:
     out: Dict[int, Tuple[float, float]] = {}
     for sp in mdp.graph.successors(s):
         edata = mdp.graph[s][sp]
@@ -144,11 +147,15 @@ def _list_all_triples(mdp: MDPNetwork) -> List[EdgeTriple]:
     return triples
 
 
-def _allowed_nodes_within_scope(base_ref: MDPNetwork, s: int, distance_cfg: Dict[str, Any]) -> Set[int]:
+def _allowed_nodes_within_scope(
+    base_ref: MDPNetwork, s: int, distance_cfg: Dict[str, Any]
+) -> Set[int]:
     """Return states within hop-based scope (optional capped by node_cap)."""
     if distance_cfg.get("max_hops") is None:
         return set(base_ref.states)
-    hop_dist = nx.single_source_shortest_path_length(base_ref.graph, source=s, cutoff=int(distance_cfg["max_hops"]))
+    hop_dist = nx.single_source_shortest_path_length(
+        base_ref.graph, source=s, cutoff=int(distance_cfg["max_hops"])
+    )
     allowed = set(hop_dist.keys())
     node_cap = distance_cfg.get("node_cap", None)
     if node_cap is not None and len(allowed) > int(node_cap):
@@ -182,7 +189,10 @@ def _prune_low_prob_transitions(
                     kept[sp] = (p, r)
             # Use protected setter so that any present whitelisted edges are preserved even if missing in `kept`
             _set_outgoing_for_action(
-                mdp, s, a, kept,
+                mdp,
+                s,
+                a,
+                kept,
                 whitelist=whitelist,
                 prob_floor=prob_floor,
             )
@@ -212,7 +222,8 @@ def _mutation_add_edge(
 
     # ---- choose (s,a) with room ----
     candidates_sa = [
-        (s, a) for (s, a) in _list_all_action_pairs(mdp)
+        (s, a)
+        for (s, a) in _list_all_action_pairs(mdp)
         if sum(1 for _sp in _get_outgoing_for_action(mdp, s, a)) < max_out_degree
     ]
     if not candidates_sa:
@@ -221,7 +232,11 @@ def _mutation_add_edge(
     existing = set(_get_outgoing_for_action(mdp, s, a).keys())
 
     # ---- candidate sp set ----
-    sp_candidates = [sp for sp in mdp.states if (allow_self_loops or sp != s) and (sp not in existing)]
+    sp_candidates = [
+        sp
+        for sp in mdp.states
+        if (allow_self_loops or sp != s) and (sp not in existing)
+    ]
     if not sp_candidates:
         return
     if not add_edge_allow_out_of_scope:
@@ -237,7 +252,9 @@ def _mutation_add_edge(
         if dst in dist_cache:
             return dist_cache[dst]
         d = _directed_prob_distance(
-            base_ref, s, dst,
+            base_ref,
+            s,
+            dst,
             max_hops=distance_cfg.get("max_hops", None),
             node_cap=distance_cfg.get("node_cap", None),
             weight_eps=float(distance_cfg.get("weight_eps", 1e-9)),
@@ -248,9 +265,14 @@ def _mutation_add_edge(
 
     # ---- sampling weights over sp ----
     if gamma_sample <= 0.0:
-        weights = np.full(len(sp_candidates), 1.0 / float(len(sp_candidates)), dtype=float)
+        weights = np.full(
+            len(sp_candidates), 1.0 / float(len(sp_candidates)), dtype=float
+        )
     else:
-        raw = np.asarray([math.exp(-gamma_sample * dist_cached(sp)) for sp in sp_candidates], dtype=float)
+        raw = np.asarray(
+            [math.exp(-gamma_sample * dist_cached(sp)) for sp in sp_candidates],
+            dtype=float,
+        )
         total = float(raw.sum())
         if total <= 0.0 or not np.isfinite(total):
             return
@@ -260,7 +282,11 @@ def _mutation_add_edge(
     d_new = dist_cached(sp_new)
 
     # ---- assign probability mass ----
-    p_new = epsilon_new_prob if gamma_prob <= 0.0 else min(epsilon_new_prob, epsilon_new_prob * math.exp(-gamma_prob * d_new))
+    p_new = (
+        epsilon_new_prob
+        if gamma_prob <= 0.0
+        else min(epsilon_new_prob, epsilon_new_prob * math.exp(-gamma_prob * d_new))
+    )
 
     # ---- heuristic reward for new edge: inbound mean fallback ----
     def inbound_reward_mean(sp: int, fallback: float) -> float:
@@ -282,7 +308,9 @@ def _mutation_add_edge(
         out_map[k] = (max(prob_floor, p_k * (1.0 - p_new)), r_k)
     out_map[sp_new] = (max(prob_floor, p_new), r_new)
 
-    _set_outgoing_for_action(mdp, s, a, out_map, whitelist=whitelist, prob_floor=prob_floor)
+    _set_outgoing_for_action(
+        mdp, s, a, out_map, whitelist=whitelist, prob_floor=prob_floor
+    )
 
 
 def _mutation_prob_pairwise(
@@ -317,13 +345,18 @@ def _mutation_prob_pairwise(
 
         # Renormalize by setter (we clamp by prob_floor when rebuilding)
         _set_outgoing_for_action(
-            mdp, s, a, out_map,
+            mdp,
+            s,
+            a,
+            out_map,
             whitelist=whitelist,
             prob_floor=prob_floor,
         )
 
 
-def _mutation_reward_smallstep(mdp: MDPNetwork, rng: np.random.Generator, ops: Dict[str, Any]):
+def _mutation_reward_smallstep(
+    mdp: MDPNetwork, rng: np.random.Generator, ops: Dict[str, Any]
+):
     n_edges = int(ops.get("reward_tweak_edges_per_child", 50))
     k_percent = float(ops.get("reward_k_percent", 0.02))
     ref_floor = float(ops.get("reward_ref_floor", 1e-3))
@@ -367,7 +400,10 @@ def _crossover_action_block(
             if not src_map:
                 continue
             _set_outgoing_for_action(
-                child, s, a, src_map,
+                child,
+                s,
+                a,
+                src_map,
                 whitelist=whitelist,
                 prob_floor=prob_floor,
             )

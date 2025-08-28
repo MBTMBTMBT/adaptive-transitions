@@ -66,7 +66,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
     ) -> None:
         # Exactly one source of config must be provided.
         provided = sum(x is not None for x in (map_name, json_file_path, config))
-        assert provided == 1, "Provide exactly one of: map_name / json_file_path / config."
+        assert (
+            provided == 1
+        ), "Provide exactly one of: map_name / json_file_path / config."
 
         self.txt_file_path = json_file_path  # kept for compatibility/debug
         self.display_mode = display_mode
@@ -96,7 +98,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         layout_size = max(height, width)
         self.display_size = layout_size if display_size is None else display_size
         assert display_mode in ["middle", "random"], "Invalid display_mode"
-        assert self.display_size >= layout_size, "display_size must be >= layout layout_size"
+        assert (
+            self.display_size >= layout_size
+        ), "display_size must be >= layout layout_size"
 
         # ---- Parents ----
         super().__init__(
@@ -117,9 +121,18 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
     # -----------------------------
     # Rendering helpers
     # -----------------------------
-    def get_frame(self, highlight: bool = True, tile_size: int = TILE_PIXELS, agent_pov: bool = False):
+    def get_frame(
+        self,
+        highlight: bool = True,
+        tile_size: int = TILE_PIXELS,
+        agent_pov: bool = False,
+    ):
         frame = super().get_frame(highlight, tile_size, agent_pov)
-        return frame if not self.render_carried_objs else self.render_with_carried_objects(frame)
+        return (
+            frame
+            if not self.render_carried_objs
+            else self.render_with_carried_objects(frame)
+        )
 
     def render_with_carried_objects(self, full_image):
         """
@@ -144,7 +157,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             right_column[sy:ey, :, :] = empty_tile
         remaining_height = full_height % tile_size
         if remaining_height > 0:
-            right_column[num_height_tiles * tile_size:, :, :] = create_empty_tile()[:remaining_height, :, :]
+            right_column[num_height_tiles * tile_size :, :, :] = create_empty_tile()[
+                :remaining_height, :, :
+            ]
         image_with_column = np.hstack([full_image, right_column])
 
         new_width = image_with_column.shape[1]
@@ -156,7 +171,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             bottom_row[:, sx:ex, :] = empty_tile
         remaining_width = new_width % tile_size
         if remaining_width > 0:
-            bottom_row[:, num_width_tiles * tile_size:, :] = create_empty_tile()[:, :remaining_width, :]
+            bottom_row[:, num_width_tiles * tile_size :, :] = create_empty_tile()[
+                :, :remaining_width, :
+            ]
 
         if self.carrying is not None:
             canvas = np.zeros((tile_size, tile_size, 3), dtype=np.float32)
@@ -186,7 +203,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
     def _read_file(self) -> Dict[str, Any]:
         with open(self.txt_file_path, "r") as f:
             config = json.load(f)
-        assert "height_width" in config and "layers" in config, "Invalid layout file structure."
+        assert (
+            "height_width" in config and "layers" in config
+        ), "Invalid layout file structure."
         return config
 
     # -----------------------------
@@ -207,7 +226,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             anchor_x, anchor_y = free_width // 2, free_height // 2
         elif self.display_mode == "random":
             anchor_x = random.choice(range(max(free_width, 1))) if free_width > 0 else 0
-            anchor_y = random.choice(range(max(free_height, 1))) if free_height > 0 else 0
+            anchor_y = (
+                random.choice(range(max(free_height, 1))) if free_height > 0 else 0
+            )
         else:
             raise ValueError("Invalid display mode")
 
@@ -224,11 +245,17 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             obj_type = layer["obj"]
             colour = layer.get("colour", None)
             status = layer.get("status", None)
-            orientation = layer.get("orientation", "random") if obj_type == "agent" else orientation
+            orientation = (
+                layer.get("orientation", "random")
+                if obj_type == "agent"
+                else orientation
+            )
             dist = layer.get("distribution", "all")
             mat = layer["matrix"]
 
-            raw_positions = [(x, y) for y in range(H) for x in range(W) if mat[y][x] == 1]
+            raw_positions = [
+                (x, y) for y in range(H) for x in range(W) if mat[y][x] == 1
+            ]
             candidates = []
             for x, y in raw_positions:
                 xs, ys = anchor_x + x, anchor_y + y
@@ -236,13 +263,19 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
                 xf, yf = flip_coordinate(xr, yr, flip, self.display_size)
                 candidates.append((xf, yf))
 
-            available = candidates if obj_type == "door" else [p for p in candidates if p not in filled]
+            available = (
+                candidates
+                if obj_type == "door"
+                else [p for p in candidates if p not in filled]
+            )
 
             if dist == "all":
                 used = available
             elif dist == "one":
                 if len(available) < 1:
-                    raise ValueError(f"No available positions for layer '{layer.get('name', 'unknown')}'")
+                    raise ValueError(
+                        f"No available positions for layer '{layer.get('name', 'unknown')}'"
+                    )
                 used = [random.choice(available)]
             elif isinstance(dist, float):
                 count = max(1, int(len(available) * dist))
@@ -268,11 +301,21 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         else:
             raise ValueError("No available agent position")
 
-        dir_map = {"right": 0, "down": 1, "left": 2, "up": 3, "random": random.randint(0, 3)}
-        self.agent_dir = flip_direction(rotate_direction(dir_map.get(orientation, 0), image_direction), flip)
+        dir_map = {
+            "right": 0,
+            "down": 1,
+            "left": 2,
+            "up": 3,
+            "random": random.randint(0, 3),
+        }
+        self.agent_dir = flip_direction(
+            rotate_direction(dir_map.get(orientation, 0), image_direction), flip
+        )
         self.carrying = None
 
-    def create_object(self, obj_type: str, color: Optional[str], status: Optional[str]) -> Optional[WorldObj]:
+    def create_object(
+        self, obj_type: str, color: Optional[str], status: Optional[str]
+    ) -> Optional[WorldObj]:
         """
         Factory for world objects.
         """
@@ -314,10 +357,7 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
     # Reset/Step
     # -----------------------------
     def reset(
-            self,
-            *,
-            seed: Optional[int] = None,
-            options: Optional[Dict[str, Any]] = None
+        self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
     ) -> Tuple[ObsType, Dict[str, Any]]:
         """
         If a NetworkX-backed env is provided, delegate start-state sampling to it,
@@ -375,14 +415,18 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         }
         return obs, {}
 
-    def step(self, action: ActType) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
+    def step(
+        self, action: ActType
+    ) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
         """
         If networkx_env is provided, step via its transitions using integer codes.
         """
         if self.networkx_env is not None:
             current_encoded_state = self.encode_state()
             self.networkx_env.current_state = current_encoded_state
-            next_state, reward, terminated, truncated, info = self.networkx_env.step(action)
+            next_state, reward, terminated, truncated, info = self.networkx_env.step(
+                action
+            )
             obs, decode_info = self.decode_state(next_state)
 
             self.step_count += 1
@@ -391,7 +435,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
 
             if self.reward_config.get("sparse", False):
                 self.cumulative_reward += reward
-                returned_reward = self.cumulative_reward if (terminated or truncated) else 0.0
+                returned_reward = (
+                    self.cumulative_reward if (terminated or truncated) else 0.0
+                )
             else:
                 returned_reward = reward
 
@@ -457,7 +503,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
 
         if self.reward_config["sparse"]:
             self.cumulative_reward += reward
-            returned_reward = self.cumulative_reward if (terminated or truncated) else 0.0
+            returned_reward = (
+                self.cumulative_reward if (terminated or truncated) else 0.0
+            )
         else:
             returned_reward = reward
 
@@ -467,11 +515,17 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         obs = self.gen_obs()
         obs["carrying"] = {"carrying": 1, "carrying_colour": 0}
         if self.carrying is not None and self.carrying != 0:
-            obs["carrying"] = {"carrying": OBJECT_TO_IDX[self.carrying.type], "carrying_colour": COLOR_TO_IDX[self.carrying.color]}
+            obs["carrying"] = {
+                "carrying": OBJECT_TO_IDX[self.carrying.type],
+                "carrying_colour": COLOR_TO_IDX[self.carrying.color],
+            }
         obs["overlap"] = {"obj": 0, "colour": 0}
         overlap = self.grid.get(*self.agent_pos)
         if overlap is not None:
-            obs["overlap"] = {"obj": OBJECT_TO_IDX[overlap.type], "colour": COLOR_TO_IDX[overlap.color]}
+            obs["overlap"] = {
+                "obj": OBJECT_TO_IDX[overlap.type],
+                "colour": COLOR_TO_IDX[overlap.color],
+            }
         return obs, returned_reward, terminated, truncated, {}
 
     # -----------------------------
@@ -511,17 +565,21 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             "W": W,
             "H": H,
             "C": C,
-            "CARRIED": C,                 # sentinel index for keys
-            "key_colors": key_colors,     # order fixed
-            "door_colors": door_colors,   # order fixed
-            "has_goal": goal_expected > 0
+            "CARRIED": C,  # sentinel index for keys
+            "key_colors": key_colors,  # order fixed
+            "door_colors": door_colors,  # order fixed
+            "has_goal": goal_expected > 0,
         }
 
     def _assert_fixed_layout_for_decode(self):
         """
         Integer decode requires fixed-layout (middle, no rotate/flip).
         """
-        ok = (self.display_mode == "middle") and (not self.random_rotate) and (not self.random_flip)
+        ok = (
+            (self.display_mode == "middle")
+            and (not self.random_rotate)
+            and (not self.random_flip)
+        )
         if not ok:
             raise RuntimeError(
                 "decode_state(int) requires fixed-layout mode: display_mode='middle', random_rotate=False, random_flip=False."
@@ -606,20 +664,26 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         digits = []
         radices = []
 
-        digits.append(agent_pos);  radices.append(C)
-        digits.append(agent_dir);  radices.append(4)
+        digits.append(agent_pos)
+        radices.append(C)
+        digits.append(agent_dir)
+        radices.append(4)
 
         for kp in key_positions:
-            digits.append(kp);      radices.append(C + 1)
+            digits.append(kp)
+            radices.append(C + 1)
 
         for ds in door_states:
-            digits.append(ds);      radices.append(3)
+            digits.append(ds)
+            radices.append(3)
 
         for dp in door_positions:
-            digits.append(dp);      radices.append(C)
+            digits.append(dp)
+            radices.append(C)
 
         if has_goal:
-            digits.append(goal_pos); radices.append(C)
+            digits.append(goal_pos)
+            radices.append(C)
 
         # mixed radix -> int
         code = 0
@@ -647,16 +711,16 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
 
         # unpack digits
         radices = []
-        radices.append(C)   # agent_pos
-        radices.append(4)   # agent_dir
+        radices.append(C)  # agent_pos
+        radices.append(4)  # agent_dir
         for _ in key_colors:
             radices.append(C + 1)  # key_pos
         for _ in door_colors:
-            radices.append(3)      # door_state
+            radices.append(3)  # door_state
         for _ in door_colors:
-            radices.append(C)      # door_pos
+            radices.append(C)  # door_pos
         if has_goal:
-            radices.append(C)      # goal_pos
+            radices.append(C)  # goal_pos
 
         vals: List[int] = []
         rem = int(encoded_state)
@@ -666,20 +730,25 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         # vals aligned with radices order
 
         idx = 0
-        agent_pos = vals[idx]; idx += 1
-        agent_dir = vals[idx] % 4; idx += 1
+        agent_pos = vals[idx]
+        idx += 1
+        agent_dir = vals[idx] % 4
+        idx += 1
 
         key_positions: List[int] = []
         for _ in key_colors:
-            key_positions.append(vals[idx]); idx += 1
+            key_positions.append(vals[idx])
+            idx += 1
 
         door_states: List[int] = []
         for _ in door_colors:
-            door_states.append(vals[idx]); idx += 1
+            door_states.append(vals[idx])
+            idx += 1
 
         door_positions: List[int] = []
         for _ in door_colors:
-            door_positions.append(vals[idx]); idx += 1
+            door_positions.append(vals[idx])
+            idx += 1
 
         goal_pos = vals[idx] if has_goal else 0
 
@@ -691,8 +760,8 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         # place doors
         for col, st, p in zip(door_colors, door_states, door_positions):
             x, y = self._xy_from_index(p % C, W)
-            is_locked = (st == 2)
-            is_open = (st == 1)
+            is_locked = st == 2
+            is_open = st == 1
             self.grid.set(x, y, Door(col, is_open=is_open, is_locked=is_locked))
 
         # place goal
@@ -704,7 +773,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         carrying = None
         for col, kp in zip(key_colors, key_positions):
             if kp == carried_idx:
-                carrying = Key(col) if carrying is None else carrying  # at most one carried
+                carrying = (
+                    Key(col) if carrying is None else carrying
+                )  # at most one carried
             else:
                 xk, yk = self._xy_from_index(kp % C, W)
                 self.grid.set(xk, yk, Key(col))
@@ -724,11 +795,17 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         obs = self.gen_obs()
         obs["carrying"] = {"carrying": 1, "carrying_colour": 0}
         if self.carrying is not None:
-            obs["carrying"] = {"carrying": OBJECT_TO_IDX[self.carrying.type], "carrying_colour": COLOR_TO_IDX[self.carrying.color]}
+            obs["carrying"] = {
+                "carrying": OBJECT_TO_IDX[self.carrying.type],
+                "carrying_colour": COLOR_TO_IDX[self.carrying.color],
+            }
         obs["overlap"] = {"obj": 0, "colour": 0}
         overlap = self.grid.get(*self.agent_pos)
         if overlap is not None:
-            obs["overlap"] = {"obj": OBJECT_TO_IDX[overlap.type], "colour": COLOR_TO_IDX[overlap.color]}
+            obs["overlap"] = {
+                "obj": OBJECT_TO_IDX[overlap.type],
+                "colour": COLOR_TO_IDX[overlap.color],
+            }
 
         return obs, {}
 
@@ -758,7 +835,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
                 continue  # dynamic skipped here
 
             mat = layer["matrix"]
-            raw_positions = [(x, y) for y in range(H) for x in range(W) if mat[y][x] == 1]
+            raw_positions = [
+                (x, y) for y in range(H) for x in range(W) if mat[y][x] == 1
+            ]
             candidates = [(anchor_x + x, anchor_y + y) for (x, y) in raw_positions]
             if dist == "all":
                 used = [p for p in candidates if p not in filled]
@@ -775,7 +854,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
                 raise ValueError(f"Unknown distribution type: {dist}")
 
             for x, y in used:
-                obj = self.create_object(obj_type, layer.get("colour", None), layer.get("status", None))
+                obj = self.create_object(
+                    obj_type, layer.get("colour", None), layer.get("status", None)
+                )
                 g.set(x, y, obj)
                 if obj_type != "door":
                     filled.add((x, y))
@@ -793,8 +874,8 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
         start_states: List[int] = []
 
         config = self.config
-        H, W = config['height_width']
-        layers = config['layers']
+        H, W = config["height_width"]
+        layers = config["layers"]
 
         rotations = [0, 1, 2, 3] if self.random_rotate else [0]
         flips = [0, 1] if self.random_flip else [0]
@@ -821,7 +902,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             dist = layer.get("distribution", "all")
             mat = layer["matrix"]
 
-            raw_positions = [(x, y) for y in range(H) for x in range(W) if mat[y][x] == 1]
+            raw_positions = [
+                (x, y) for y in range(H) for x in range(W) if mat[y][x] == 1
+            ]
             if not raw_positions:
                 continue
 
@@ -838,7 +921,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
 
             # >>> FIX: treat agent with dist=="all" as "candidate region" -> enumerate one-by-one
             if obj_type == "agent" and dist == "all":
-                position_sets = [[pos] for pos in raw_positions]  # behave like 'one' for enumeration
+                position_sets = [
+                    [pos] for pos in raw_positions
+                ]  # behave like 'one' for enumeration
             elif dist == "all":
                 position_sets = [raw_positions]
             elif dist == "one":
@@ -846,21 +931,28 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             elif isinstance(dist, float):
                 count = max(1, min(len(raw_positions), int(len(raw_positions) * dist)))
                 from itertools import combinations
-                position_sets = [list(combo) for combo in combinations(raw_positions, count)]
+
+                position_sets = [
+                    list(combo) for combo in combinations(raw_positions, count)
+                ]
             else:
                 raise ValueError(f"Unknown distribution type: {dist}")
 
-            layer_possibilities.append({
-                'obj_type': obj_type,
-                'colour': layer.get("colour", None),
-                'status': layer.get("status", None),
-                'position_sets': position_sets
-            })
+            layer_possibilities.append(
+                {
+                    "obj_type": obj_type,
+                    "colour": layer.get("colour", None),
+                    "status": layer.get("status", None),
+                    "position_sets": position_sets,
+                }
+            )
 
         for rotation in rotations:
             for flip in flips:
                 for anchor_x, anchor_y in anchor_positions:
-                    combos = [layer['position_sets'] for layer in layer_possibilities if layer]
+                    combos = [
+                        layer["position_sets"] for layer in layer_possibilities if layer
+                    ]
                     if not combos:
                         continue
 
@@ -870,23 +962,31 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
                             filled = set()
                             agent_positions = []
 
-                            for layer_info, position_set in zip(layer_possibilities, combination):
+                            for layer_info, position_set in zip(
+                                layer_possibilities, combination
+                            ):
                                 if not layer_info or not position_set:
                                     continue
 
-                                obj_type = layer_info['obj_type']
-                                colour = layer_info['colour']
-                                status = layer_info['status']
+                                obj_type = layer_info["obj_type"]
+                                colour = layer_info["colour"]
+                                status = layer_info["status"]
 
                                 transformed = []
                                 for x, y in position_set:
                                     xs, ys = anchor_x + x, anchor_y + y
-                                    xr, yr = rotate_coordinate(xs, ys, rotation, self.display_size)
-                                    xf, yf = flip_coordinate(xr, yr, flip, self.display_size)
+                                    xr, yr = rotate_coordinate(
+                                        xs, ys, rotation, self.display_size
+                                    )
+                                    xf, yf = flip_coordinate(
+                                        xr, yr, flip, self.display_size
+                                    )
                                     transformed.append((xf, yf))
 
                                 if obj_type != "door":
-                                    available = [p for p in transformed if p not in filled]
+                                    available = [
+                                        p for p in transformed if p not in filled
+                                    ]
                                     if len(available) != len(transformed):
                                         break
                                     used = available
@@ -894,7 +994,12 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
                                     used = transformed
 
                                 for x, y in used:
-                                    if x < 0 or x >= self.display_size or y < 0 or y >= self.display_size:
+                                    if (
+                                        x < 0
+                                        or x >= self.display_size
+                                        or y < 0
+                                        or y >= self.display_size
+                                    ):
                                         continue
                                     obj = self.create_object(obj_type, colour, status)
                                     if obj_type == "agent":
@@ -910,16 +1015,20 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
                                 for agent_pos in agent_positions:
                                     for agent_orientation in agent_orientations:
                                         old_grid = self.grid
-                                        old_agent_pos = getattr(self, 'agent_pos', None)
-                                        old_agent_dir = getattr(self, 'agent_dir', None)
-                                        old_carrying = getattr(self, 'carrying', None)
-                                        old_width = getattr(self, 'width', None)
-                                        old_height = getattr(self, 'height', None)
+                                        old_agent_pos = getattr(self, "agent_pos", None)
+                                        old_agent_dir = getattr(self, "agent_dir", None)
+                                        old_carrying = getattr(self, "carrying", None)
+                                        old_width = getattr(self, "width", None)
+                                        old_height = getattr(self, "height", None)
                                         try:
                                             self.grid = temp_grid
                                             self.agent_pos = agent_pos
                                             self.agent_dir = flip_direction(
-                                                rotate_direction(agent_orientation, rotation), flip)
+                                                rotate_direction(
+                                                    agent_orientation, rotation
+                                                ),
+                                                flip,
+                                            )
                                             self.carrying = None
                                             self.width = self.display_size
                                             self.height = self.display_size
@@ -971,7 +1080,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             if not start_states:
                 _ = self.reset()
                 start_states = [self.encode_state()]
-            print(f"[MDP] Start states: {len(start_states)} (show up to 8): {start_states[:8]}")
+            print(
+                f"[MDP] Start states: {len(start_states)} (show up to 8): {start_states[:8]}"
+            )
 
             # Helpers
             def is_terminal_current_grid() -> bool:
@@ -1039,9 +1150,12 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
 
                 if expansions % PROGRESS_EVERY == 0:
                     print(
-                        f"[MDP] Progress: expanded={expansions}, |S|={len(visited)}, queue={len(queue)}, |T|={len(terminal_states)}")
+                        f"[MDP] Progress: expanded={expansions}, |S|={len(visited)}, queue={len(queue)}, |T|={len(terminal_states)}"
+                    )
 
-            print(f"[MDP] BFS done. |S|={len(visited)}, |T|={len(terminal_states)}, |(s,a,s')|={triples_recorded}")
+            print(
+                f"[MDP] BFS done. |S|={len(visited)}, |T|={len(terminal_states)}, |(s,a,s')|={triples_recorded}"
+            )
 
             # --- Tags ---
             tags: Dict[str, List[int]] = {}
@@ -1052,7 +1166,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
             key_colors = self._int_spec["key_colors"]
             door_colors = self._int_spec["door_colors"]
             has_goal = self._int_spec["has_goal"]
-            print(f"[MDP] Tagging: keys={list(key_colors)}, doors={list(door_colors)}, goal={has_goal}")
+            print(
+                f"[MDP] Tagging: keys={list(key_colors)}, doors={list(door_colors)}, goal={has_goal}"
+            )
 
             # Start/terminal tags
             for s in start_states:
@@ -1072,7 +1188,9 @@ class CustomMiniGridEnv(MiniGridEnv, CustomisableEnvAbs):
                     tag_add("agent_on_lava", s)
 
                 # keys by color
-                carried_color = self.carrying.color if isinstance(self.carrying, Key) else None
+                carried_color = (
+                    self.carrying.color if isinstance(self.carrying, Key) else None
+                )
                 for c in key_colors:
                     if carried_color == c:
                         tag_add(f"key_{c}_carried", s)
@@ -1186,6 +1304,7 @@ def flip_direction(direction, flip_mode):
 # -----------------------------
 
 _DIR_GLYPHS = {0: "→", 1: "↓", 2: "←", 3: "↑"}
+
 
 def _px_to_pt(px: float, dpi: int) -> float:
     return float(px) * 72.0 / float(dpi)
@@ -1306,7 +1425,9 @@ def _layout_spec(env: MiniGridEnv) -> Dict[str, Union[int, List[str], Dict[str, 
                     break
 
     return {
-        "W": W, "H": H, "C": C,
+        "W": W,
+        "H": H,
+        "C": C,
         "key_colors": key_colors,
         "door_colors": door_colors,
         "has_goal": has_goal,
@@ -1324,7 +1445,7 @@ def _encode_state_minigrid(
     agent_dir: int,
     carrying_color: Optional[str],
     focus_door_color: str,
-    focus_door_state: int,              # 0=closed,1=open,2=locked
+    focus_door_state: int,  # 0=closed,1=open,2=locked
 ) -> int:
     """
     Assemble the mixed-radix integer code consistent with CustomMiniGridEnv.encode_state.
@@ -1336,7 +1457,7 @@ def _encode_state_minigrid(
     key_colors: List[str] = list(spec["key_colors"])  # ordered
     door_colors: List[str] = list(spec["door_colors"])
     has_goal: bool = bool(spec["has_goal"])
-    key_pos_idx: Dict[str, int] = dict(spec["key_pos_idx"])      # may contain CARRIED
+    key_pos_idx: Dict[str, int] = dict(spec["key_pos_idx"])  # may contain CARRIED
     door_pos_idx: Dict[str, int] = dict(spec["door_pos_idx"])
     door_state_curr: Dict[str, int] = dict(spec["door_state_curr"])
     goal_idx = int(spec["goal_idx"])
@@ -1354,8 +1475,10 @@ def _encode_state_minigrid(
     radices: List[int] = []
 
     # agent pos + dir
-    digits.append(int(agent_xy_idx));  radices.append(C)
-    digits.append(int(agent_dir) % 4); radices.append(4)
+    digits.append(int(agent_xy_idx))
+    radices.append(C)
+    digits.append(int(agent_dir) % 4)
+    radices.append(4)
 
     # keys
     for col in key_colors:
@@ -1374,7 +1497,8 @@ def _encode_state_minigrid(
 
     # goal pos (if any)
     if has_goal:
-        digits.append(int(goal_idx)); radices.append(C)
+        digits.append(int(goal_idx))
+        radices.append(C)
 
     # pack mixed radix
     code = 0
@@ -1409,7 +1533,7 @@ def _render_minigrid_bg_image(
     key_color: str,
     agent_dir: int,
     carrying_flag: bool,
-    door_state: int,   # 0=closed,1=open,2=locked
+    door_state: int,  # 0=closed,1=open,2=locked
 ) -> np.ndarray:
     """
     Render one rgb background for a facet, consistent with the slice constraints.
@@ -1438,7 +1562,9 @@ def _render_minigrid_bg_image(
         env.render_mode = prev_mode
 
     if img is None:
-        raise RuntimeError("MiniGrid rgb_array render returned None (no fallback by design).")
+        raise RuntimeError(
+            "MiniGrid rgb_array render returned None (no fallback by design)."
+        )
     return img
 
 
@@ -1475,17 +1601,25 @@ def _cell_center_px(col: int, row: int, tile: float) -> Tuple[float, float]:
     """
     Pixel center for a grid cell (origin at top-left, y downward).
     """
-    return ( (col + 0.5) * tile, (row + 0.5) * tile )
+    return ((col + 0.5) * tile, (row + 0.5) * tile)
 
 
-def _draw_compass_badge(ax, x: float, y: float, new_dir: int, font_pt: float, alpha: float = 0.85):
+def _draw_compass_badge(
+    ax, x: float, y: float, new_dir: int, font_pt: float, alpha: float = 0.85
+):
     """
     Small compass glyph next to a self-loop to denote an out-of-slice orientation change.
     """
     ax.text(
-        x, y, _DIR_GLYPHS.get(int(new_dir), "?"),
-        ha="center", va="center", fontsize=font_pt,
-        bbox=dict(facecolor="white", alpha=0.85, edgecolor="none", boxstyle="round,pad=0.12"),
+        x,
+        y,
+        _DIR_GLYPHS.get(int(new_dir), "?"),
+        ha="center",
+        va="center",
+        fontsize=font_pt,
+        bbox=dict(
+            facecolor="white", alpha=0.85, edgecolor="none", boxstyle="round,pad=0.12"
+        ),
         zorder=6,
     )
 
@@ -1493,7 +1627,7 @@ def _draw_compass_badge(ax, x: float, y: float, new_dir: int, font_pt: float, al
 def _figure_spec_for_facets(
     env: MiniGridEnv,
     dpi: int,
-    tiles_px_on_canvas: int = 96,     # how many screen pixels per tile in the final figure
+    tiles_px_on_canvas: int = 96,  # how many screen pixels per tile in the final figure
     ncols: int = 3,
     nrows: int = 2,
 ) -> Tuple[Tuple[float, float], float]:
@@ -1501,15 +1635,17 @@ def _figure_spec_for_facets(
     Decide the *final* figure size from a desired on-canvas pixels-per-tile densitiy.
     Returns ((fig_w_in, fig_h_in), tile_px_display), where tile_px_display equals tiles_px_on_canvas.
     """
-    facet_w_px = (env.width + 1) * tiles_px_on_canvas   # +1 because your bg多一列/一行
+    facet_w_px = (env.width + 1) * tiles_px_on_canvas  # +1 because your bg多一列/一行
     facet_h_px = (env.height + 1) * tiles_px_on_canvas
     fig_w_in = ncols * facet_w_px / dpi
     fig_h_in = nrows * facet_h_px / dpi
     return (fig_w_in, fig_h_in), float(tiles_px_on_canvas)
 
+
 # -----------------------------
 # Transition overlays (paged 2×3 facets)
 # -----------------------------
+
 
 def plot_minigrid_transition_overlays(
     env: MiniGridEnv,
@@ -1540,14 +1676,20 @@ def plot_minigrid_transition_overlays(
 
     # default paging from current env
     spec = _layout_spec(env)
-    all_door_colors = door_colors if door_colors is not None else list(spec["door_colors"])
-    all_key_colors  = key_colors  if key_colors  is not None else list(spec["key_colors"])
+    all_door_colors = (
+        door_colors if door_colors is not None else list(spec["door_colors"])
+    )
+    all_key_colors = key_colors if key_colors is not None else list(spec["key_colors"])
     if not all_key_colors:
         all_key_colors = ["red"]
     all_agent_dirs = agent_dirs if agent_dirs is not None else [0, 1, 2, 3]
 
     # action ids (ignore uni_toggle)
-    A_LEFT, A_RIGHT, A_FORWARD = int(env.actions.left), int(env.actions.right), int(env.actions.forward)
+    A_LEFT, A_RIGHT, A_FORWARD = (
+        int(env.actions.left),
+        int(env.actions.right),
+        int(env.actions.forward),
+    )
     actions = [(A_LEFT, "LEFT"), (A_RIGHT, "RIGHT"), (A_FORWARD, "FORWARD")]
 
     out_files: List[str] = []
@@ -1569,31 +1711,48 @@ def plot_minigrid_transition_overlays(
                 for r_carry in (0, 1):
                     for c_state in (0, 1, 2):
                         facet_bgs[(r_carry, c_state)] = _render_minigrid_bg_image(
-                            env, door_color=dcol, key_color=kcol, agent_dir=ddir,
-                            carrying_flag=bool(r_carry), door_state=c_state
+                            env,
+                            door_color=dcol,
+                            key_color=kcol,
+                            agent_dir=ddir,
+                            carrying_flag=bool(r_carry),
+                            door_state=c_state,
                         )
 
                 # Geometry from sample bg (positions/extents in *image-pixel* units)
                 sample_bg = facet_bgs[(0, 0)]
                 geom = _geometry_from_bg(env, sample_bg)
-                tile_img = float(geom["tile"])     # tile size in the *background image*
+                tile_img = float(geom["tile"])  # tile size in the *background image*
                 W_bg, H_bg = float(geom["W_bg"]), float(geom["H_bg"])
                 W_in, H_in = float(geom["W_in"]), float(geom["H_in"])
 
                 # Figure size from desired on-canvas density
                 (fig_w_in, fig_h_in), tile_px_disp = _figure_spec_for_facets(
-                    env, dpi=dpi, tiles_px_on_canvas=tiles_px_on_canvas, ncols=3, nrows=2
+                    env,
+                    dpi=dpi,
+                    tiles_px_on_canvas=tiles_px_on_canvas,
+                    ncols=3,
+                    nrows=2,
                 )
 
                 # Typography and arrow sizing scale with *on-canvas* tile pixels
                 cell_px = float(tile_px_disp)
-                ARROW_LW_PT   = max(0.6, _px_to_pt(arrow_scale * cell_px, dpi))
+                ARROW_LW_PT = max(0.6, _px_to_pt(arrow_scale * cell_px, dpi))
                 mutation_scale = _px_to_pt(0.42 * cell_px, dpi)
-                shrink_pt      = _px_to_pt(0.16 * cell_px, dpi)
-                font_pt        = _px_to_pt(font_scale * cell_px, dpi)
-                title_pt       = max(7.0, _px_to_pt(0.13 * cell_px, dpi))
-                text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.12")
-                text_effects = [pe.withStroke(linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.30)]
+                shrink_pt = _px_to_pt(0.16 * cell_px, dpi)
+                font_pt = _px_to_pt(font_scale * cell_px, dpi)
+                title_pt = max(7.0, _px_to_pt(0.13 * cell_px, dpi))
+                text_bbox = dict(
+                    facecolor="white",
+                    alpha=0.55,
+                    edgecolor="none",
+                    boxstyle="round,pad=0.12",
+                )
+                text_effects = [
+                    pe.withStroke(
+                        linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.30
+                    )
+                ]
 
                 def inner_extent():
                     return [0.0, W_in, H_in, 0.0]
@@ -1601,35 +1760,66 @@ def plot_minigrid_transition_overlays(
                 # Arrow helper (data coords are in *image pixels*, lengths use tile_img)
                 def draw_self_loop(ax, x, y, color):
                     radius = 0.38 * tile_img
-                    arc = Arc((x + 0.28 * radius, y - 0.28 * radius),
-                              width=radius, height=radius,
-                              angle=0, theta1=30, theta2=320,
-                              linewidth=ARROW_LW_PT, color=color, alpha=alpha, zorder=4)
+                    arc = Arc(
+                        (x + 0.28 * radius, y - 0.28 * radius),
+                        width=radius,
+                        height=radius,
+                        angle=0,
+                        theta1=30,
+                        theta2=320,
+                        linewidth=ARROW_LW_PT,
+                        color=color,
+                        alpha=alpha,
+                        zorder=4,
+                    )
                     ax.add_patch(arc)
                     arr = FancyArrowPatch(
                         (x + 0.68 * radius, y - 0.45 * radius),
                         (x + 0.52 * radius, y - 0.35 * radius),
-                        arrowstyle="->", mutation_scale=mutation_scale,
-                        linewidth=ARROW_LW_PT, facecolor=color, edgecolor=color,
-                        alpha=alpha, zorder=5, shrinkA=0.0, shrinkB=0.0
+                        arrowstyle="->",
+                        mutation_scale=mutation_scale,
+                        linewidth=ARROW_LW_PT,
+                        facecolor=color,
+                        edgecolor=color,
+                        alpha=alpha,
+                        zorder=5,
+                        shrinkA=0.0,
+                        shrinkB=0.0,
                     )
                     ax.add_patch(arr)
 
                 for a_id, a_name in actions:
-                    fig, axs = plt.subplots(2, 3, figsize=(fig_w_in, fig_h_in), dpi=dpi, layout="constrained")
-                    axes = [axs[0, 0], axs[0, 1], axs[0, 2], axs[1, 0], axs[1, 1], axs[1, 2]]
+                    fig, axs = plt.subplots(
+                        2,
+                        3,
+                        figsize=(fig_w_in, fig_h_in),
+                        dpi=dpi,
+                        layout="constrained",
+                    )
+                    axes = [
+                        axs[0, 0],
+                        axs[0, 1],
+                        axs[0, 2],
+                        axs[1, 0],
+                        axs[1, 1],
+                        axs[1, 2],
+                    ]
                     facet_list = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
 
                     for ax, (r_carry, c_state) in zip(axes, facet_list):
                         bg = facet_bgs[(r_carry, c_state)]
-                        ax.imshow(bg, origin="upper", extent=[0, W_bg, H_bg, 0], zorder=0)
-                        ax.set_xlim(0, W_bg); ax.set_ylim(H_bg, 0)
-                        ax.set_xticks([]); ax.set_yticks([])
-                        ax.set_aspect('equal', adjustable='box')
+                        ax.imshow(
+                            bg, origin="upper", extent=[0, W_bg, H_bg, 0], zorder=0
+                        )
+                        ax.set_xlim(0, W_bg)
+                        ax.set_ylim(H_bg, 0)
+                        ax.set_xticks([])
+                        ax.set_yticks([])
+                        ax.set_aspect("equal", adjustable="box")
                         ax.set_title(
                             f"{a_name} · Door={dcol}({['closed','open','locked'][c_state]}) · "
                             f"Carry={'None' if r_carry==0 else kcol} · Dir={_DIR_GLYPHS.get(ddir,'?')}",
-                            fontsize=title_pt
+                            fontsize=title_pt,
                         )
 
                         # For each walkable cell, compute representative state
@@ -1644,14 +1834,18 @@ def plot_minigrid_transition_overlays(
                                     agent_dir=int(ddir),
                                     carrying_color=(kcol if r_carry == 1 else None),
                                     focus_door_color=dcol,
-                                    focus_door_state=c_state
+                                    focus_door_state=c_state,
                                 )
 
                                 # Transition probs
                                 probs: Dict[int, float] = {}
-                                if mdp is not None and hasattr(mdp, "get_transition_probabilities"):
+                                if mdp is not None and hasattr(
+                                    mdp, "get_transition_probabilities"
+                                ):
                                     try:
-                                        probs = mdp.get_transition_probabilities(int(s_rep), int(a_id))
+                                        probs = mdp.get_transition_probabilities(
+                                            int(s_rep), int(a_id)
+                                        )
                                     except Exception:
                                         probs = {}
                                 if not probs:
@@ -1683,11 +1877,26 @@ def plot_minigrid_transition_overlays(
                                         # orientation change → keep arrow within this facet
                                         draw_self_loop(ax, x0, y0, color)
                                         if annotate:
-                                            _draw_compass_badge(ax, x0, y0 - 0.40 * tile_img, ndir, font_pt, alpha=0.9)
-                                            ax.text(x0, y0 + 0.36 * tile_img, f"{p:.2f}",
-                                                    ha="center", va="center", fontsize=font_pt,
-                                                    bbox=text_bbox, alpha=alpha, zorder=6,
-                                                    path_effects=text_effects)
+                                            _draw_compass_badge(
+                                                ax,
+                                                x0,
+                                                y0 - 0.40 * tile_img,
+                                                ndir,
+                                                font_pt,
+                                                alpha=0.9,
+                                            )
+                                            ax.text(
+                                                x0,
+                                                y0 + 0.36 * tile_img,
+                                                f"{p:.2f}",
+                                                ha="center",
+                                                va="center",
+                                                fontsize=font_pt,
+                                                bbox=text_bbox,
+                                                alpha=alpha,
+                                                zorder=6,
+                                                path_effects=text_effects,
+                                            )
                                         continue
 
                                     # FORWARD
@@ -1695,30 +1904,55 @@ def plot_minigrid_transition_overlays(
                                     if (nx == cx) and (ny == ry):
                                         draw_self_loop(ax, x0, y0, color)
                                         if annotate:
-                                            ax.text(x0, y0 - 0.33 * tile_img, f"{p:.2f}",
-                                                    ha="center", va="center", fontsize=font_pt,
-                                                    bbox=text_bbox, alpha=alpha, zorder=6,
-                                                    path_effects=text_effects)
+                                            ax.text(
+                                                x0,
+                                                y0 - 0.33 * tile_img,
+                                                f"{p:.2f}",
+                                                ha="center",
+                                                va="center",
+                                                fontsize=font_pt,
+                                                bbox=text_bbox,
+                                                alpha=alpha,
+                                                zorder=6,
+                                                path_effects=text_effects,
+                                            )
                                         continue
 
                                     arr = FancyArrowPatch(
-                                        (x0, y0), (x1, y1),
-                                        arrowstyle="->", mutation_scale=mutation_scale,
-                                        linewidth=ARROW_LW_PT, facecolor=color, edgecolor=color,
-                                        alpha=alpha, zorder=5,
-                                        shrinkA=_px_to_pt(0.16 * cell_px, dpi), shrinkB=_px_to_pt(0.16 * cell_px, dpi)
+                                        (x0, y0),
+                                        (x1, y1),
+                                        arrowstyle="->",
+                                        mutation_scale=mutation_scale,
+                                        linewidth=ARROW_LW_PT,
+                                        facecolor=color,
+                                        edgecolor=color,
+                                        alpha=alpha,
+                                        zorder=5,
+                                        shrinkA=_px_to_pt(0.16 * cell_px, dpi),
+                                        shrinkB=_px_to_pt(0.16 * cell_px, dpi),
                                     )
                                     ax.add_patch(arr)
                                     if annotate:
                                         mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-                                        ax.text(mx, my, f"{p:.2f}",
-                                                ha="center", va="center", fontsize=font_pt,
-                                                bbox=text_bbox, alpha=alpha, zorder=6,
-                                                path_effects=text_effects)
+                                        ax.text(
+                                            mx,
+                                            my,
+                                            f"{p:.2f}",
+                                            ha="center",
+                                            va="center",
+                                            fontsize=font_pt,
+                                            bbox=text_bbox,
+                                            alpha=alpha,
+                                            zorder=6,
+                                            path_effects=text_effects,
+                                        )
 
-                    sm = cm.ScalarMappable(cmap=cmap, norm=prob_norm); sm.set_array([])
+                    sm = cm.ScalarMappable(cmap=cmap, norm=prob_norm)
+                    sm.set_array([])
                     cbar = fig.colorbar(sm, ax=axes, fraction=0.035, pad=0.01)
-                    cbar.set_label("Transition probability", fontsize=max(7, int(title_pt * 0.6)))
+                    cbar.set_label(
+                        "Transition probability", fontsize=max(7, int(title_pt * 0.6))
+                    )
                     cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
 
                     fname = f"{filename_prefix}__door-{dcol}__key-{kcol}__dir-{ddir}__act-{a_name.lower()}.png"
@@ -1733,6 +1967,7 @@ def plot_minigrid_transition_overlays(
 # -----------------------------
 # Scalar overlay (paged 2×3 facets)
 # -----------------------------
+
 
 def plot_minigrid_scalar_overlay(
     env: MiniGridEnv,
@@ -1771,9 +2006,13 @@ def plot_minigrid_scalar_overlay(
     out_files: List[str] = []
 
     spec0 = _layout_spec(env)
-    all_door_colors = door_colors if door_colors is not None else list(spec0["door_colors"])
-    all_key_colors  = key_colors  if key_colors  is not None else list(spec0["key_colors"]) or ["red"]
-    all_agent_dirs  = agent_dirs if agent_dirs is not None else [0, 1, 2, 3]
+    all_door_colors = (
+        door_colors if door_colors is not None else list(spec0["door_colors"])
+    )
+    all_key_colors = (
+        key_colors if key_colors is not None else list(spec0["key_colors"]) or ["red"]
+    )
+    all_agent_dirs = agent_dirs if agent_dirs is not None else [0, 1, 2, 3]
 
     cmap = cm.get_cmap(cmap_name)
 
@@ -1781,15 +2020,19 @@ def plot_minigrid_scalar_overlay(
         for kcol in all_key_colors:
             for ddir in all_agent_dirs:
 
-                facet_grids: Dict[Tuple[int,int], np.ndarray] = {}
+                facet_grids: Dict[Tuple[int, int], np.ndarray] = {}
                 data_min, data_max = +np.inf, -np.inf
-                facet_bgs: Dict[Tuple[int,int], np.ndarray] = {}
+                facet_bgs: Dict[Tuple[int, int], np.ndarray] = {}
 
                 for r_carry in (0, 1):
                     for c_state in (0, 1, 2):
                         bg = _render_minigrid_bg_image(
-                            env, door_color=dcol, key_color=kcol,
-                            agent_dir=ddir, carrying_flag=bool(r_carry), door_state=c_state
+                            env,
+                            door_color=dcol,
+                            key_color=kcol,
+                            agent_dir=ddir,
+                            carrying_flag=bool(r_carry),
+                            door_state=c_state,
                         )
                         facet_bgs[(r_carry, c_state)] = bg
 
@@ -1804,7 +2047,7 @@ def plot_minigrid_scalar_overlay(
                                     agent_dir=int(ddir),
                                     carrying_color=(kcol if r_carry == 1 else None),
                                     focus_door_color=dcol,
-                                    focus_door_state=c_state
+                                    focus_door_state=c_state,
                                 )
                                 G[ry, cx] = get_val(value_map, int(s_code))
                         facet_grids[(r_carry, c_state)] = G
@@ -1812,11 +2055,14 @@ def plot_minigrid_scalar_overlay(
                             data_min = min(data_min, float(np.nanmin(G)))
                             data_max = max(data_max, float(np.nanmax(G)))
 
-                if not np.isfinite(data_min): data_min = 0.0
-                if not np.isfinite(data_max): data_max = 1.0
+                if not np.isfinite(data_min):
+                    data_min = 0.0
+                if not np.isfinite(data_max):
+                    data_max = 1.0
                 _vmin = data_min if vmin is None else float(vmin)
                 _vmax = data_max if vmax is None else float(vmax)
-                if _vmax <= _vmin: _vmax = _vmin + 1e-9
+                if _vmax <= _vmin:
+                    _vmax = _vmin + 1e-9
                 norm = mcolors.PowerNorm(gamma=gamma, vmin=_vmin, vmax=_vmax)
 
                 # Geometry
@@ -1828,18 +2074,31 @@ def plot_minigrid_scalar_overlay(
 
                 # Figure size + typography
                 (fig_w_in, fig_h_in), tile_px_disp = _figure_spec_for_facets(
-                    env, dpi=dpi, tiles_px_on_canvas=tiles_px_on_canvas, ncols=3, nrows=2
+                    env,
+                    dpi=dpi,
+                    tiles_px_on_canvas=tiles_px_on_canvas,
+                    ncols=3,
+                    nrows=2,
                 )
                 cell_px = float(tile_px_disp)
-                font_pt  = _px_to_pt(font_scale * cell_px, dpi)
+                font_pt = _px_to_pt(font_scale * cell_px, dpi)
                 title_pt = max(7.0, _px_to_pt(0.13 * cell_px, dpi))
-                text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.12")
-                text_effects = [pe.withStroke(linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.3)]
+                text_bbox = dict(
+                    facecolor="white",
+                    alpha=0.55,
+                    edgecolor="none",
+                    boxstyle="round,pad=0.12",
+                )
+                text_effects = [
+                    pe.withStroke(
+                        linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.3
+                    )
+                ]
 
                 def fmt_val(v: float) -> str:
                     if value_format is not None:
                         return format(v, value_format)
-                    return (f"{v:.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:.2f}")
+                    return f"{v:.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:.2f}"
 
                 def inner_extent():
                     return [0.0, W_in, H_in, 0.0]
@@ -1847,25 +2106,44 @@ def plot_minigrid_scalar_overlay(
                 def cell_center(c: int, r: int) -> Tuple[float, float]:
                     return _cell_center_px(c, r, tile_img)
 
-                fig, axs = plt.subplots(2, 3, figsize=(fig_w_in, fig_h_in), dpi=dpi, layout="constrained")
-                axes = [axs[0,0], axs[0,1], axs[0,2], axs[1,0], axs[1,1], axs[1,2]]
-                facet_list = [(0,0),(0,1),(0,2),(1,0),(1,1),(1,2)]
+                fig, axs = plt.subplots(
+                    2, 3, figsize=(fig_w_in, fig_h_in), dpi=dpi, layout="constrained"
+                )
+                axes = [
+                    axs[0, 0],
+                    axs[0, 1],
+                    axs[0, 2],
+                    axs[1, 0],
+                    axs[1, 1],
+                    axs[1, 2],
+                ]
+                facet_list = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
 
                 for ax, (r_carry, c_state) in zip(axes, facet_list):
                     bg = facet_bgs[(r_carry, c_state)]
                     ax.imshow(bg, origin="upper", extent=[0, W_bg, H_bg, 0], zorder=0)
-                    ax.set_xlim(0, W_bg); ax.set_ylim(H_bg, 0)
-                    ax.set_xticks([]); ax.set_yticks([])
-                    ax.set_aspect('equal', adjustable='box')
+                    ax.set_xlim(0, W_bg)
+                    ax.set_ylim(H_bg, 0)
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    ax.set_aspect("equal", adjustable="box")
                     ax.set_title(
                         f"{title} · Door={dcol}({['closed','open','locked'][c_state]}) · "
                         f"Carry={'None' if r_carry==0 else kcol} · Dir={_DIR_GLYPHS.get(ddir,'?')}",
-                        fontsize=title_pt
+                        fontsize=title_pt,
                     )
 
                     G = facet_grids[(r_carry, c_state)]
-                    ax.imshow(G, origin="upper", cmap=cmap, norm=norm,
-                              extent=inner_extent(), alpha=alpha, zorder=1, interpolation="nearest")
+                    ax.imshow(
+                        G,
+                        origin="upper",
+                        cmap=cmap,
+                        norm=norm,
+                        extent=inner_extent(),
+                        alpha=alpha,
+                        zorder=1,
+                        interpolation="nearest",
+                    )
 
                     if annotate:
                         for r in range(env.height):
@@ -1874,10 +2152,21 @@ def plot_minigrid_scalar_overlay(
                                 if not np.isfinite(v) or (abs(v) < min_abs_label):
                                     continue
                                 x, y = cell_center(c, r)
-                                ax.text(x, y, fmt_val(v), ha="center", va="center", fontsize=font_pt,
-                                        bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects)
+                                ax.text(
+                                    x,
+                                    y,
+                                    fmt_val(v),
+                                    ha="center",
+                                    va="center",
+                                    fontsize=font_pt,
+                                    bbox=text_bbox,
+                                    alpha=0.95,
+                                    zorder=2,
+                                    path_effects=text_effects,
+                                )
 
-                sm = cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
+                sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+                sm.set_array([])
                 cbar = fig.colorbar(sm, ax=axes, fraction=0.035, pad=0.01)
                 cbar.set_label(cbar_label, fontsize=max(7, int(title_pt * 0.6)))
                 cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
@@ -1894,6 +2183,7 @@ def plot_minigrid_scalar_overlay(
 # -----------------------------
 # Scalar *difference* overlay (paged 2×3 facets)
 # -----------------------------
+
 
 def plot_minigrid_scalar_diff_overlay(
     env: MiniGridEnv,
@@ -1932,9 +2222,13 @@ def plot_minigrid_scalar_diff_overlay(
     out_files: List[str] = []
 
     spec0 = _layout_spec(env)
-    all_door_colors = door_colors if door_colors is not None else list(spec0["door_colors"])
-    all_key_colors  = key_colors  if key_colors  is not None else list(spec0["key_colors"]) or ["red"]
-    all_agent_dirs  = agent_dirs if agent_dirs is not None else [0, 1, 2, 3]
+    all_door_colors = (
+        door_colors if door_colors is not None else list(spec0["door_colors"])
+    )
+    all_key_colors = (
+        key_colors if key_colors is not None else list(spec0["key_colors"]) or ["red"]
+    )
+    all_agent_dirs = agent_dirs if agent_dirs is not None else [0, 1, 2, 3]
 
     cmap = cm.get_cmap(cmap_name)
 
@@ -1942,15 +2236,19 @@ def plot_minigrid_scalar_diff_overlay(
         for kcol in all_key_colors:
             for ddir in all_agent_dirs:
 
-                facet_grids: Dict[Tuple[int,int], np.ndarray] = {}
+                facet_grids: Dict[Tuple[int, int], np.ndarray] = {}
                 max_abs = 0.0
-                facet_bgs: Dict[Tuple[int,int], np.ndarray] = {}
+                facet_bgs: Dict[Tuple[int, int], np.ndarray] = {}
 
                 for r_carry in (0, 1):
                     for c_state in (0, 1, 2):
                         bg = _render_minigrid_bg_image(
-                            env, door_color=dcol, key_color=kcol,
-                            agent_dir=ddir, carrying_flag=bool(r_carry), door_state=c_state
+                            env,
+                            door_color=dcol,
+                            key_color=kcol,
+                            agent_dir=ddir,
+                            carrying_flag=bool(r_carry),
+                            door_state=c_state,
                         )
                         facet_bgs[(r_carry, c_state)] = bg
 
@@ -1965,9 +2263,11 @@ def plot_minigrid_scalar_diff_overlay(
                                     agent_dir=int(ddir),
                                     carrying_color=(kcol if r_carry == 1 else None),
                                     focus_door_color=dcol,
-                                    focus_door_state=c_state
+                                    focus_door_state=c_state,
                                 )
-                                dv = get_val(values_a, int(s_code)) - get_val(values_b, int(s_code))
+                                dv = get_val(values_a, int(s_code)) - get_val(
+                                    values_b, int(s_code)
+                                )
                                 G[ry, cx] = dv
                         facet_grids[(r_carry, c_state)] = G
                         if np.isfinite(G).any():
@@ -1998,18 +2298,31 @@ def plot_minigrid_scalar_diff_overlay(
 
                 # Figure size + typography
                 (fig_w_in, fig_h_in), tile_px_disp = _figure_spec_for_facets(
-                    env, dpi=dpi, tiles_px_on_canvas=tiles_px_on_canvas, ncols=3, nrows=2
+                    env,
+                    dpi=dpi,
+                    tiles_px_on_canvas=tiles_px_on_canvas,
+                    ncols=3,
+                    nrows=2,
                 )
                 cell_px = float(tile_px_disp)
-                font_pt  = _px_to_pt(font_scale * cell_px, dpi)
+                font_pt = _px_to_pt(font_scale * cell_px, dpi)
                 title_pt = max(7.0, _px_to_pt(0.13 * cell_px, dpi))
-                text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.12")
-                text_effects = [pe.withStroke(linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.3)]
+                text_bbox = dict(
+                    facecolor="white",
+                    alpha=0.55,
+                    edgecolor="none",
+                    boxstyle="round,pad=0.12",
+                )
+                text_effects = [
+                    pe.withStroke(
+                        linewidth=_px_to_pt(0.8, dpi), foreground="black", alpha=0.3
+                    )
+                ]
 
                 def fmt_val(v: float) -> str:
                     if value_format is not None:
                         return format(v, value_format)
-                    return (f"{v:+.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:+.2f}")
+                    return f"{v:+.2e}" if abs(v) < 0.01 and v != 0.0 else f"{v:+.2f}"
 
                 def inner_extent():
                     return [0.0, W_in, H_in, 0.0]
@@ -2017,25 +2330,44 @@ def plot_minigrid_scalar_diff_overlay(
                 def cell_center(c: int, r: int) -> Tuple[float, float]:
                     return _cell_center_px(c, r, tile_img)
 
-                fig, axs = plt.subplots(2, 3, figsize=(fig_w_in, fig_h_in), dpi=dpi, layout="constrained")
-                axes = [axs[0,0], axs[0,1], axs[0,2], axs[1,0], axs[1,1], axs[1,2]]
-                facet_list = [(0,0),(0,1),(0,2),(1,0),(1,1),(1,2)]
+                fig, axs = plt.subplots(
+                    2, 3, figsize=(fig_w_in, fig_h_in), dpi=dpi, layout="constrained"
+                )
+                axes = [
+                    axs[0, 0],
+                    axs[0, 1],
+                    axs[0, 2],
+                    axs[1, 0],
+                    axs[1, 1],
+                    axs[1, 2],
+                ]
+                facet_list = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
 
                 for ax, (r_carry, c_state) in zip(axes, facet_list):
                     bg = facet_bgs[(r_carry, c_state)]
                     ax.imshow(bg, origin="upper", extent=[0, W_bg, H_bg, 0], zorder=0)
-                    ax.set_xlim(0, W_bg); ax.set_ylim(H_bg, 0)
-                    ax.set_xticks([]); ax.set_yticks([])
-                    ax.set_aspect('equal', adjustable='box')
+                    ax.set_xlim(0, W_bg)
+                    ax.set_ylim(H_bg, 0)
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    ax.set_aspect("equal", adjustable="box")
                     ax.set_title(
                         f"{title} · Door={dcol}({['closed','open','locked'][c_state]}) · "
                         f"Carry={'None' if r_carry==0 else kcol} · Dir={_DIR_GLYPHS.get(ddir,'?')}",
-                        fontsize=title_pt
+                        fontsize=title_pt,
                     )
 
                     G = facet_grids[(r_carry, c_state)]
-                    ax.imshow(G, origin="upper", cmap=cmap, norm=norm,
-                              extent=inner_extent(), alpha=alpha, zorder=1, interpolation="nearest")
+                    ax.imshow(
+                        G,
+                        origin="upper",
+                        cmap=cmap,
+                        norm=norm,
+                        extent=inner_extent(),
+                        alpha=alpha,
+                        zorder=1,
+                        interpolation="nearest",
+                    )
 
                     if annotate:
                         for r in range(env.height):
@@ -2044,10 +2376,21 @@ def plot_minigrid_scalar_diff_overlay(
                                 if not np.isfinite(v) or (abs(v) < min_abs_label):
                                     continue
                                 x, y = cell_center(c, r)
-                                ax.text(x, y, fmt_val(v), ha="center", va="center", fontsize=font_pt,
-                                        bbox=text_bbox, alpha=0.95, zorder=2, path_effects=text_effects)
+                                ax.text(
+                                    x,
+                                    y,
+                                    fmt_val(v),
+                                    ha="center",
+                                    va="center",
+                                    fontsize=font_pt,
+                                    bbox=text_bbox,
+                                    alpha=0.95,
+                                    zorder=2,
+                                    path_effects=text_effects,
+                                )
 
-                sm = cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
+                sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+                sm.set_array([])
                 cbar = fig.colorbar(sm, ax=axes, fraction=0.035, pad=0.01)
                 cbar.set_label(cbar_label, fontsize=max(7, int(title_pt * 0.6)))
                 cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))

@@ -23,7 +23,12 @@ class IntegerStateObsWrapper(gym.ObservationWrapper):
     - Works well with Stable-Baselines3 DummyVecEnv, avoiding Text/Dict obs issues.
     """
 
-    def __init__(self, env: CustomisableEnvAbs, keep_raw_obs_in_info: bool = False, use_int32: bool = False):
+    def __init__(
+        self,
+        env: CustomisableEnvAbs,
+        keep_raw_obs_in_info: bool = False,
+        use_int32: bool = False,
+    ):
         super().__init__(env)
         self.keep_raw_obs_in_info = bool(keep_raw_obs_in_info)
         self._dtype = np.int32 if use_int32 else np.int64
@@ -41,7 +46,9 @@ class IntegerStateObsWrapper(gym.ObservationWrapper):
             self.observation_space = spaces.Discrete(len(self.mdp_network.states))
 
     def _encode_to_array(self) -> np.ndarray:
-        code = int(self.env.encode_state())  # rely on your CustomMiniGridEnv.encode_state()
+        code = int(
+            self.env.encode_state()
+        )  # rely on your CustomMiniGridEnv.encode_state()
         return np.asarray([code], dtype=self._dtype)
 
     # ---- ObservationWrapper hooks ----

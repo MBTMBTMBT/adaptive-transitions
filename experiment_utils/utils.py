@@ -30,7 +30,9 @@ def parse_csv_numbers(s: str, typ=float) -> List:
 def parse_tuple3(s: str) -> Tuple[float, float, float]:
     parts = parse_csv_numbers(s, float)
     if len(parts) != 3:
-        raise argparse.ArgumentTypeError("Expected 3 comma-separated floats, e.g. '1.0,0.0,0.0'")
+        raise argparse.ArgumentTypeError(
+            "Expected 3 comma-separated floats, e.g. '1.0,0.0,0.0'"
+        )
     return tuple(parts)  # type: ignore
 
 
@@ -72,7 +74,9 @@ def resolve_args(p: argparse.ArgumentParser) -> argparse.Namespace:
     # phase steps: CSV -> list[int], need >= 2
     args.phase_steps = [int(x) for x in parse_csv_numbers(args.phase_steps, int)]
     if len(args.phase_steps) < 2:
-        raise SystemExit("--phase-steps requires at least 2 phases (Source then Target).")
+        raise SystemExit(
+            "--phase-steps requires at least 2 phases (Source then Target)."
+        )
 
     ensure_dir(Path(args.outdir) / "meta")
     return args
@@ -81,3 +85,12 @@ def resolve_args(p: argparse.ArgumentParser) -> argparse.Namespace:
 def _import(path: str):
     mod, fn = path.split(":")
     return getattr(importlib.import_module(mod), fn)
+
+def _timestamped_outdir(base_outdir: str, leaf: str) -> Path:
+    """
+    Wrap the user-provided outdir as:
+        <base_outdir>/<leaf>/<YYYYmmdd-HHMMSS>
+    """
+    base = Path(base_outdir).expanduser().resolve()
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return base / leaf / ts

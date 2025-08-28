@@ -27,7 +27,9 @@ def _standardize_frame(
 
     # float -> uint8
     if np.issubdtype(frame.dtype, np.floating):
-        frame = np.clip(frame * (255.0 if frame.max() <= 1.0 else 1.0), 0, 255).astype(np.uint8)
+        frame = np.clip(frame * (255.0 if frame.max() <= 1.0 else 1.0), 0, 255).astype(
+            np.uint8
+        )
     elif frame.dtype != np.uint8:
         try:
             frame = frame.astype(np.uint8)
@@ -46,8 +48,11 @@ def _standardize_frame(
     if target_size is not None:
         try:
             from PIL import Image  # lazy import, optional
+
             img = Image.fromarray(frame)
-            frame = np.asarray(img.resize((int(target_size[1]), int(target_size[0])), Image.BILINEAR))
+            frame = np.asarray(
+                img.resize((int(target_size[1]), int(target_size[0])), Image.BILINEAR)
+            )
         except Exception:
             # fallback: keep original if PIL missing
             pass
@@ -57,22 +62,24 @@ def _standardize_frame(
 
 def save_policy_media(
     *,
-    model: Any,                      # SB3-like model with .predict(obs, deterministic=...)
-    env: Any,                        # Gymnasium single-env (not VecEnv)
-    out_path: str,                   # where to save, suffix decides format if fmt=None
+    model: Any,  # SB3-like model with .predict(obs, deterministic=...)
+    env: Any,  # Gymnasium single-env (not VecEnv)
+    out_path: str,  # where to save, suffix decides format if fmt=None
     episodes: int = 3,
     start_seed: int = 12345,
     max_steps: int = 200,
     deterministic: bool = True,
     fps: int = 8,
-    fmt: Optional[str] = None,       # "gif" | "mp4" | None -> infer from out_path
-    fix_render_mode: bool = True,    # set env.render_mode="rgb_array" if available
+    fmt: Optional[str] = None,  # "gif" | "mp4" | None -> infer from out_path
+    fix_render_mode: bool = True,  # set env.render_mode="rgb_array" if available
     target_size: Optional[Tuple[int, int]] = None,  # (H,W) resize each frame
-    bgr_to_rgb: bool = False,        # set True if your renderer returns BGR
-    render_each_step: bool = True,   # if False, only record frames at reset/terminal (usually keep True)
-    pre_step_hook: Optional[Callable[[Any, Any], None]] = None,   # (env, model) -> None
-    post_step_hook: Optional[Callable[[Any, Any, dict], None]] = None,  # (env, model, info) -> None
-    close_env: bool = False,         # whether to env.close() at the end
+    bgr_to_rgb: bool = False,  # set True if your renderer returns BGR
+    render_each_step: bool = True,  # if False, only record frames at reset/terminal (usually keep True)
+    pre_step_hook: Optional[Callable[[Any, Any], None]] = None,  # (env, model) -> None
+    post_step_hook: Optional[
+        Callable[[Any, Any, dict], None]
+    ] = None,  # (env, model, info) -> None
+    close_env: bool = False,  # whether to env.close() at the end
 ) -> Optional[str]:
     """
     Roll out a policy and save frames as GIF/MP4. Returns saved path or None.
@@ -118,8 +125,10 @@ def save_policy_media(
             # run loop
             for t in range(int(max_steps)):
                 if callable(pre_step_hook):
-                    try: pre_step_hook(env, model)
-                    except Exception: pass
+                    try:
+                        pre_step_hook(env, model)
+                    except Exception:
+                        pass
 
                 action, _state = model.predict(obs, deterministic=bool(deterministic))
                 obs, reward, terminated, truncated, info = env.step(action)
@@ -129,16 +138,26 @@ def save_policy_media(
                         fr = env.render()
                     except Exception:
                         fr = None
-                    fr = _standardize_frame(fr, target_size=target_size, bgr_to_rgb=bgr_to_rgb)
+                    fr = _standardize_frame(
+                        fr, target_size=target_size, bgr_to_rgb=bgr_to_rgb
+                    )
                     if fr is not None:
                         # normalize size to first frame to avoid writer issues
-                        if (first_frame_shape is not None) and fr.shape[:2] != first_frame_shape:
-                            fr = _standardize_frame(fr, target_size=first_frame_shape, bgr_to_rgb=False)
+                        if (first_frame_shape is not None) and fr.shape[
+                            :2
+                        ] != first_frame_shape:
+                            fr = _standardize_frame(
+                                fr, target_size=first_frame_shape, bgr_to_rgb=False
+                            )
                         frames.append(fr)
 
                 if callable(post_step_hook):
-                    try: post_step_hook(env, model, info if isinstance(info, dict) else {})
-                    except Exception: pass
+                    try:
+                        post_step_hook(
+                            env, model, info if isinstance(info, dict) else {}
+                        )
+                    except Exception:
+                        pass
 
                 if terminated or truncated:
                     # final frame at episode end
@@ -146,10 +165,16 @@ def save_policy_media(
                         fr = env.render()
                     except Exception:
                         fr = None
-                    fr = _standardize_frame(fr, target_size=target_size, bgr_to_rgb=bgr_to_rgb)
+                    fr = _standardize_frame(
+                        fr, target_size=target_size, bgr_to_rgb=bgr_to_rgb
+                    )
                     if fr is not None:
-                        if (first_frame_shape is not None) and fr.shape[:2] != first_frame_shape:
-                            fr = _standardize_frame(fr, target_size=first_frame_shape, bgr_to_rgb=False)
+                        if (first_frame_shape is not None) and fr.shape[
+                            :2
+                        ] != first_frame_shape:
+                            fr = _standardize_frame(
+                                fr, target_size=first_frame_shape, bgr_to_rgb=False
+                            )
                         frames.append(fr)
                     break
 
@@ -175,5 +200,7 @@ def save_policy_media(
         return None
     finally:
         if close_env:
-            try: env.close()
-            except Exception: pass
+            try:
+                env.close()
+            except Exception:
+                pass

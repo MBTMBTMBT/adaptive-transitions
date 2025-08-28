@@ -4,8 +4,13 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 from experiment_utils.utils import ensure_dir, save_json
-from two_stage_cl.tabular_curriculum_trainer import EnvFactorySpec, PhaseSpec, EvalSpec, SourceFactorySpec, \
-    TabularCurriculumTrainer as TrainerClass
+from two_stage_cl.tabular_curriculum_trainer import (
+    EnvFactorySpec,
+    PhaseSpec,
+    EvalSpec,
+    SourceFactorySpec,
+    TabularCurriculumTrainer as TrainerClass,
+)
 
 
 def stage_train(
@@ -46,7 +51,11 @@ def stage_train(
 
     # Baseline phases (all Target)
     baseline_phase_specs: List[PhaseSpec] = [
-        PhaseSpec(name=f"Phase-{i}({target_label})", steps=int(steps), env_spec=target_env_spec)
+        PhaseSpec(
+            name=f"Phase-{i}({target_label})",
+            steps=int(steps),
+            env_spec=target_env_spec,
+        )
         for i, steps in enumerate(phase_steps)
     ]
 
@@ -63,14 +72,34 @@ def stage_train(
             kwargs=dict(**source_env_base_kwargs),
         ).as_dict()
 
-        phases = [PhaseSpec(name="Phase-0(Source)", steps=int(phase_steps[0]), env_spec=source_env_spec)]
+        phases = [
+            PhaseSpec(
+                name="Phase-0(Source)",
+                steps=int(phase_steps[0]),
+                env_spec=source_env_spec,
+            )
+        ]
         for i, steps in enumerate(phase_steps[1:], start=1):
-            phases.append(PhaseSpec(name=f"Phase-{i}({target_label})", steps=int(steps), env_spec=target_env_spec))
+            phases.append(
+                PhaseSpec(
+                    name=f"Phase-{i}({target_label})",
+                    steps=int(steps),
+                    env_spec=target_env_spec,
+                )
+            )
         item_phase_specs_map[label] = phases
 
         eval_specs_map[label] = [
-            EvalSpec(name=target_label, env_spec=target_env_spec, eval_seed_base=eval_seed_base_target),
-            EvalSpec(name=source_label, env_spec=source_env_spec, eval_seed_base=eval_seed_base_source),
+            EvalSpec(
+                name=target_label,
+                env_spec=target_env_spec,
+                eval_seed_base=eval_seed_base_target,
+            ),
+            EvalSpec(
+                name=source_label,
+                env_spec=source_env_spec,
+                eval_seed_base=eval_seed_base_source,
+            ),
         ]
 
     # Trainer is environment-agnostic; it only consumes specs
@@ -96,7 +125,7 @@ def stage_train(
                 "enabled": True,
                 "phase_indices": [0],  # after Phase-0 finishes
                 "eval_names": None,
-                "record_media": True  # also record a GIF/MP4 at the boundary
+                "record_media": True,  # also record a GIF/MP4 at the boundary
             },
         },
     )

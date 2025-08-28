@@ -15,9 +15,9 @@ from .simple_actions import SimpleActions
 
 class ManualControl:
     def __init__(
-            self,
-            env: Env,
-            seed=None,
+        self,
+        env: Env,
+        seed=None,
     ) -> None:
         self.env = env
         self.seed = seed
@@ -84,9 +84,9 @@ class ManualControl:
 
 class SimpleManualControl(ManualControl):
     def __init__(
-            self,
-            env: Env,
-            seed=None,
+        self,
+        env: Env,
+        seed=None,
     ) -> None:
         super().__init__(env, seed)
 

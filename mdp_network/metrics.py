@@ -30,10 +30,16 @@ def kl_policies(
     """
 
     # Build the union of all states that appear anywhere.
-    states: Set[int] = set(policy1.get_all_states()) | set(policy2.get_all_states()) \
-                       | set(occupancy1.get_all_states()) | set(occupancy2.get_all_states())
+    states: Set[int] = (
+        set(policy1.get_all_states())
+        | set(policy2.get_all_states())
+        | set(occupancy1.get_all_states())
+        | set(occupancy2.get_all_states())
+    )
 
-    def smoothed_dist(dist: Dict[int, float], actions: Set[int], eps: float) -> Dict[int, float]:
+    def smoothed_dist(
+        dist: Dict[int, float], actions: Set[int], eps: float
+    ) -> Dict[int, float]:
         """Additive-smooth distribution over `actions`, then renormalize."""
         K = len(actions)
         # Sum of raw probs over the union action set (missing -> 0.0)
@@ -43,9 +49,15 @@ def kl_policies(
         denom = raw_sum + eps * K if K > 0 else 1.0  # guard K=0 (shouldn't happen)
 
         # Return (p(a)+eps)/denom for all a in union
-        return {int(a): (float(dist.get(a, 0.0)) + eps) / denom for a in actions} if K > 0 else {}
+        return (
+            {int(a): (float(dist.get(a, 0.0)) + eps) / denom for a in actions}
+            if K > 0
+            else {}
+        )
 
-    def kl(p: Dict[int, float], q: Dict[int, float], actions: Set[int], eps: float) -> float:
+    def kl(
+        p: Dict[int, float], q: Dict[int, float], actions: Set[int], eps: float
+    ) -> float:
         """KL( P || Q ) with additive smoothing on the union action set."""
         if not actions:
             return 0.0
@@ -86,13 +98,13 @@ def kl_policies(
 
 
 def performance_curve_and_integral(
-        prior_policy: PolicyTable,
-        target_policy: PolicyTable,
-        mdp_network: MDPNetwork,
-        numpoints: int = 100,
-        gamma: float = 0.99,
-        theta: float = 1e-6,
-        max_iterations: int = 1000,
+    prior_policy: PolicyTable,
+    target_policy: PolicyTable,
+    mdp_network: MDPNetwork,
+    numpoints: int = 100,
+    gamma: float = 0.99,
+    theta: float = 1e-6,
+    max_iterations: int = 1000,
 ) -> Tuple[List[float], float]:
     """
     Evaluate avg start-state value while blending from prior(0) -> target(1).
@@ -110,27 +122,30 @@ def performance_curve_and_integral(
     curve_values: List[float] = []
 
     # Fallback: if no explicit start states, average over all states
-    start_states = mdp_network.start_states if mdp_network.start_states else mdp_network.states
+    start_states = (
+        mdp_network.start_states if mdp_network.start_states else mdp_network.states
+    )
 
     for w_user in w_user_list:
         blend_w = 1.0 - w_user  # convert to blend_policies' convention
         blended = blend_policies(
-            target=target_policy,
-            prior=prior_policy,
-            weight=blend_w
+            target=target_policy, prior=prior_policy, weight=blend_w
         )
         vt = policy_evaluation(
             mdp_network=mdp_network,
             policy=blended,
             gamma=gamma,
             theta=theta,
-            max_iterations=max_iterations
+            max_iterations=max_iterations,
         )
         # Average V over start states
-        avg_v = float(np.mean([vt.get_value(s) for s in start_states])) if start_states else 0.0
+        avg_v = (
+            float(np.mean([vt.get_value(s) for s in start_states]))
+            if start_states
+            else 0.0
+        )
         curve_values.append(avg_v)
 
     # Mean of the curve (also an approximation to the integral over [0,1])
     curve_mean = float(np.mean(curve_values))
     return curve_values, curve_mean
-
