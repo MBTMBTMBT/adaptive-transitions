@@ -695,15 +695,17 @@ class RayCurriculumTrainer:
                 }
 
         # ------------ helper: trapezoidal AUC on [lo, hi] ------------
-        def _segmented_auc(xs: np.ndarray, ys: np.ndarray, lo: float, hi: float) -> float:
+        def _segmented_auc(
+            xs: np.ndarray, ys: np.ndarray, lo: float, hi: float
+        ) -> float:
             if hi <= lo:
                 return 0.0
             xs = np.asarray(xs, dtype=float)
             ys = np.asarray(ys, dtype=float)
             assert (
-                    xs.ndim == 1 and ys.ndim == 1 and xs.size == ys.size and xs.size >= 2
+                xs.ndim == 1 and ys.ndim == 1 and xs.size == ys.size and xs.size >= 2
             ), "invalid curve"
-            lo = max(lo, xs[0]);
+            lo = max(lo, xs[0])
             hi = min(hi, xs[-1])
             if hi <= lo:
                 return 0.0
@@ -716,7 +718,9 @@ class RayCurriculumTrainer:
 
         # ---------------- items (Target preferred) + phase-wise AUCs ----------------
         for lb, eval_dict in summary.get("items", {}).items():
-            eval_name = "Target" if "Target" in eval_dict else next(iter(eval_dict.keys()))
+            eval_name = (
+                "Target" if "Target" in eval_dict else next(iter(eval_dict.keys()))
+            )
             e = eval_dict[eval_name]
             xs = np.asarray(e["steps"], int)
             g = np.asarray(e["greedy_mean"], float)
@@ -729,18 +733,22 @@ class RayCurriculumTrainer:
                 mi.setdefault("greedy", {})
                 mi["greedy"]["auc"] = _auc(xs, g, cfg["use_max_step"])
                 mi["greedy"]["ap"] = _ap(xs, g, cfg["ap_last_k"], cfg["use_max_step"])
-                mi["greedy"]["ttt"] = _ttt(xs, g, cfg["ttt_fraction"], cfg["use_max_step"])
+                mi["greedy"]["ttt"] = _ttt(
+                    xs, g, cfg["ttt_fraction"], cfg["use_max_step"]
+                )
             if cfg["compute_train"]:
                 mi.setdefault("train", {})
                 mi["train"]["auc"] = _auc(xs, t, cfg["use_max_step"])
                 mi["train"]["ap"] = _ap(xs, t, cfg["ap_last_k"], cfg["use_max_step"])
-                mi["train"]["ttt"] = _ttt(xs, t, cfg["ttt_fraction"], cfg["use_max_step"])
+                mi["train"]["ttt"] = _ttt(
+                    xs, t, cfg["ttt_fraction"], cfg["use_max_step"]
+                )
 
             # phase-wise AUCs (>=2 phases)
             phs = item_phases_map.get(lb, [])
             if len(phs) >= 2 and xs.size >= 2:
                 boundary = float(int(phs[0].get("steps", 0)))
-                start_s = float(xs[0]);
+                start_s = float(xs[0])
                 end_s = float(xs[-1])
 
                 if cfg["compute_greedy"]:
@@ -783,16 +791,15 @@ class RayCurriculumTrainer:
 
         return out
 
-
     def run(
-            self,
-            seeds: List[int],
-            envs: Dict[str, Dict[str, Any]],
-            baseline_phases: List[Dict[str, Any]],
-            baseline_evals: List[Dict[str, Any]],
-            item_phases_map: Dict[str, List[Dict[str, Any]]],
-            evals_map: Dict[str, List[Dict[str, Any]]],
-        ) -> Dict[str, Any]:
+        self,
+        seeds: List[int],
+        envs: Dict[str, Dict[str, Any]],
+        baseline_phases: List[Dict[str, Any]],
+        baseline_evals: List[Dict[str, Any]],
+        item_phases_map: Dict[str, List[Dict[str, Any]]],
+        evals_map: Dict[str, List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
         """
         Submit all per-(seed, task) actors at once (fire-and-forget).
         Print on submit and on completion; no manual throttling.
@@ -1239,10 +1246,10 @@ class RayCurriculumTrainer:
 
     # --- offline aggregation ---
     def _aggregate(
-            self,
-            per_seed: List[Dict[str, Any]],
-            item_phases_map: Dict[str, List[Dict[str, Any]]],
-        ) -> Dict[str, Any]:
+        self,
+        per_seed: List[Dict[str, Any]],
+        item_phases_map: Dict[str, List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
         assert per_seed, "no results"
         labels = sorted(item_phases_map.keys())
 
@@ -1253,10 +1260,10 @@ class RayCurriculumTrainer:
         # -------- detect whether baseline exists --------
         first_base = per_seed[0].get("baseline", None)
         has_baseline = (
-                isinstance(first_base, dict)
-                and "steps" in first_base
-                and isinstance(first_base["steps"], dict)
-                and len(first_base["steps"]) > 0
+            isinstance(first_base, dict)
+            and "steps" in first_base
+            and isinstance(first_base["steps"], dict)
+            and len(first_base["steps"]) > 0
         )
 
         out: Dict[str, Any] = {"steps": None, "baseline": {}, "items": {}}
@@ -1270,7 +1277,7 @@ class RayCurriculumTrainer:
             ref_steps = per_seed[0]["baseline"]["steps"][base_primary]
             for r in per_seed:
                 assert (
-                        r["baseline"]["steps"][base_primary] == ref_steps
+                    r["baseline"]["steps"][base_primary] == ref_steps
                 ), "baseline steps mismatch"
 
             g_mean, g_std = _stack(
@@ -1303,7 +1310,7 @@ class RayCurriculumTrainer:
                 for r in per_seed:
                     for nm in eval_names:
                         assert (
-                                r["items"][lb]["steps"][nm] == steps_ref[nm]
+                            r["items"][lb]["steps"][nm] == steps_ref[nm]
                         ), f"steps mismatch for {lb}/{nm}"
 
                 agg = {}

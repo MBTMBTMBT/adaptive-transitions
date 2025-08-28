@@ -62,98 +62,131 @@ def _normalize_score_spec(spec: Any) -> List[Tuple[str, Dict[str, Any]]]:
 
 
 def obj_multi_kl_and_perf(
-    mdp: MDPNetwork, shared: Dict[str, Any], *, kl_delta: float = 1e-3
+    mdp: MDPNetwork,
+    shared: Dict[str, Any],
+    *,
+    # --- explicit VI / policy params (decoupled from GA) ---
+    vi_gamma: float = 0.99,
+    vi_theta: float = 1e-6,
+    vi_max_iterations: int = 1000,
+    policy_temperature: float = 1.0,
+    policy_mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0),
+    policy_tie_tol: float = 1e-6,
+    # --- explicit performance-curve params (decoupled from GA) ---
+    perf_numpoints: int = 100,
+    perf_gamma: float | None = None,
+    perf_theta: float | None = None,
+    perf_max_iterations: int | None = None,
+    # --- KL smoothing ---
+    kl_delta: float = 1e-3,
 ) -> Sequence[float]:
     """
-    Returns [ -KL(baseline || current), performance_integral ].
-    Uses shared['precomputed'] = [base_policy, base_occupancy].
+    Returns [ -KL(base_policy || current_opt_policy), integral(random -> current_opt_policy) ].
+
+    Strict requirements on `shared['precomputed']`:
+      - pre[0] = base_policy (PolicyTable portable) for the ORIGINAL base MDP.
+      - pre[1] = base_occupancy (ValueTable portable) for the ORIGINAL base MDP.
+    These must exist; otherwise a ValueError is raised.
     """
-    solver = shared.get("solver", {})
-    gamma = float(solver.get("vi_gamma", 0.99))
-    theta = float(solver.get("vi_theta", 1e-6))
-    max_iter = int(solver.get("vi_max_iterations", 1000))
-    temperature = float(solver.get("policy_temperature", 1.0))
-    mixing = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
-    tie_tol = float(solver.get("policy_tie_tol", 1e-6))
+    # ---- strict validation of precomputed materials ----
+    pre = shared.get("precomputed", None)
+    if not (
+        isinstance(pre, list)
+        and len(pre) >= 2
+        and pre[0] is not None
+        and pre[1] is not None
+    ):
+        raise ValueError(
+            "obj_multi_kl_and_perf requires shared['precomputed'][0]=base_policy and [1]=base_occupancy."
+        )
+    base_policy = PolicyTable.from_portable(pre[0])
+    base_occupancy = ValueTable.from_portable(pre[1])
 
-    pgamma = float(solver.get("perf_gamma", gamma))
-    ptheta = float(solver.get("perf_theta", theta))
-    pmax_iter = int(solver.get("perf_max_iterations", max_iter))
-    numpoints = int(solver.get("perf_numpoints", 100))
-
-    pre = shared.get("precomputed", None) or []
-    base_policy = PolicyTable.from_portable(pre[0]) if len(pre) >= 1 else None
-    base_occupancy = ValueTable.from_portable(pre[1]) if len(pre) >= 2 else None
-
+    # ---- compute current optimal policy on candidate MDP (explicit params) ----
     _, Q2 = optimal_value_iteration(
-        mdp, gamma=gamma, theta=theta, max_iterations=max_iter
+        mdp,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
     )
     policy2: PolicyTable = q_table_to_policy(
         Q2,
         states=list(mdp.states),
         num_actions=mdp.num_actions,
-        mixing=mixing,
-        temperature=temperature,
-        tie_tol=tie_tol,
+        mixing=tuple(policy_mixing),
+        temperature=float(policy_temperature),
+        tie_tol=float(policy_tie_tol),
     )
     occupancy2: ValueTable = compute_occupancy_measure(
-        mdp, policy=policy2, gamma=gamma, theta=theta, max_iterations=max_iter
+        mdp,
+        policy=policy2,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
     )
 
-    if base_policy is not None and base_occupancy is not None:
-        kl = kl_policies(
-            policy1=base_policy,
-            occupancy1=base_occupancy,
-            policy2=policy2,
-            occupancy2=occupancy2,
-            delta=float(kl_delta),
-        )
-        obj1 = -float(kl)
-    else:
-        obj1 = 0.0
+    # ---- KL term (strict, no fallbacks) ----
+    kl = kl_policies(
+        policy1=base_policy,
+        occupancy1=base_occupancy,
+        policy2=policy2,
+        occupancy2=occupancy2,
+        delta=float(kl_delta),
+    )
+    obj_kl = -float(kl)
+
+    # ---- performance integral: random -> current policy on candidate MDP ----
+    pgamma = float(vi_gamma) if perf_gamma is None else float(perf_gamma)
+    ptheta = float(vi_theta) if perf_theta is None else float(perf_theta)
+    pmax_iter = (
+        int(vi_max_iterations)
+        if perf_max_iterations is None
+        else int(perf_max_iterations)
+    )
 
     prior = create_random_policy(mdp)
     _curve, integral = performance_curve_and_integral(
         prior_policy=prior,
         target_policy=policy2,
         mdp_network=mdp,
-        numpoints=numpoints,
+        numpoints=int(perf_numpoints),
         gamma=pgamma,
         theta=ptheta,
         max_iterations=pmax_iter,
     )
-    return [obj1, float(integral)]
+    return [obj_kl, float(integral)]
 
 
 def obj_multi_perf(
-    mdp: MDPNetwork, shared: Dict[str, Any], *, blend_weight: float = 0.8
+    mdp: MDPNetwork,
+    shared: Dict[str, Any],
+    *,
+    # --- explicit VI / policy params (decoupled) ---
+    vi_gamma: float = 0.99,
+    vi_theta: float = 1e-6,
+    vi_max_iterations: int = 1000,
+    policy_temperature: float = 1.0,
+    policy_mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0),
+    policy_tie_tol: float = 1e-6,
+    # --- explicit performance-curve params (decoupled) ---
+    perf_numpoints: int = 100,
+    perf_gamma: float | None = None,
+    perf_theta: float | None = None,
+    perf_max_iterations: int | None = None,
+    # --- blend knob ---
+    blend_weight: float = 0.8,
 ) -> Sequence[float]:
     """
     Returns, in this order (maximize both):
-      1) integral( random -> blended(policy2, random, w) )  evaluated on the *current* candidate MDP `mdp`.
-      2) integral( blended(policy2, random, w) -> base_optimal_policy ) evaluated on the *ORIGINAL* base MDP.
+      1) integral( random -> blended(policy_opt_cand, random, w) )  on the candidate MDP `mdp`.
+      2) integral( blended(policy_opt_cand, random, w) -> base_optimal_policy ) on the ORIGINAL base MDP.
 
-    Strict requirements on `shared`:
-      - shared['precomputed'][0] = base_optimal_policy (PolicyTable portable) for the ORIGINAL base MDP.
-      - shared['precomputed'][1] = base_occupancy (portable) [kept for compatibility; unused here].
-      - shared['precomputed'][2] = ORIGINAL base MDP portable (MDPNetwork.to_portable()).
-
-    If any of the above entries are missing or None, this function raises a ValueError.
+    Strict requirements on `shared['precomputed']`:
+      - pre[0] = base_policy (PolicyTable portable) for the ORIGINAL base MDP.
+      - pre[2] = base_mdp (MDPNetwork portable) — ORIGINAL base MDP graph.
+    These must exist; otherwise a ValueError is raised.
     """
-    solver = shared.get("solver", {})
-    gamma = float(solver.get("vi_gamma", 0.99))
-    theta = float(solver.get("vi_theta", 1e-6))
-    max_iter = int(solver.get("vi_max_iterations", 1000))
-    temperature = float(solver.get("policy_temperature", 1.0))
-    mixing = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
-    tie_tol = float(solver.get("policy_tie_tol", 1e-6))
-
-    pgamma = float(solver.get("perf_gamma", gamma))
-    ptheta = float(solver.get("perf_theta", theta))
-    pmax_iter = int(solver.get("perf_max_iterations", max_iter))
-    numpoints = int(solver.get("perf_numpoints", 100))
-
-    # --- Strict validation of shared precomputed materials ---
+    # ---- strict validation of precomputed materials ----
     pre = shared.get("precomputed", None)
     if not (
         isinstance(pre, list)
@@ -162,48 +195,58 @@ def obj_multi_perf(
         and pre[2] is not None
     ):
         raise ValueError(
-            "obj_multi_perf requires shared['precomputed'] = "
-            "[base_policy_portable, base_occupancy_portable, base_mdp_portable]; "
-            "got: {}".format(type(pre).__name__)
+            "obj_multi_perf requires shared['precomputed'][0]=base_policy and [2]=base_mdp."
         )
-
     base_policy = PolicyTable.from_portable(pre[0])
     base_mdp = MDPNetwork.from_portable(pre[2])
 
-    # Optimal policy of the *candidate* MDP
+    # ---- compute candidate's optimal policy (explicit params) ----
     _, Q2 = optimal_value_iteration(
-        mdp, gamma=gamma, theta=theta, max_iterations=max_iter
+        mdp,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
     )
     policy2: PolicyTable = q_table_to_policy(
         Q2,
         states=list(mdp.states),
         num_actions=mdp.num_actions,
-        mixing=mixing,
-        temperature=temperature,
-        tie_tol=tie_tol,
+        mixing=tuple(policy_mixing),
+        temperature=float(policy_temperature),
+        tie_tol=float(policy_tie_tol),
     )
 
-    # Intermediate (blended) policy between the candidate-optimal and random (on candidate MDP's action space)
+    # ---- blended prior between candidate-optimal and random ----
     prior_rand = create_random_policy(mdp)
     blended = blend_policies(policy2, prior_rand, weight=float(blend_weight))
 
-    # ---- Objective 0: random -> blended on the CANDIDATE MDP ----
+    # ---- performance params (fallbacks to VI defaults) ----
+    pgamma = float(vi_gamma) if perf_gamma is None else float(perf_gamma)
+    ptheta = float(vi_theta) if perf_theta is None else float(perf_theta)
+    pmax_iter = (
+        int(vi_max_iterations)
+        if perf_max_iterations is None
+        else int(perf_max_iterations)
+    )
+    N = int(perf_numpoints)
+
+    # 0) random -> blended on candidate MDP
     _curve, integral0 = performance_curve_and_integral(
         prior_policy=prior_rand,
         target_policy=blended,
         mdp_network=mdp,
-        numpoints=numpoints,
+        numpoints=N,
         gamma=pgamma,
         theta=ptheta,
         max_iterations=pmax_iter,
     )
 
-    # ---- Objective 1: blended -> base_optimal on the ORIGINAL base MDP ----
+    # 1) blended -> base_optimal on ORIGINAL base MDP
     _curve, integral1 = performance_curve_and_integral(
         prior_policy=blended,
         target_policy=base_policy,
         mdp_network=base_mdp,
-        numpoints=numpoints,
+        numpoints=N,
         gamma=pgamma,
         theta=ptheta,
         max_iterations=pmax_iter,

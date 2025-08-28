@@ -44,6 +44,7 @@ class TabularQAgent(Agent):
         ),  # (greedy, softmax, random)
         temperature: float = 1.0,
         tie_tol: float = 1e-3,
+        default_q_value: float = 0.0,
         seed: Optional[int] = None,
         verbose: int = 1,
     ):
@@ -64,6 +65,19 @@ class TabularQAgent(Agent):
 
         self.rng = np.random.default_rng(seed)
         self.verbose = verbose
+
+        self.default_q_value = float(default_q_value)
+
+    def _get_q(self, s: int, a: int) -> float:
+        """
+        Safe Q(s,a) getter that returns self.default_q_value if (s,a) is unseen.
+        Avoids relying on QTable's internal default behavior.
+        """
+        # Fast path through the raw dict to detect 'unseen'
+        ad = self.q.q_values.get(s)
+        if ad is None:
+            return self.default_q_value
+        return float(ad.get(a, self.default_q_value))
 
     def set_policy_parameters(
         self, policy_mix: Tuple[float, float, float], temperature: float
@@ -146,20 +160,20 @@ class TabularQAgent(Agent):
                     done = bool(dones[i])
                     s_next = int(next_states[i])
 
-                    old_q = self.q.get_q_value(s, a)
+                    old_q = self._get_q(s, a)
                     max_next = 0.0 if done else self._max_q(s_next)
                     td_target = r + self.gamma * max_next
                     new_q = old_q + self.learning_rate * (td_target - old_q)
                     self.q.set_q_value(s, a, new_q)
 
                 states = next_states
-                self.num_timesteps += 1
+                self.num_timesteps += n_envs
 
                 # Progress bar update
                 if pbar is not None:
                     # Lightweight postfix: show episodes so far
                     pbar.set_postfix_str(f"episodes={callback.n_episodes}")
-                    pbar.update(1)
+                    pbar.update(n_envs)
 
                 # Callback on step
                 callback.num_timesteps = self.num_timesteps
@@ -239,6 +253,7 @@ class TabularQAgent(Agent):
             "observation_space_n": int(self.observation_space.n),
             "action_space_n": int(self.action_space.n),
             "num_timesteps": int(self.num_timesteps),
+            "default_q_value": float(self.default_q_value),
         }
 
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -290,6 +305,7 @@ class TabularQAgent(Agent):
             tie_tol=float(meta.get("tie_tol", 1e-3)),  # <<--- NEW (fallback)
             seed=None,
             verbose=1,
+            default_q_value=float(meta.get("default_q_value", 0.0)),
         )
 
         # Sanity check spaces
@@ -326,7 +342,7 @@ class TabularQAgent(Agent):
 
     def _greedy_action(self, s: int) -> int:
         nA = self.action_space.n
-        qvals = np.array([self.q.get_q_value(s, a) for a in range(nA)], dtype=float)
+        qvals = np.array([self._get_q(s, a) for a in range(nA)], dtype=float)
         max_q = float(np.max(qvals)) if nA > 0 else 0.0
 
         # Actions whose Q is within tie_tol of the maximum share the greedy mass equally
@@ -338,7 +354,7 @@ class TabularQAgent(Agent):
 
     def _softmax_action(self, s: int, temperature: float) -> int:
         nA = self.action_space.n
-        qvals = np.array([self.q.get_q_value(s, a) for a in range(nA)], dtype=float)
+        qvals = np.array([self._get_q(s, a) for a in range(nA)], dtype=float)
         qvals -= np.max(qvals)  # numerical stability
         logits = qvals / max(temperature, 1e-8)
         expv = np.exp(logits)
@@ -350,7 +366,7 @@ class TabularQAgent(Agent):
 
     def _max_q(self, s: int) -> float:
         nA = self.action_space.n
-        return max(self.q.get_q_value(s, a) for a in range(nA))
+        return max(self._get_q(s, a) for a in range(nA))
 
     def _normalize_mix(
         self, mix: Tuple[float, float, float]
