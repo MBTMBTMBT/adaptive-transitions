@@ -317,7 +317,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=25)
-    p.add_argument("--ga-generations", type=int, default=10)
+    p.add_argument("--ga-generations", type=int, default=25)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -337,7 +337,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-reward-ref-floor", type=float, default=1e-3)
     p.add_argument("--ga-add-edge-allow-out-of-scope", type=str2bool, default=False)
 
-    p.add_argument("--ga-workers", type=int, default=0, help="0=auto(cpu_count)")
     p.add_argument("--ga-seed", type=int, default=0)
 
     p.add_argument("--ga-dist-max-hops", type=int, default=10)
@@ -367,7 +366,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent-temperature", type=float, default=0.01,
                    help="Used only if softmax weight > 0.")
     p.add_argument("--agent-tie-tol", type=float, default=1e-2)
-    p.add_argument("--agent-verbose", type=int, default=0)
+    p.add_argument("--agent-verbose", type=int, default=1)
 
     p.add_argument("--phase-steps", type=str, default="10000,40000",
                    help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.")
@@ -376,8 +375,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Seeds and parallelism for training
     p.add_argument("--train-seeds", type=int, default=5, help="Use N to get seeds [0..N-1].")
-    p.add_argument("--train-max-concurrency", type=int, default=0,
-                   help="0=auto(cpu_count) or explicit upper bound.")
     p.add_argument("--train-save-intermediate", type=str2bool, default=True)
 
     # External JSON loops (optional)
@@ -408,10 +405,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--vis-val-cmap", type=str, default="viridis")
     p.add_argument("--vis-val-gamma", type=float, default=1.0)
     return p
-
-
-def _auto_workers(n: int) -> int:
-    return n if n > 0 else max(1, (os.cpu_count() or 1))
 
 
 def main():
@@ -489,13 +482,10 @@ def main():
             }
             score = ("obj_multi_perf", {"blend_weight": args.ga_blend_weight})
 
-            workers = _auto_workers(args.ga_workers)
-
             _ = run_ga(
                 base_mdp=base_mdp,
                 population_size=args.ga_pop_size,
                 generations=args.ga_generations,
-                workers=workers,
                 seed=args.ga_seed,
                 tournament_k=args.ga_tournament_k,
                 elitism=args.ga_elitism,
@@ -547,21 +537,16 @@ def main():
             },
         }
 
-        # Curriculum phases:
-        # If "--phase-steps" is "A,B", we use a 2-phase schedule per item:
-        #   phase 1 on the item, then phase 2 on the target.
-        # You can customize this structure in your CL implementation.
+        # Curriculum phases
         phase_steps = args.phase_steps
         if len(phase_steps) == 1:
-            # Single-phase: train on target only.
             baseline_phases = [{"env": "target", "steps": phase_steps[0]}]
         else:
             baseline_phases = [{"env": "target", "steps": phase_steps[0]}]
 
-        # Baseline evals on target during curriculum
         baseline_evals = [{"name": "Target", "env": "target"}]
 
-        # Per-item curriculum: item-first then target (if 2+ phases provided)
+        # Per-item schedules and evals
         item_phases_map: Dict[str, List[Dict[str, Any]]] = {}
         for key in envs["items"].keys():
             phases: List[Dict[str, Any]] = []
@@ -571,7 +556,6 @@ def main():
                 phases.append({"env": "target", "steps": phase_steps[1]})
             item_phases_map[key] = phases
 
-        # Per-item evals (evaluate both on item and on target)
         evals_map: Dict[str, List[Dict[str, Any]]] = {}
         for key in envs["items"].keys():
             evals_map[key] = [
@@ -589,10 +573,7 @@ def main():
             "verbose": int(args.agent_verbose),
         }
 
-        # Concurrency
-        max_concurrency = _auto_workers(args.train_max_concurrency)
-
-        # Call the new curriculum runner
+        # Call the new curriculum runner (no manual concurrency arg anymore)
         cl_summary = run_curriculum(
             seeds=seeds,
             envs=envs,
@@ -605,7 +586,6 @@ def main():
             eval_every=int(args.eval_every),
             n_eval_episodes=int(args.n_eval_episodes),
             output_dir=args.outdir,
-            max_concurrency=int(max_concurrency),
             save_intermediate=bool(args.train_save_intermediate),
             wandb_actor=wandb_actor,
             media_opts={

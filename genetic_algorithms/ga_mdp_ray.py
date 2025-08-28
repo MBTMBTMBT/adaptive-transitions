@@ -230,7 +230,6 @@ def run_ga(
     # ---- core GA params (expanded) ----
     population_size: int,
     generations: int,
-    workers: int,
     seed: int,
     tournament_k: int = 2,
     elitism: int = 8,
@@ -242,7 +241,7 @@ def run_ga(
     ops: Optional[Dict[str, Any]] = None,
     distance: Optional[Dict[str, Any]] = None,
     solver: Optional[Dict[str, Any]] = None,
-    score: Any = None,  # <-- changed: accept simplified shapes
+    score: Any = None,  # simplified shapes accepted
 ) -> Tuple[List[MDPNetwork], List[List[float]], List[MDPNetwork], List[List[float]]]:
     """
     Genetic Algorithm driver.
@@ -250,7 +249,7 @@ def run_ga(
       - Bind all "ga/*" series to x-axis "ga/gen".
       - Do NOT pass an explicit `step`; include "ga/gen" in the payload.
 
-    score accepts:
+    `score` accepts:
       - None -> defaults to "obj_multi_perf"
       - "name"
       - ("name", {params})
@@ -259,7 +258,7 @@ def run_ga(
     ops = dict(ops or {})
     distance = dict(distance or {})
     solver = dict(solver or {})
-    score = score or "obj_multi_perf"  # <-- changed: default in the new format
+    score = score or "obj_multi_perf"
 
     # logger setup
     logger = logging.getLogger("ga")
@@ -280,7 +279,7 @@ def run_ga(
         except Exception:
             pass
 
-    # ===== Precompute baseline policy/occupancy =====
+    # ===== Precompute baseline policy/occupancy (used by score fns) =====
     gamma = float(solver.get("vi_gamma", 0.99))
     theta = float(solver.get("vi_theta", 1e-6))
     max_iters = int(solver.get("vi_max_iterations", 1000))
@@ -308,56 +307,51 @@ def run_ga(
         except Exception:
             pass
 
-    # ===== Build worker pool =====
+    # ===== Common materials to construct ephemeral workers =====
     whitelist = _list_all_triples(base_mdp)
     base_portable = base_mdp.to_portable()
-    pool = [
-        GAWorker.options(num_cpus=1).remote(
+
+    def _spawn_worker():
+        """Create a fresh GAWorker actor (num_cpus=1) for a single task."""
+        return GAWorker.options(num_cpus=1).remote(
             base_portable=base_portable,
             whitelist=whitelist,
             ops=ops,
             distance_cfg=distance,
             solver=solver,
             precomputed_portables=precomputed,
-        ) for _ in range(max(1, int(workers)))
-    ]
+        )
 
     rng_drv = np.random.default_rng(_derive_seed(seed, "driver"))
 
-    # ===== Init population =====
+    # ===== Init population (fan-out) =====
     pop: List[MDPNetwork] = [base_mdp.clone()]
     need = population_size - 1
     if need > 0:
         futs = []
         for i in range(need):
-            actor = pool[i % len(pool)]
-            futs.append(actor.mutate.remote(seed=_derive_seed(seed, "init", i)))
+            # Each child is produced by its own short-lived worker
+            futs.append(_spawn_worker().mutate.remote(seed=_derive_seed(seed, "init", i)))
         children_portables = ray.get(futs)
         pop.extend([MDPNetwork.from_portable(p) for p in children_portables])
 
-    # ===== Evaluate population =====
+    # ===== Evaluate population (fan-out scoring; preserve order) =====
     def _score_portables(portables: List[Dict[str, Any]]) -> List[List[float]]:
-        """Parallel scoring helper (preserves order)."""
-        W = len(pool)
-        if W == 0:
+        """
+        Fan-out: spawn one worker per portable (batch size 1).
+        Ray ensures global concurrency against cluster CPU capacity.
+        The result order matches the input order (ray.get preserves order).
+        """
+        if not portables:
             return []
-        chunks: List[List[Dict[str, Any]]] = [[] for _ in range(W)]
-        idx_chunks: List[List[int]] = [[] for _ in range(W)]
-        for i, p in enumerate(portables):
-            w = i % W
-            chunks[w].append(p)
-            idx_chunks[w].append(i)
-        futs, active_wids = [], []
-        for wid, ch in enumerate(chunks):
-            if ch:
-                futs.append(pool[wid].score_batch.remote(ch, score))
-                active_wids.append(wid)
-        parts = ray.get(futs)
-        out: List[Optional[List[float]]] = [None] * len(portables)
-        for part, wid in zip(parts, active_wids):
-            for j, obj in zip(idx_chunks[wid], part):
-                out[j] = obj
-        return [list(map(float, row)) for row in out]  # type: ignore
+        futs = []
+        for p in portables:
+            futs.append(_spawn_worker().score_batch.remote([p], score))
+        parts = ray.get(futs)  # List[List[List[float]]] (each is a 1-element batch)
+        out: List[List[float]] = []
+        for one in parts:
+            out.append([float(x) for x in one[0]])
+        return out
 
     objs: List[List[float]] = _score_portables([m.to_portable() for m in pop])
 
@@ -424,13 +418,12 @@ def run_ga(
                     best2 = j
             parents_pairs.append((pop[best], pop[best2]))
 
-        # --- offspring (parallel mutation/crossover) ---
+        # --- offspring (fan-out mutation/crossover) ---
         futs = []
         for k, (pa, pb) in enumerate(parents_pairs):
-            actor = pool[k % len(pool)]
             do_x = (rng_drv.random() < float(crossover_rate))
             futs.append(
-                actor.mutate.remote(
+                _spawn_worker().mutate.remote(
                     seed=_derive_seed(seed, "child", gen, k),
                     pa_portable=pa.to_portable(),
                     pb_portable=pb.to_portable(),
@@ -440,7 +433,7 @@ def run_ga(
         child_portables = ray.get(futs)
         children = [MDPNetwork.from_portable(p) for p in child_portables]
 
-        # --- evaluate children ---
+        # --- evaluate children (fan-out scoring) ---
         child_objs = _score_portables([c.to_portable() for c in children])
 
         # --- environmental selection with locked elites ---

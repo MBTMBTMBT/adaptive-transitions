@@ -40,7 +40,8 @@ class Collector:
                  wandb_actor: Optional[ActorHandle] = None,
                  step_base: int = 0,
                  flush_interval_s: float = 0.5,
-                 max_queue: int = 16384):
+                 max_queue: int = 16384,
+                 verbose: int = 0,):
         self.seeds = list(map(int, seeds))
         self.keep = bool(keep_intermediate)
         self._wb = wandb_actor
@@ -64,6 +65,8 @@ class Collector:
         # Async queue
         self._q: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=int(max_queue))
         self._flush_interval_s = float(flush_interval_s)
+
+        self.verbose = int(verbose)
 
         # No global define_metric here; bind per series on first emit.
 
@@ -106,11 +109,9 @@ class Collector:
                 prev = last_idx.get(series_key, None)
                 if prev is not None and eval_idx <= prev:
                     # Non-monotonic eval index for this series -> drop silently
-                    try:
+                    if self.verbose > 0:
                         print(f"[Collector] drop non-monotonic idx for online/{label}/{eval_name}: "
                               f"{eval_idx} <= {prev}")
-                    except Exception:
-                        pass
                     del buckets[key]
                 else:
                     # First time for this series: bind axis to series_step
@@ -184,7 +185,7 @@ class PeriodicEvalCallback:
                  label: str,
                  eval_name: str,
                  collector: Optional[ActorHandle] = None,
-                 seed_id: Optional[int] = None):
+                 seed_id: Optional[int] = None,):
         self.model = None
         self.eval_env = eval_env
         self.eval_every = int(eval_every)
@@ -257,24 +258,25 @@ class PeriodicEvalCallback:
 
 @ray.remote
 class SeedTrainer:
-    def __init__(self,
-                 seed: int,
-                 envs: Dict[str, Dict[str, Any]],
-                 baseline_phases: List[Dict[str, Any]],
-                 baseline_evals: List[Dict[str, Any]],
-                 item_phases_map: Dict[str, List[Dict[str, Any]]],
-                 evals_map: Dict[str, List[Dict[str, Any]]],
-                 agent_ctor_path: str,
-                 agent_kwargs: Dict[str, Any],
-                 eval_every: int,
-                 n_eval_episodes: int,
-                 collector: Optional[Any] = None,
-                 collect_intermediate: bool = True,
-                 media_root: Optional[str] = None,
-                 media_opts: Optional[Dict[str, Any]] = None,
-                 mode: str = "both",                     # "baseline" | "items" | "both" | "item"
-                 single_item_label: Optional[str] = None # NEW: run only one item when mode=="item"
-                 ):
+    def __init__(
+            self,
+             seed: int,
+             envs: Dict[str, Dict[str, Any]],
+             baseline_phases: List[Dict[str, Any]],
+             baseline_evals: List[Dict[str, Any]],
+             item_phases_map: Dict[str, List[Dict[str, Any]]],
+             evals_map: Dict[str, List[Dict[str, Any]]],
+             agent_ctor_path: str,
+             agent_kwargs: Dict[str, Any],
+             eval_every: int,
+             n_eval_episodes: int,
+             collector: Optional[Any] = None,
+             collect_intermediate: bool = True,
+             media_root: Optional[str] = None,
+             media_opts: Optional[Dict[str, Any]] = None,
+             mode: str = "both",                     # "baseline" | "items" | "both" | "item"
+             single_item_label: Optional[str] = None,  # NEW: run only one item when mode=="item"
+    ):
         # Keep original assignments
         self.seed = int(seed)
         self.envs = envs
@@ -513,7 +515,6 @@ class RayCurriculumTrainer:
              output_dir: Optional[str],
              *,
              wandb_step_base: int = 0,
-             max_concurrency: Optional[int] = None,
              save_intermediate: bool = True,
              wandb_actor: Optional[ActorHandle] = None,
              media_opts: Optional[Dict[str, Any]] = None,
@@ -521,12 +522,15 @@ class RayCurriculumTrainer:
              run_items: bool = True,
              metrics_opts: Optional[Dict[str, Any]] = None,
     ):
+        """
+        Slimmed constructor: removed manual concurrency knobs.
+        Ray will naturally limit parallelism via num_cpus on each actor.
+        """
         self.agent_ctor_path = agent_ctor_path
         self.agent_kwargs = dict(agent_kwargs)
         self.eval_every = int(eval_every)
         self.n_eval = int(n_eval_episodes)
         self.outdir = output_dir
-        self.max_conc = max_concurrency
         self.save_intermediate = bool(save_intermediate)
         self.wb = wandb_actor
         self.media_opts = dict(media_opts or {})
@@ -545,6 +549,7 @@ class RayCurriculumTrainer:
             "compute_train": bool(mo.get("compute_train", True)),
             "js_baseline_first_k": int(mo.get("js_baseline_first_k", 1)),
         }
+        self.verbose = int(self.agent_kwargs.get("verbose", 0))
 
     # --- compute metrics independent of CSV/plots ---
     def _compute_metrics(self, summary: Dict[str, Any],
@@ -629,7 +634,12 @@ class RayCurriculumTrainer:
             baseline_evals: List[Dict[str, Any]],
             item_phases_map: Dict[str, List[Dict[str, Any]]],
             evals_map: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-
+        """
+        Submit all per-(seed, task) actors at once (fire-and-forget).
+        Print on submit and on completion; no manual throttling.
+        Collector actor consumes 0 CPU, serializes aggregation with max_concurrency=1.
+        Only the first seed produces media.
+        """
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
 
@@ -653,7 +663,8 @@ class RayCurriculumTrainer:
                     raise ValueError("baseline_phases is empty; cannot normalize steps.")
                 if delta > 0:
                     new_phases[-1]["steps"] = int(new_phases[-1].get("steps", 0)) + delta
-                    print(f"[info] baseline steps extended by {delta} to {max_item_total}.")
+                    if self.verbose > 0:
+                        print(f"[info] baseline steps extended by {delta} to {max_item_total}.")
                 else:
                     need_cut = -delta
                     idx = len(new_phases) - 1
@@ -665,44 +676,33 @@ class RayCurriculumTrainer:
                         if new_phases[idx]["steps"] == 0 and idx > 0:
                             new_phases.pop(idx)
                         idx -= 1
-                    print(f"[info] baseline steps trimmed by {-delta} to {max_item_total}.")
+                    if self.verbose > 0:
+                        print(f"[info] baseline steps trimmed by {-delta} to {max_item_total}.")
                 baseline_phases = new_phases
 
-        # ===== Shared collector =====
-        collector = Collector.options(max_concurrency=1).remote(
+        # ===== Shared collector (0 CPU; serial queue) =====
+        collector = Collector.options(num_cpus=0, max_concurrency=1).remote(
             seeds=seeds,
             keep_intermediate=self.save_intermediate,
             wandb_actor=self.wb,
             step_base=int(self.wandb_step_base),
             flush_interval_s=0.2,
             max_queue=16384,
+            verbose=self.verbose,
         )
 
-        # ===== Submit per-(seed,item) tasks =====
+        # ===== Prepare all tasks (baseline + per-item) and submit all =====
         item_labels = list(item_phases_map.keys()) if self.run_items else []
 
-        # Build task queue: (seed, mode, item_label)
-        pending: List[Tuple[int, str, Optional[str]]] = []
-        if self.run_baseline:
-            pending += [(s, "baseline", None) for s in seeds]
-        if self.run_items:
-            for s in seeds:
-                for lb in item_labels:
-                    pending.append((s, "item", lb))
-
-        # Decide concurrency (fallback to CPU count)
-        total_tasks = len([1 for x in pending])
-        maxc = self.max_conc or min(total_tasks, os.cpu_count() or 1)
-
-        in_flight: Dict[Any, Tuple[int, str, Optional[str]]] = {}
-        results: List[Dict[str, Any]] = []
-
+        futures2meta: Dict[Any, Tuple[int, str, Optional[str]]] = {}
         media_root = os.path.join(self.outdir, "media") if self.outdir is not None else None
         if media_root is not None:
             ensure_dir(Path(media_root))
 
-        # Helper to submit one actor job
+        first_seed = seeds[0] if seeds else None
+
         def submit(seed: int, mode: str, item_label: Optional[str], save_media: bool):
+            """Create one SeedTrainer actor and submit its run() call."""
             actor = SeedTrainer.options(num_cpus=1).remote(
                 seed=seed, envs=envs,
                 baseline_phases=baseline_phases, baseline_evals=baseline_evals,
@@ -713,31 +713,40 @@ class RayCurriculumTrainer:
                 collect_intermediate=self.save_intermediate,
                 media_root=(media_root if save_media else None),
                 media_opts=self.media_opts,
-                mode=mode,                             # "baseline" or "item"
-                single_item_label=item_label,          # None for baseline; label for item
+                mode=mode,  # "baseline" or "item"
+                single_item_label=item_label,  # None for baseline; label for item
             )
             fut = actor.run.remote()
-            in_flight[fut] = (seed, mode, item_label)
+            futures2meta[fut] = (seed, mode, item_label)
 
-        # Prime queue
-        while pending and len(in_flight) < maxc:
-            seed, mode, lb = pending.pop(0)
-            print(f"[seed {seed}] submit ({mode}{'/' + lb if lb else ''}).")
-            save_media = (len(in_flight) == 0)  # keep first task uploading media (optional policy)
-            submit(seed, mode, lb, save_media)
+        # Submit all baseline tasks (one per seed)
+        if self.run_baseline:
+            for s in seeds:
+                save_media = (s == first_seed)  # only the first seed records media
+                if self.verbose > 0:
+                    print(f"[seed {s}] submit (baseline) [media={'on' if save_media else 'off'}].")
+                submit(s, "baseline", None, save_media)
 
-        # Drain
-        while in_flight:
-            done, _ = ray.wait(list(in_flight.keys()), timeout=None, num_returns=1)
+        # Submit all per-item tasks (one task per (seed, item))
+        if self.run_items:
+            for s in seeds:
+                for lb in item_labels:
+                    save_media = (s == first_seed)  # only the first seed records media
+                    if self.verbose > 0:
+                        print(f"[seed {s}] submit (item/{lb}) [media={'on' if save_media else 'off'}].")
+                    submit(s, "item", lb, save_media)
+
+        # ===== Wait for completion and print who finished =====
+        results: List[Dict[str, Any]] = []
+        while futures2meta:
+            done, _ = ray.wait(list(futures2meta.keys()), timeout=None, num_returns=1)
             for fut in done:
-                seed, mode, lb = in_flight.pop(fut)
+                seed, mode, lb = futures2meta.pop(fut)
                 res = ray.get(fut)
                 results.append(res)
-                print(f"[seed {seed}] done ({mode}{'/' + lb if lb else ''}).")
-                if pending and len(in_flight) < maxc:
-                    seed2, mode2, lb2 = pending.pop(0)
-                    print(f"[seed {seed2}] submit ({mode2}{'/' + lb2 if lb2 else ''}).")
-                    submit(seed2, mode2, lb2, save_media=False)
+                tag = f"{mode}{'/' + lb if lb else ''}"
+                if self.verbose > 0:
+                    print(f"[seed {seed}] done ({tag}).")
 
         # ===== Merge baseline/items per seed (unchanged) =====
         by_seed: Dict[int, Dict[str, Any]] = {}
@@ -762,7 +771,7 @@ class RayCurriculumTrainer:
 
         merged_results: List[Dict[str, Any]] = [by_seed[s] for s in sorted(by_seed.keys())]
 
-        # ===== Optional timeline dump (unchanged) =====
+        # ===== Optional timeline dump =====
         if self.outdir is not None and self.save_intermediate:
             try:
                 tl = ray.get(collector.timeline.remote())
@@ -789,51 +798,54 @@ class RayCurriculumTrainer:
                 with open(os.path.join(seeds_dir, f"seed_{sid}.json"), "w") as f:
                     json.dump(r, f)
 
-        # ===== Upload videos =====
-        if self.wb is not None and media_root is not None:
-            to_log = []
+        # ===== Upload videos (unchanged; only first seed had media paths) =====
+        if self.wb is not None and self.outdir is not None:
+            media_root_dir = os.path.join(self.outdir, "media")
+            if os.path.isdir(media_root_dir):
+                to_log = []
 
-            def _enqueue(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
-                if not isinstance(media_map, dict):
-                    return
-                for name, path in media_map.items():
-                    if path:
-                        to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
+                def _enqueue(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
+                    if not isinstance(media_map, dict):
+                        return
+                    for name, path in media_map.items():
+                        if path:
+                            to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
 
-            def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
-                if not isinstance(boundary_map, dict):
-                    return
-                for phase_key, per_eval in boundary_map.items():
-                    if not isinstance(per_eval, dict):
+                def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
+                    if not isinstance(boundary_map, dict):
+                        return
+                    for phase_key, per_eval in boundary_map.items():
+                        if not isinstance(per_eval, dict):
+                            continue
+                        for eval_name, rec in per_eval.items():
+                            p = (rec or {}).get("media_path", None)
+                            if p:
+                                to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", p))
+
+                for r in merged_results:
+                    sd = int(r.get("seed", 0))
+                    base = r.get("baseline", None)
+                    if base and self.run_baseline:
+                        _enqueue(sd, "baseline", base.get("media", {}) or {})
+                        _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
+                    items = r.get("items", {}) or {}
+                    for lb, d in items.items():
+                        _enqueue(sd, str(lb), (d or {}).get("media", {}) or {})
+                        _enqueue_boundary(sd, str(lb), (d or {}).get("boundary", {}) or {})
+
+                fps = int(self.media_opts.get("fps", 8))
+                for key, path in to_log:
+                    if not (path and os.path.isfile(path)):
+                        if self.verbose > 0:
+                            print(f"[W&B] skip missing video: {path}")
                         continue
-                    for eval_name, rec in per_eval.items():
-                        p = (rec or {}).get("media_path", None)
-                        if p:
-                            to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", p))
+                    try:
+                        fmt = "gif" if str(path).lower().endswith(".gif") else None
+                        self.wb.log_video.remote(key, path, fps=fps, fmt=fmt)
+                    except Exception as e:
+                        print(f"[W&B] schedule video upload failed for {key}: {e}")
 
-            for r in merged_results:
-                sd = int(r.get("seed", 0))
-                base = r.get("baseline", None)
-                if base and self.run_baseline:
-                    _enqueue(sd, "baseline", base.get("media", {}) or {})
-                    _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
-                items = r.get("items", {}) or {}
-                for lb, d in items.items():
-                    _enqueue(sd, str(lb), (d or {}).get("media", {}) or {})
-                    _enqueue_boundary(sd, str(lb), (d or {}).get("boundary", {}) or {})
-
-            fps = int(self.media_opts.get("fps", 8))
-            for key, path in to_log:
-                if not (path and os.path.isfile(path)):
-                    print(f"[W&B] skip missing video: {path}")
-                    continue
-                try:
-                    fmt = "gif" if str(path).lower().endswith(".gif") else None
-                    self.wb.log_video.remote(key, path, fps=fps, fmt=fmt)
-                except Exception as e:
-                    print(f"[W&B] schedule video upload failed for {key}: {e}")
-
-        # ===== CSV & plots =====
+        # ===== CSV & plots (unchanged) =====
         if self.outdir is not None:
             steps_base = None
             base_curves = None
@@ -853,7 +865,6 @@ class RayCurriculumTrainer:
                 item_dir = os.path.join(self.outdir, str(lb))
                 ensure_dir(Path(item_dir))
 
-                # phase boundaries from the item itself
                 phs = item_phases_map.get(lb, [])
                 item_boundaries: List[int] = []
                 acc = 0
@@ -862,23 +873,19 @@ class RayCurriculumTrainer:
                     item_boundaries.append(acc)
                 boundaries_str = "-".join(str(b) for b in item_boundaries) if item_boundaries else "none"
 
-                # choose target eval (prefer "Target")
                 tgt = dd["Target"] if "Target" in dd else dd[next(iter(dd.keys()))]
 
-                # === USE EXACT TARGET STEPS; no fallback/union here ===
                 steps_tgt = np.asarray(tgt["steps"], dtype=int)
                 tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
                 tgt_g_std = np.asarray(tgt["greedy_std"], dtype=float)
                 tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
                 tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
 
-                # Save CSVs
                 save_csv(os.path.join(item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
                          steps_tgt, tgt_g_mean, tgt_g_std, header="greedy")
                 save_csv(os.path.join(item_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
                          steps_tgt, tgt_t_mean, tgt_t_std, header="train")
 
-                # Optional: source-like eval
                 src_name = next((k for k in dd.keys() if k.lower().startswith("source")), None)
                 if src_name is not None:
                     src = dd[src_name]
@@ -892,13 +899,10 @@ class RayCurriculumTrainer:
                     save_csv(os.path.join(item_dir, f"curriculum_eval_source_train_phase_{boundaries_str}.csv"),
                              steps_src, src_t_mean, src_t_std, header="train")
 
-                # ===== Strict plotting: assert totals equal, align on baseline steps =====
                 if self.run_baseline and base_curves is not None and steps_base is not None:
-                    # item total steps from its phases (design requires equality)
                     item_total_steps = sum(int(p.get("steps", 0)) for p in phs)
                     assert item_total_steps > 0, f"empty phases for item {lb}"
 
-                    # --- strong checks before plotting ---
                     def _tail(x):
                         return int(x[-1]) if len(x) else None
 
@@ -912,10 +916,8 @@ class RayCurriculumTrainer:
                     X = steps_base
 
                     def _interp_strict(x_old, mean, std, x_new, name):
-                        assert x_old[0] <= x_new[
-                            0], f"{name}: x_old starts after x_new (x_old[0]={x_old[0]}, x_new[0]={x_new[0]})"
-                        assert x_old[-1] >= x_new[
-                            -1], f"{name}: x_old ends before x_new (x_old[-1]={x_old[-1]}, x_new[-1]={x_new[-1]})"
+                        assert x_old[0] <= x_new[0], f"{name}: x_old starts after x_new"
+                        assert x_old[-1] >= x_new[-1], f"{name}: x_old ends before x_new"
                         return (np.interp(x_new, x_old, mean), np.interp(x_new, x_old, std))
 
                     base_g_mean_i, base_g_std_i = _interp_strict(
@@ -1030,8 +1032,7 @@ def run_curriculum(
     agent_kwargs: Dict[str, Any],
     eval_every: int,
     n_eval_episodes: int,
-    output_dir: Optional[str] = None,            # give default or place before wandb_step_base
-    max_concurrency: Optional[int] = None,
+    output_dir: Optional[str] = None,            # keep default
     save_intermediate: bool = True,
     wandb_actor: Optional[ActorHandle] = None,
     media_opts: Optional[Dict[str, Any]] = None,
@@ -1041,9 +1042,7 @@ def run_curriculum(
     metrics_opts: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    - Pure dicts for phases/evals/envs.
-    - Local writes happen iff output_dir is not None.
-    - W&B uploads happen iff you pass a WandbWriter actor (independent of local writes).
+    Slim convenience API: no manual concurrency controls anymore.
     """
     trainer = RayCurriculumTrainer(
         agent_ctor_path=agent_ctor_path,
@@ -1051,7 +1050,6 @@ def run_curriculum(
         eval_every=eval_every,
         n_eval_episodes=n_eval_episodes,
         output_dir=output_dir,
-        max_concurrency=max_concurrency,
         save_intermediate=save_intermediate,
         wandb_actor=wandb_actor,
         media_opts=media_opts,
