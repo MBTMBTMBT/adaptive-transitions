@@ -475,7 +475,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=60)
-    p.add_argument("--ga-generations", type=int, default=250)
+    p.add_argument("--ga-generations", type=int, default=200)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=12)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -537,7 +537,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="20000,130000",
+        default="20000,80000",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
     p.add_argument("--eval-every", type=int, default=1000)
@@ -677,7 +677,7 @@ def main():
                     },
                     "item_factory_path": SOURCE_FACTORY_PATH,
                     "item_max_steps": int(args.max_steps),
-                    "phase_steps": (20_000, 130_000),
+                    "phase_steps": (20_000, 80_000),
                     "seeds": 5,
                     "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                     "agent_kwargs": {
