@@ -639,155 +639,276 @@ class RayCurriculumTrainer:
 
     # --- compute metrics independent of CSV/plots ---
     def _compute_metrics(
-        self, summary: Dict[str, Any], item_phases_map: Dict[str, List[Dict[str, Any]]]
+            self,
+            summary: Dict[str, Any],
+            item_phases_map: Dict[str, List[Dict[str, Any]]],
+            evals_map: Dict[str, List[Dict[str, Any]]],
+            baseline_evals: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
-        Compute offline metrics from the aggregated summary.
-
-        Additions:
-          - For each item (preferring 'Target' eval), compute phase-wise AUCs:
-            * 'auc_phase.p1' : area over [start_step, boundary_step]
-            * 'auc_phase.p2' : area over [boundary_step, end_step]
-            * 'boundary_step': the phase-1 start / phase-0 end (i.e., sum of steps in phase-0)
-          Only available when that item has >= 2 phases.
+        Produce a stable metrics dict with float|None leaves.
+        - No eval-name fallback.
+        - None only when the metric is not definable by configuration or sampling.
+        - Raise if configuration declares an eval that is missing in summary.
         """
-        cfg = {
-            "ttt_fraction": self.metrics_opts["ttt_fraction"],
-            "ap_last_k": self.metrics_opts["ap_last_k"],
-            "use_max_step": self.metrics_opts["use_max_step"],
-            "compute_greedy": self.metrics_opts["compute_greedy"],
-            "compute_train": self.metrics_opts["compute_train"],
-            "js_baseline_first_k": self.metrics_opts["js_baseline_first_k"],
-        }
-        out: Dict[str, Any] = {"config": cfg, "baseline": {}, "items": {}}
 
-        # ---------------- optional baseline ----------------
-        b_g = b_t = None
-        steps_base = None
-        base_block = summary.get("baseline", {})
-        has_baseline = isinstance(base_block, dict) and len(base_block) > 0
+        def _cap(xs: np.ndarray, ys: np.ndarray, max_step: Optional[int]):
+            if max_step is None:
+                return xs, ys
+            if xs.size == 0 or max_step < xs[0]:
+                return xs[:0], ys[:0]  # empty -> undefined
+            mask = xs <= max_step
+            X = xs[mask]
+            Y = ys[mask]
+            if X.size == 0:
+                return X, Y
+            if X[-1] < max_step and xs[-1] >= max_step:
+                y_at = float(np.interp(max_step, xs, ys))
+                X = np.concatenate([X, np.array([max_step], int)])
+                Y = np.concatenate([Y, np.array([y_at], float)])
+            return X, Y
 
-        if has_baseline:
-            base_key = next(iter(base_block.keys()))
-            b = base_block[base_key]
-            steps_base = np.asarray(summary.get("steps", []), int)
-            if steps_base.size == 0:
-                raise ValueError("summary['steps'] is empty while baseline exists.")
+        def _auc_total(xs, ys, max_step):
+            X, Y = _cap(xs, ys, max_step)
+            if X.size < 2:
+                return None
+            return float(np.trapz(Y, X))
 
-            b_g = np.asarray(b["greedy_mean"], float)
-            b_t = np.asarray(b["train_mean"], float)
+        def _ap_last_k(xs, ys, k, max_step):
+            X, Y = _cap(xs, ys, max_step)
+            if Y.size < 1:
+                return None
+            k = max(1, min(int(k), int(Y.size)))
+            return float(np.mean(Y[-k:]))
 
-            if cfg["compute_greedy"]:
-                out["baseline"]["greedy"] = {
-                    "auc": _auc(steps_base, b_g, cfg["use_max_step"]),
-                    "ap": _ap(steps_base, b_g, cfg["ap_last_k"], cfg["use_max_step"]),
-                    "ttt": _ttt(
-                        steps_base, b_g, cfg["ttt_fraction"], cfg["use_max_step"]
-                    ),
-                }
-            if cfg["compute_train"]:
-                out["baseline"]["train"] = {
-                    "auc": _auc(steps_base, b_t, cfg["use_max_step"]),
-                    "ap": _ap(steps_base, b_t, cfg["ap_last_k"], cfg["use_max_step"]),
-                    "ttt": _ttt(
-                        steps_base, b_t, cfg["ttt_fraction"], cfg["use_max_step"]
-                    ),
-                }
+        def _ttt_frac(xs, ys, frac, max_step):
+            X, Y = _cap(xs, ys, max_step)
+            if Y.size < 1:
+                return None
+            thr = float(np.max(Y)) * float(frac)
+            idx = np.where(Y >= thr)[0]
+            return int(X[int(idx[0])]) if idx.size > 0 else None
 
-        # ------------ helper: trapezoidal AUC on [lo, hi] ------------
-        def _segmented_auc(
-            xs: np.ndarray, ys: np.ndarray, lo: float, hi: float
-        ) -> float:
+        def _seg_auc(xs, ys, lo, hi):
+            """Trapezoidal area on [lo, hi]; None if not enough support."""
+            if hi is None or lo is None or hi <= lo:
+                return None
+            xs = np.asarray(xs, float)
+            ys = np.asarray(ys, float)
+            if xs.size < 1 or ys.size != xs.size:
+                return None
+            x0, x1 = float(xs[0]), float(xs[-1])
+            lo = max(float(lo), x0)
+            hi = min(float(hi), x1)
             if hi <= lo:
-                return 0.0
-            xs = np.asarray(xs, dtype=float)
-            ys = np.asarray(ys, dtype=float)
-            assert (
-                xs.ndim == 1 and ys.ndim == 1 and xs.size == ys.size and xs.size >= 2
-            ), "invalid curve"
-            lo = max(lo, xs[0])
-            hi = min(hi, xs[-1])
-            if hi <= lo:
-                return 0.0
+                return None
+            # both bounds must be interpolable within [x0, x1]
             y_lo = float(np.interp(lo, xs, ys))
             y_hi = float(np.interp(hi, xs, ys))
             mask = (xs > lo) & (xs < hi)
             X = np.concatenate(([lo], xs[mask], [hi]))
             Y = np.concatenate(([y_lo], ys[mask], [y_hi]))
+            if X.size < 2:
+                return None
             return float(np.trapz(Y, X))
 
-        # ---------------- items (Target preferred) + phase-wise AUCs ----------------
-        for lb, eval_dict in summary.get("items", {}).items():
-            eval_name = (
-                "Target" if "Target" in eval_dict else next(iter(eval_dict.keys()))
-            )
-            e = eval_dict[eval_name]
-            xs = np.asarray(e["steps"], int)
-            g = np.asarray(e["greedy_mean"], float)
-            t = np.asarray(e["train_mean"], float)
+        def _interp_at(xs, ys, s):
+            xs = np.asarray(xs, float)
+            ys = np.asarray(ys, float)
+            if xs.size < 1 or ys.size != xs.size:
+                return None
+            if s < xs[0] or s > xs[-1]:
+                return None
+            return float(np.interp(float(s), xs, ys))
 
-            mi: Dict[str, Any] = {}
+        def _ensure_curve(block: Dict[str, Any], curve_name: str) -> Tuple[np.ndarray, np.ndarray]:
+            """Return (xs, ys) for curve_name; raise on structural errors."""
+            assert "steps" in block and curve_name in block, f"missing '{curve_name}' or steps"
+            xs = np.asarray(block["steps"], int)
+            ys = np.asarray(block[curve_name], float)
+            if xs.ndim != 1 or ys.ndim != 1 or xs.size != ys.size:
+                raise ValueError(f"shape mismatch in '{curve_name}' series")
+            return xs, ys
 
-            # whole-curve metrics
+        # ---- config snapshot ----
+        cfg = {
+            "ttt_fraction": float(self.metrics_opts["ttt_fraction"]),
+            "ap_last_k": int(self.metrics_opts["ap_last_k"]),
+            "use_max_step": self.metrics_opts["use_max_step"],
+            "compute_greedy": bool(self.metrics_opts["compute_greedy"]),
+            "compute_train": bool(self.metrics_opts["compute_train"]),
+            "js_baseline_first_k": int(self.metrics_opts["js_baseline_first_k"]),
+        }
+        out: Dict[str, Any] = {"config": cfg, "baseline": {}, "items": {}}
+
+        # ---- baseline metrics (only if configuration declares Target and run_baseline=True) ----
+        baseline_declares_target = (
+                self.run_baseline
+                and isinstance(baseline_evals, (list, tuple))
+                and any(str(e.get("name")) == "Target" for e in baseline_evals)
+        )
+
+        baseline_block = summary.get("baseline", {}) or {}
+        baseline_target = None
+        if baseline_declares_target:
+            if "Target" not in baseline_block:
+                raise ValueError("baseline config declares 'Target' but summary.baseline['Target'] missing")
+            baseline_target = baseline_block["Target"]
+
+            # Greedy/train totals/AP/TTT; write None if not enough samples.
+            def _fill_baseline(chan: str):
+                xs, ys = _ensure_curve(baseline_target, f"{chan}_mean")
+                return {
+                    "auc_total": _auc_total(xs, ys, cfg["use_max_step"]),
+                    "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], cfg["use_max_step"]),
+                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], cfg["use_max_step"]),
+                }
+
             if cfg["compute_greedy"]:
-                mi.setdefault("greedy", {})
-                mi["greedy"]["auc"] = _auc(xs, g, cfg["use_max_step"])
-                mi["greedy"]["ap"] = _ap(xs, g, cfg["ap_last_k"], cfg["use_max_step"])
-                mi["greedy"]["ttt"] = _ttt(
-                    xs, g, cfg["ttt_fraction"], cfg["use_max_step"]
-                )
+                out["baseline"]["greedy"] = _fill_baseline("greedy")
+            else:
+                out["baseline"]["greedy"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
             if cfg["compute_train"]:
-                mi.setdefault("train", {})
-                mi["train"]["auc"] = _auc(xs, t, cfg["use_max_step"])
-                mi["train"]["ap"] = _ap(xs, t, cfg["ap_last_k"], cfg["use_max_step"])
-                mi["train"]["ttt"] = _ttt(
-                    xs, t, cfg["ttt_fraction"], cfg["use_max_step"]
-                )
+                out["baseline"]["train"] = _fill_baseline("train")
+            else:
+                out["baseline"]["train"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
+        else:
+            # not definable by configuration
+            out["baseline"]["greedy"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
+            out["baseline"]["train"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
 
-            # phase-wise AUCs (>=2 phases)
-            phs = item_phases_map.get(lb, [])
-            if len(phs) >= 2 and xs.size >= 2:
-                boundary = float(int(phs[0].get("steps", 0)))
-                start_s = float(xs[0])
-                end_s = float(xs[-1])
+        # ---- per-item metrics ----
+        for lb, eval_dict in (summary.get("items", {}) or {}).items():
+            item_out: Dict[str, Any] = {
+                "target": {"greedy": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
+                                      "ttt_fraction": None},
+                           "train": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
+                                     "ttt_fraction": None}},
+                "item": {"greedy": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
+                                    "ttt_fraction": None},
+                         "train": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
+                                   "ttt_fraction": None}},
+                "jumpstart": {
+                    "greedy": {
+                        "target_B_minus_baseline_start": None,
+                        "target_B_minus_target_start": None,
+                        "target_B_minus_baseline_B": None,
+                    },
+                    "train": {
+                        "target_B_minus_baseline_start": None,
+                        "target_B_minus_target_start": None,
+                        "target_B_minus_baseline_B": None,
+                    },
+                },
+            }
 
+            # configuration gates
+            item_cfg = evals_map.get(lb, []) or []
+            has_target_eval = any(str(e.get("name")) == "Target" for e in item_cfg)
+            has_self_eval = any(str(e.get("name")) == str(lb) for e in item_cfg)
+
+            # local pointer for curves (raise if config says it must exist)
+            tgt_block = None
+            if has_target_eval:
+                if "Target" not in eval_dict:
+                    raise ValueError(f"item '{lb}' config declares Target eval but summary missing it")
+                tgt_block = eval_dict["Target"]
+
+            self_block = None
+            if has_self_eval:
+                if lb not in eval_dict:
+                    raise ValueError(f"item '{lb}' config declares self eval '{lb}' but summary missing it")
+                self_block = eval_dict[lb]
+
+            # phase boundary (for p1/p2/jumpstart); None if len<2
+            phs = item_phases_map.get(lb, []) or []
+            if len(phs) >= 2:
+                B = int(phs[0].get("steps", 0))
+                if B < 0:
+                    raise ValueError(f"invalid phase boundary for item '{lb}': {B}")
+            else:
+                B = None  # not definable
+
+            # --- fill a channel packer ---
+            def _pack_env(block, chan: str):
+                if block is None:
+                    return {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None, "ttt_fraction": None}
+                xs, ys = _ensure_curve(block, f"{chan}_mean")
+                outp = {
+                    "auc_total": _auc_total(xs, ys, cfg["use_max_step"]),
+                    "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], cfg["use_max_step"]),
+                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], cfg["use_max_step"]),
+                    "auc_p1": None,
+                    "auc_p2": None,
+                }
+                if B is not None:
+                    # segment AUCs; None if not enough support inside each segment
+                    start_s = float(xs[0]) if xs.size else None
+                    end_s = float(xs[-1]) if xs.size else None
+                    outp["auc_p1"] = _seg_auc(xs, ys, start_s, float(B)) if xs.size else None
+                    outp["auc_p2"] = _seg_auc(xs, ys, float(B), end_s) if xs.size else None
+                return outp
+
+            # target/item metrics
+            if cfg["compute_greedy"]:
+                item_out["target"]["greedy"] = _pack_env(tgt_block, "greedy")
+                item_out["item"]["greedy"] = _pack_env(self_block, "greedy")
+            if cfg["compute_train"]:
+                item_out["target"]["train"] = _pack_env(tgt_block, "train")
+                item_out["item"]["train"] = _pack_env(self_block, "train")
+
+            # jumpstarts (only definitions; write None when prerequisites absent)
+            if B is not None and tgt_block is not None:
+                # y_tgt(B)
+                xs_g, yg = _ensure_curve(tgt_block, "greedy_mean") if cfg["compute_greedy"] else (None, None)
+                xs_t, yt = _ensure_curve(tgt_block, "train_mean") if cfg["compute_train"] else (None, None)
+                ytg_B_g = _interp_at(xs_g, yg, B) if cfg["compute_greedy"] else None
+                ytg_B_t = _interp_at(xs_t, yt, B) if cfg["compute_train"] else None
+
+                # target start values
+                ytg_0_g = float(yg[0]) if cfg["compute_greedy"] and yg is not None and yg.size else None
+                ytg_0_t = float(yt[0]) if cfg["compute_train"] and yt is not None and yt.size else None
+
+                # baseline references (if baseline Target configured)
+                if baseline_declares_target and baseline_target is not None:
+                    bx_g_xs, bx_g = _ensure_curve(baseline_target, "greedy_mean") if cfg["compute_greedy"] else (None,
+                                                                                                                 None)
+                    bx_t_xs, bx_t = _ensure_curve(baseline_target, "train_mean") if cfg["compute_train"] else (None,
+                                                                                                               None)
+                    k0 = max(1, int(cfg["js_baseline_first_k"]))
+                    base_start_g = float(np.mean(bx_g[:k0])) if cfg[
+                                                                    "compute_greedy"] and bx_g is not None and bx_g.size >= 1 else None
+                    base_start_t = float(np.mean(bx_t[:k0])) if cfg[
+                                                                    "compute_train"] and bx_t is not None and bx_t.size >= 1 else None
+                    base_B_g = _interp_at(bx_g_xs, bx_g, B) if cfg["compute_greedy"] else None
+                    base_B_t = _interp_at(bx_t_xs, bx_t, B) if cfg["compute_train"] else None
+                else:
+                    base_start_g = base_start_t = base_B_g = base_B_t = None
+
+                # greedy channel jumpstarts
                 if cfg["compute_greedy"]:
-                    p1 = _segmented_auc(xs, g, start_s, boundary)
-                    p2 = _segmented_auc(xs, g, boundary, end_s)
-                    mi.setdefault("greedy", {})
-                    mi["greedy"]["auc_phase"] = {
-                        "p1": float(p1),
-                        "p2": float(p2),
-                        "boundary_step": int(boundary),
-                    }
+                    item_out["jumpstart"]["greedy"]["target_B_minus_baseline_start"] = (
+                        None if (ytg_B_g is None or base_start_g is None) else float(ytg_B_g - base_start_g)
+                    )
+                    item_out["jumpstart"]["greedy"]["target_B_minus_target_start"] = (
+                        None if (ytg_B_g is None or ytg_0_g is None) else float(ytg_B_g - ytg_0_g)
+                    )
+                    item_out["jumpstart"]["greedy"]["target_B_minus_baseline_B"] = (
+                        None if (ytg_B_g is None or base_B_g is None) else float(ytg_B_g - base_B_g)
+                    )
+                # train channel jumpstarts
                 if cfg["compute_train"]:
-                    p1 = _segmented_auc(xs, t, start_s, boundary)
-                    p2 = _segmented_auc(xs, t, boundary, end_s)
-                    mi.setdefault("train", {})
-                    mi["train"]["auc_phase"] = {
-                        "p1": float(p1),
-                        "p2": float(p2),
-                        "boundary_step": int(boundary),
-                    }
+                    item_out["jumpstart"]["train"]["target_B_minus_baseline_start"] = (
+                        None if (ytg_B_t is None or base_start_t is None) else float(ytg_B_t - base_start_t)
+                    )
+                    item_out["jumpstart"]["train"]["target_B_minus_target_start"] = (
+                        None if (ytg_B_t is None or ytg_0_t is None) else float(ytg_B_t - ytg_0_t)
+                    )
+                    item_out["jumpstart"]["train"]["target_B_minus_baseline_B"] = (
+                        None if (ytg_B_t is None or base_B_t is None) else float(ytg_B_t - base_B_t)
+                    )
 
-            # jumpstart: only if baseline present
-            js: Dict[str, Any] = {}
-            if len(phs) >= 2 and has_baseline and steps_base is not None:
-                second_phase_start = int(phs[0].get("steps", 0))
-                k0 = max(1, int(cfg["js_baseline_first_k"]))
-                if cfg["compute_greedy"] and b_g is not None:
-                    base_start_g = float(np.mean(b_g[:k0]))
-                    item_p2_g = _value_at(xs, g, second_phase_start)
-                    js["greedy"] = float(item_p2_g - base_start_g)
-                if cfg["compute_train"] and b_t is not None:
-                    base_start_t = float(np.mean(b_t[:k0]))
-                    item_p2_t = _value_at(xs, t, second_phase_start)
-                    js["train"] = float(item_p2_t - base_start_t)
-                js["second_phase_start_step"] = second_phase_start
-                js["baseline_start_step"] = 0
-            mi["jumpstart"] = js
-
-            out["items"][str(lb)] = mi
+            out["items"][str(lb)] = item_out
 
         return out
 
@@ -969,10 +1090,15 @@ class RayCurriculumTrainer:
             except Exception as e:
                 print(f"[driver] dump timeline failed: {e}")
 
-        # ===== Aggregate & metrics (unchanged) =====
+        # ===== Aggregate & metrics =====
         summary = self._aggregate(merged_results, item_phases_map)
         if self.metrics_opts.get("enabled", True):
-            metrics = self._compute_metrics(summary, item_phases_map)
+            metrics = self._compute_metrics(
+                summary,
+                item_phases_map=item_phases_map,
+                evals_map=evals_map,
+                baseline_evals=baseline_evals,
+            )
             summary["metrics"] = metrics
 
         # ===== Save per-seed JSONs =====
@@ -987,26 +1113,20 @@ class RayCurriculumTrainer:
                 with open(os.path.join(seeds_dir, f"seed_{sid}.json"), "w") as f:
                     json.dump(r, f)
 
-        # ===== Upload videos (unchanged; only first seed had media paths) =====
+        # ===== Upload videos (kept; W&B IO guarded separately) =====
         if self.wb is not None and self.outdir is not None:
             media_root_dir = os.path.join(self.outdir, "media")
             if os.path.isdir(media_root_dir):
                 to_log = []
 
-                def _enqueue(
-                    seed_id: int, label: str, media_map: Dict[str, Optional[str]]
-                ):
+                def _enqueue(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
                     if not isinstance(media_map, dict):
                         return
                     for name, path in media_map.items():
                         if path:
-                            to_log.append(
-                                (f"media/seed_{seed_id}/{label}/{name}", path)
-                            )
+                            to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
 
-                def _enqueue_boundary(
-                    seed_id: int, label: str, boundary_map: Dict[str, Any]
-                ):
+                def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
                     if not isinstance(boundary_map, dict):
                         return
                     for phase_key, per_eval in boundary_map.items():
@@ -1015,27 +1135,18 @@ class RayCurriculumTrainer:
                         for eval_name, rec in per_eval.items():
                             p = (rec or {}).get("media_path", None)
                             if p:
-                                to_log.append(
-                                    (
-                                        f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}",
-                                        p,
-                                    )
-                                )
+                                to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", p))
 
                 for r in merged_results:
                     sd = int(r.get("seed", 0))
                     base = r.get("baseline", None)
                     if base and self.run_baseline:
                         _enqueue(sd, "baseline", base.get("media", {}) or {})
-                        _enqueue_boundary(
-                            sd, "baseline", base.get("boundary", {}) or {}
-                        )
+                        _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
                     items = r.get("items", {}) or {}
                     for lb, d in items.items():
                         _enqueue(sd, str(lb), (d or {}).get("media", {}) or {})
-                        _enqueue_boundary(
-                            sd, str(lb), (d or {}).get("boundary", {}) or {}
-                        )
+                        _enqueue_boundary(sd, str(lb), (d or {}).get("boundary", {}) or {})
 
                 fps = int(self.media_opts.get("fps", 8))
                 for key, path in to_log:
@@ -1049,15 +1160,22 @@ class RayCurriculumTrainer:
                     except Exception as e:
                         print(f"[W&B] schedule video upload failed for {key}: {e}")
 
-        # ===== CSV & plots (unchanged) =====
+        # ===== CSV & plots (gated strictly by configuration; no eval-name fallback) =====
         if self.outdir is not None:
+            # Does configuration declare baseline Target?
+            baseline_declares_target = (
+                    self.run_baseline
+                    and isinstance(baseline_evals, (list, tuple))
+                    and any(str(e.get("name")) == "Target" for e in baseline_evals)
+            )
+
             steps_base = None
             base_curves = None
-
-            if self.run_baseline and ("baseline" in summary and summary["baseline"]):
-                base_key = next(iter(summary["baseline"].keys()))
-                steps_base = np.asarray(summary["steps"], dtype=int)
-                base = summary["baseline"][base_key]
+            if baseline_declares_target:
+                if "baseline" not in summary or "Target" not in summary["baseline"]:
+                    raise ValueError("baseline config declares 'Target' but summary.baseline['Target'] missing")
+                steps_base = np.asarray(summary["baseline"]["Target"]["steps"], dtype=int)
+                base = summary["baseline"]["Target"]
                 base_curves = {
                     "greedy_mean": np.asarray(base["greedy_mean"], dtype=float),
                     "greedy_std": np.asarray(base["greedy_std"], dtype=float),
@@ -1069,122 +1187,101 @@ class RayCurriculumTrainer:
                 item_dir = os.path.join(self.outdir, str(lb))
                 ensure_dir(Path(item_dir))
 
-                phs = item_phases_map.get(lb, [])
+                phs = item_phases_map.get(lb, []) or []
+                # phase boundaries for plotting labels
                 item_boundaries: List[int] = []
                 acc = 0
                 for ph in phs[:-1]:
                     acc += int(ph.get("steps", 0))
                     item_boundaries.append(acc)
-                boundaries_str = (
-                    "-".join(str(b) for b in item_boundaries)
-                    if item_boundaries
-                    else "none"
-                )
+                boundaries_str = "-".join(str(b) for b in item_boundaries) if item_boundaries else "none"
 
-                tgt = dd["Target"] if "Target" in dd else dd[next(iter(dd.keys()))]
+                # What evals are declared for this item?
+                item_cfg = evals_map.get(lb, []) or []
+                has_target_eval = any(str(e.get("name")) == "Target" for e in item_cfg)
+                has_self_eval = any(str(e.get("name")) == str(lb) for e in item_cfg)
 
-                steps_tgt = np.asarray(tgt["steps"], dtype=int)
-                tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
-                tgt_g_std = np.asarray(tgt["greedy_std"], dtype=float)
-                tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
-                tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
+                # ---- CSV dumps ----
+                if has_target_eval:
+                    if "Target" not in dd:
+                        raise ValueError(f"item '{lb}' config declares Target eval but summary missing it")
+                    tgt = dd["Target"]
+                    steps_tgt = np.asarray(tgt["steps"], dtype=int)
+                    tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
+                    tgt_g_std = np.asarray(tgt["greedy_std"], dtype=float)
+                    tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
+                    tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
 
-                save_csv(
-                    os.path.join(
-                        item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"
-                    ),
-                    steps_tgt,
-                    tgt_g_mean,
-                    tgt_g_std,
-                    header="greedy",
-                )
-                save_csv(
-                    os.path.join(
-                        item_dir,
-                        f"curriculum_eval_target_train_phase_{boundaries_str}.csv",
-                    ),
-                    steps_tgt,
-                    tgt_t_mean,
-                    tgt_t_std,
-                    header="train",
-                )
-
-                src_name = next(
-                    (k for k in dd.keys() if k.lower().startswith("source")), None
-                )
-                if src_name is not None:
-                    src = dd[src_name]
-                    steps_src = np.asarray(src["steps"], dtype=int)
-                    src_g_mean = np.asarray(src["greedy_mean"], dtype=float)
-                    src_g_std = np.asarray(src["greedy_std"], dtype=float)
-                    src_t_mean = np.asarray(src["train_mean"], dtype=float)
-                    src_t_std = np.asarray(src["train_std"], dtype=float)
                     save_csv(
-                        os.path.join(
-                            item_dir,
-                            f"curriculum_eval_source_phase_{boundaries_str}.csv",
-                        ),
-                        steps_src,
-                        src_g_mean,
-                        src_g_std,
-                        header="greedy",
+                        os.path.join(item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
+                        steps_tgt, tgt_g_mean, tgt_g_std, header="greedy",
                     )
                     save_csv(
-                        os.path.join(
-                            item_dir,
-                            f"curriculum_eval_source_train_phase_{boundaries_str}.csv",
-                        ),
-                        steps_src,
-                        src_t_mean,
-                        src_t_std,
-                        header="train",
+                        os.path.join(item_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
+                        steps_tgt, tgt_t_mean, tgt_t_std, header="train",
                     )
 
-                if (
-                    self.run_baseline
-                    and base_curves is not None
-                    and steps_base is not None
-                ):
+                if has_self_eval:
+                    if lb not in dd:
+                        raise ValueError(f"item '{lb}' config declares self eval '{lb}' but summary missing it")
+                    selfb = dd[lb]
+                    steps_self = np.asarray(selfb["steps"], dtype=int)
+                    self_g_mean = np.asarray(selfb["greedy_mean"], dtype=float)
+                    self_g_std = np.asarray(selfb["greedy_std"], dtype=float)
+                    self_t_mean = np.asarray(selfb["train_mean"], dtype=float)
+                    self_t_std = np.asarray(selfb["train_std"], dtype=float)
+
+                    save_csv(
+                        os.path.join(item_dir, f"curriculum_eval_item_phase_{boundaries_str}.csv"),
+                        steps_self, self_g_mean, self_g_std, header="greedy",
+                    )
+                    save_csv(
+                        os.path.join(item_dir, f"curriculum_eval_item_train_phase_{boundaries_str}.csv"),
+                        steps_self, self_t_mean, self_t_std, header="train",
+                    )
+
+                # ---- Pairwise plot (baseline Target vs item Target) ----
+                if baseline_declares_target and has_target_eval:
+                    if base_curves is None or steps_base is None:
+                        raise ValueError("baseline Target curves are required but missing")
+                    if "Target" not in dd:
+                        raise ValueError(f"item '{lb}' Target curves required for plotting but missing")
+
                     item_total_steps = sum(int(p.get("steps", 0)) for p in phs)
                     assert item_total_steps > 0, f"empty phases for item {lb}"
+
+                    tgt = dd["Target"]
+                    steps_tgt = np.asarray(tgt["steps"], dtype=int)
+                    tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
+                    tgt_g_std = np.asarray(tgt["greedy_std"], dtype=float)
+                    tgt_t_mean = np.asarray(tgt["train_mean"], dtype=float)
+                    tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
 
                     def _tail(x):
                         return int(x[-1]) if len(x) else None
 
                     msg_base = f"[plot-check] baseline tail={_tail(steps_base)} len={len(steps_base)}"
                     msg_tgt = f"[plot-check] tgt({lb}) tail={_tail(steps_tgt)} len={len(steps_tgt)}"
-                    assert (
-                        _tail(steps_base) == item_total_steps
-                    ), f"baseline total({_tail(steps_base)}) != item_total({item_total_steps}). {msg_base}"
-                    assert (
-                        _tail(steps_tgt) == item_total_steps
-                    ), f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
+                    assert _tail(steps_base) == item_total_steps, \
+                        f"baseline total({_tail(steps_base)}) != item_total({item_total_steps}). {msg_base}"
+                    assert _tail(steps_tgt) == item_total_steps, \
+                        f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
 
                     X = steps_base
 
                     def _interp_strict(x_old, mean, std, x_new, name):
                         assert x_old[0] <= x_new[0], f"{name}: x_old starts after x_new"
-                        assert (
-                            x_old[-1] >= x_new[-1]
-                        ), f"{name}: x_old ends before x_new"
+                        assert x_old[-1] >= x_new[-1], f"{name}: x_old ends before x_new"
                         return (
                             np.interp(x_new, x_old, mean),
                             np.interp(x_new, x_old, std),
                         )
 
                     base_g_mean_i, base_g_std_i = _interp_strict(
-                        steps_base,
-                        base_curves["greedy_mean"],
-                        base_curves["greedy_std"],
-                        X,
-                        "baseline/greedy",
+                        steps_base, base_curves["greedy_mean"], base_curves["greedy_std"], X, "baseline/greedy"
                     )
                     base_t_mean_i, base_t_std_i = _interp_strict(
-                        steps_base,
-                        base_curves["train_mean"],
-                        base_curves["train_std"],
-                        X,
-                        "baseline/train",
+                        steps_base, base_curves["train_mean"], base_curves["train_std"], X, "baseline/train"
                     )
 
                     tgt_g_mean_i, tgt_g_std_i = _interp_strict(
@@ -1194,45 +1291,40 @@ class RayCurriculumTrainer:
                         steps_tgt, tgt_t_mean, tgt_t_std, X, f"tgt({lb})/train"
                     )
 
-                    curves_source_i = None
-                    if src_name is not None:
-                        assert (
-                            steps_src[-1] == item_total_steps
-                        ), f"source total({steps_src[-1]}) != item_total({item_total_steps}) for {lb}/{src_name}"
-                        src_g_mean_i, src_g_std_i = _interp_strict(
-                            steps_src, src_g_mean, src_g_std, X, f"src({lb})/greedy"
+                    curves_item_i = None
+                    if has_self_eval:
+                        selfb = dd[lb]
+                        steps_self = np.asarray(selfb["steps"], dtype=int)
+                        assert steps_self[-1] == item_total_steps, \
+                            f"self total({steps_self[-1]}) != item_total({item_total_steps}) for {lb}"
+                        self_g_mean_i, self_g_std_i = _interp_strict(
+                            steps_self, np.asarray(selfb["greedy_mean"], float), np.asarray(selfb["greedy_std"], float),
+                            X, f"item({lb})/greedy"
                         )
-                        src_t_mean_i, src_t_std_i = _interp_strict(
-                            steps_src, src_t_mean, src_t_std, X, f"src({lb})/train"
+                        self_t_mean_i, self_t_std_i = _interp_strict(
+                            steps_self, np.asarray(selfb["train_mean"], float), np.asarray(selfb["train_std"], float),
+                            X, f"item({lb})/train"
                         )
-                        curves_source_i = {
-                            "greedy_mean": src_g_mean_i,
-                            "greedy_std": src_g_std_i,
-                            "train_mean": src_t_mean_i,
-                            "train_std": src_t_std_i,
+                        curves_item_i = {
+                            "greedy_mean": self_g_mean_i, "greedy_std": self_g_std_i,
+                            "train_mean": self_t_mean_i, "train_std": self_t_std_i,
                         }
 
-                    png_path = os.path.join(
-                        item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png"
-                    )
+                    png_path = os.path.join(item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
                     plot_pairwise(
                         out_png_path=png_path,
                         checkpoints=X,
                         phase_boundaries=item_boundaries,
                         title_prefix=f"Pairwise for '{lb}'",
                         baseline={
-                            "greedy_mean": base_g_mean_i,
-                            "greedy_std": base_g_std_i,
-                            "train_mean": base_t_mean_i,
-                            "train_std": base_t_std_i,
+                            "greedy_mean": base_g_mean_i, "greedy_std": base_g_std_i,
+                            "train_mean": base_t_mean_i, "train_std": base_t_std_i,
                         },
                         curves_target={
-                            "greedy_mean": tgt_g_mean_i,
-                            "greedy_std": tgt_g_std_i,
-                            "train_mean": tgt_t_mean_i,
-                            "train_std": tgt_t_std_i,
+                            "greedy_mean": tgt_g_mean_i, "greedy_std": tgt_g_std_i,
+                            "train_mean": tgt_t_mean_i, "train_std": tgt_t_std_i,
                         },
-                        curves_source=curves_source_i,
+                        curves_source=curves_item_i,  # optional (self-eval)
                     )
 
                     if self.wb is not None:
@@ -1246,85 +1338,88 @@ class RayCurriculumTrainer:
 
     # --- offline aggregation ---
     def _aggregate(
-        self,
-        per_seed: List[Dict[str, Any]],
-        item_phases_map: Dict[str, List[Dict[str, Any]]],
+            self,
+            per_seed: List[Dict[str, Any]],
+            item_phases_map: Dict[str, List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
+        """Aggregate per-seed traces. No eval-name fallback; keep all evals explicitly."""
         assert per_seed, "no results"
         labels = sorted(item_phases_map.keys())
 
         def _stack(ll: List[List[float]]) -> Tuple[List[float], List[float]]:
             arr = np.asarray([np.asarray(x, float) for x in ll])
+            assert arr.ndim == 2, "invalid series shape"
             return arr.mean(0).tolist(), arr.std(0).tolist()
-
-        # -------- detect whether baseline exists --------
-        first_base = per_seed[0].get("baseline", None)
-        has_baseline = (
-            isinstance(first_base, dict)
-            and "steps" in first_base
-            and isinstance(first_base["steps"], dict)
-            and len(first_base["steps"]) > 0
-        )
 
         out: Dict[str, Any] = {"steps": None, "baseline": {}, "items": {}}
 
-        # -------- aggregate baseline only when present --------
+        # -------- baseline: aggregate all eval names if present (no fallback) --------
+        first_base = per_seed[0].get("baseline", None)
+        has_baseline = (
+                isinstance(first_base, dict)
+                and "steps" in first_base
+                and isinstance(first_base["steps"], dict)
+                and len(first_base["steps"]) > 0
+        )
         if has_baseline:
             base_names = list(first_base["steps"].keys())
             assert base_names, "no baseline evals"
-            base_primary = base_names[0]
 
-            ref_steps = per_seed[0]["baseline"]["steps"][base_primary]
-            for r in per_seed:
-                assert (
-                    r["baseline"]["steps"][base_primary] == ref_steps
-                ), "baseline steps mismatch"
+            for eval_name in base_names:
+                ref_steps = per_seed[0]["baseline"]["steps"][eval_name]
+                for r in per_seed:
+                    assert (
+                            r["baseline"]["steps"][eval_name] == ref_steps
+                    ), f"baseline steps mismatch on eval '{eval_name}'"
 
-            g_mean, g_std = _stack(
-                [r["baseline"][base_primary]["greedy"] for r in per_seed]
-            )
-            t_mean, t_std = _stack(
-                [r["baseline"][base_primary]["train"] for r in per_seed]
-            )
-
-            out["steps"] = ref_steps
-            out["baseline"] = {
-                base_primary: {
+                g_mean, g_std = _stack(
+                    [r["baseline"][eval_name]["greedy"] for r in per_seed]
+                )
+                t_mean, t_std = _stack(
+                    [r["baseline"][eval_name]["train"] for r in per_seed]
+                )
+                out["baseline"][eval_name] = {
+                    "steps": ref_steps,
                     "greedy_mean": g_mean,
                     "greedy_std": g_std,
                     "train_mean": t_mean,
                     "train_std": t_std,
                 }
-            }
 
-        # -------- aggregate items (unchanged) --------
-        if labels:
-            for lb in labels:
-                # available eval names for this item (skip helper keys)
-                eval_names = [
-                    k
-                    for k in per_seed[0]["items"][lb].keys()
-                    if k not in ("steps", "boundary", "media")
-                ]
-                steps_ref = per_seed[0]["items"][lb]["steps"]
+            # Reference steps only if baseline contains "Target"
+            out["steps"] = (
+                out["baseline"]["Target"]["steps"] if "Target" in out["baseline"] else None
+            )
+
+        # -------- items: aggregate each configured eval name for each item --------
+        for lb in labels:
+            assert "items" in per_seed[0] and lb in per_seed[0]["items"], f"missing item '{lb}'"
+            # available eval names for this item (skip helper keys)
+            eval_names = [
+                k
+                for k in per_seed[0]["items"][lb].keys()
+                if k not in ("steps", "boundary", "media")
+            ]
+            steps_ref_map = per_seed[0]["items"][lb]["steps"]
+            agg: Dict[str, Any] = {}
+
+            for nm in eval_names:
+                ref_steps = steps_ref_map[nm]
                 for r in per_seed:
-                    for nm in eval_names:
-                        assert (
-                            r["items"][lb]["steps"][nm] == steps_ref[nm]
-                        ), f"steps mismatch for {lb}/{nm}"
+                    assert (
+                            r["items"][lb]["steps"][nm] == ref_steps
+                    ), f"steps mismatch for item '{lb}' eval '{nm}'"
 
-                agg = {}
-                for nm in eval_names:
-                    gm, gs = _stack([r["items"][lb][nm]["greedy"] for r in per_seed])
-                    tm, ts = _stack([r["items"][lb][nm]["train"] for r in per_seed])
-                    agg[nm] = {
-                        "steps": steps_ref[nm],
-                        "greedy_mean": gm,
-                        "greedy_std": gs,
-                        "train_mean": tm,
-                        "train_std": ts,
-                    }
-                out["items"][lb] = agg
+                gm, gs = _stack([r["items"][lb][nm]["greedy"] for r in per_seed])
+                tm, ts = _stack([r["items"][lb][nm]["train"] for r in per_seed])
+                agg[nm] = {
+                    "steps": ref_steps,
+                    "greedy_mean": gm,
+                    "greedy_std": gs,
+                    "train_mean": tm,
+                    "train_std": ts,
+                }
+            out["items"][lb] = agg
 
         return out
 
