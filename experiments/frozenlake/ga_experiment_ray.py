@@ -474,10 +474,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=60)
-    p.add_argument("--ga-generations", type=int, default=250)
+    p.add_argument("--ga-pop-size", type=int, default=20)
+    p.add_argument("--ga-generations", type=int, default=25)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=12)
+    p.add_argument("--ga-elitism", type=int, default=2)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=str2bool, default=True)
@@ -690,7 +690,7 @@ def main():
                         "verbose": 0,
                     },
                     "eval_every": 2000,
-                    "n_eval_episodes": 50,
+                    "n_eval_episodes": 25,
                     # optional, default "greedy"
                     # "curve": "greedy",
                     # "evals": [{"name":"Target","env":"target"}],
