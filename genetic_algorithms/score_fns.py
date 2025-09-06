@@ -273,96 +273,80 @@ def obj_cl_phase_auc(
     n_eval_episodes: int,
     # ---- optional knobs ----
     evals: Sequence[Dict[str, Any]] | None = None,
-    curve: str = "greedy",  # default to greedy as requested
+    curve: str = "greedy",        # "greedy" | "train"
+    eval_scope: str = "target",   # "target" | "item" — which eval branch to score on
 ) -> Sequence[float]:
     """
-    Score by curriculum-learning phase-wise AUCs on the chosen eval curve.
+    Score by curriculum-learning phase-wise AUCs on the chosen curve/scope.
 
     Returns:
-        [phase1_auc, phase2_auc]  (maximize both)
+        [auc_p1, auc_p2]  (maximize both)
 
-    Contract:
+    Contract (strict):
     - Runs CL ONLY (no baseline), no W&B, no filesystem outputs.
-    - Uses the candidate MDP as the 'item' env by passing mdp.to_portable()
-      directly into the item factory cfg (no temp JSON files).
-    - Requires exactly >= 2 phases; phase-1 on item, phase-2 on target.
-    - Computes phase-wise AUCs produced by the trainer's metrics:
-        summary["metrics"]["items"]["CAND"][curve]["auc_phase"] -> {"p1", "p2", ...}
+    - Uses the candidate MDP as the 'item' env via in-memory portable.
+    - Requires >= 2 phases: phase-1 on item, phase-2 on target.
+    - Expects metrics at:
+        summary["metrics"]["items"]["CAND"][eval_scope][curve]["auc_p1"|"auc_p2"]
     """
 
+    # ---- strict arg checks ----
     curve_key = str(curve).lower()
     if curve_key not in ("greedy", "train"):
-        raise ValueError(
-            "obj_cl_phase_auc: 'curve' must be either 'greedy' or 'train'."
-        )
+        raise ValueError("obj_cl_phase_auc: 'curve' must be 'greedy' or 'train'.")
+    scope_key = str(eval_scope).lower()
+    if scope_key not in ("target", "item"):
+        raise ValueError("obj_cl_phase_auc: 'eval_scope' must be 'target' or 'item'.")
+    if not isinstance(phase_steps, (list, tuple)) or len(phase_steps) < 2:
+        raise ValueError("obj_cl_phase_auc: needs at least two phases (p1, p2).")
 
-    # default evals -> evaluate only on Target
-    evals_final: List[Dict[str, Any]]
+    # ---- default evals: record Target; add Item if you want item-scope curves too ----
     if evals is None:
-        evals_final = [{"name": "Target", "env": "target"}]
+        evals_final: List[Dict[str, Any]] = [{"name": "Target", "env": "target"}]
+        # If you also want item-scope metrics produced during the run, include:
+        # evals_final.append({"name": "CAND", "env": "CAND"})
     else:
         if not isinstance(evals, (list, tuple)) or len(evals) == 0:
-            raise ValueError(
-                "obj_cl_phase_auc: 'evals' must be a non-empty list when provided."
-            )
-        # shallow validation
+            raise ValueError("obj_cl_phase_auc: 'evals' must be a non-empty list.")
         evals_final = []
         for es in evals:
             if not isinstance(es, dict) or "name" not in es or "env" not in es:
-                raise ValueError(
-                    "obj_cl_phase_auc: each eval spec must be a dict with keys 'name' and 'env'."
-                )
+                raise ValueError("obj_cl_phase_auc: each eval needs 'name' and 'env'.")
             evals_final.append({"name": str(es["name"]), "env": str(es["env"])})
 
-    # ----------------- build CL registry (target + item=CAND) -----------------
-    # NOTE: item env uses in-memory candidate MDP (mdp.to_portable()), no files.
+    # ---- build registry: target + item=CAND (in-memory portable) ----
     envs = {
-        "target": {
-            "factory_path": target_factory_path,
-            "cfg": dict(target_cfg),
-        },
+        "target": {"factory_path": target_factory_path, "cfg": dict(target_cfg)},
         "items": {
             "CAND": {
                 "factory_path": item_factory_path,
-                "cfg": {
-                    "mdp_portable": mdp.to_portable(),
-                    "max_steps": int(item_max_steps),
-                },
+                "cfg": {"mdp_portable": mdp.to_portable(), "max_steps": int(item_max_steps)},
             }
         },
     }
 
-    # curriculum: phase-1 on item, phase-2 on target
+    # ---- curriculum: p1 on item, p2 on target ----
     p1, p2 = int(phase_steps[0]), int(phase_steps[1])
-    item_phases_map = {
-        "CAND": [
-            {"env": "CAND", "steps": p1},
-            {"env": "target", "steps": p2},
-        ]
-    }
+    item_phases_map = {"CAND": [{"env": "CAND", "steps": p1}, {"env": "target", "steps": p2}]}
     evals_map = {"CAND": list(evals_final)}
 
-    # baseline placeholders (won't be used because run_baseline=False)
-    baseline_phases: List[Dict[str, Any]] = []
-    baseline_evals: List[Dict[str, Any]] = []
+    # ---- CL run: baseline OFF, no I/O/W&B ----
+    if isinstance(seeds, int):
+        if seeds < 1:
+            raise ValueError("obj_cl_phase_auc: seeds must be >= 1.")
+        seeds = [i for i in range(seeds)]
 
-    # metrics config: compute only the requested curve
     metrics_opts = {
         "enabled": True,
         "compute_greedy": (curve_key == "greedy"),
         "compute_train": (curve_key == "train"),
-        # other options fall back to trainer defaults internally
     }
 
-    # ----------------- run CL (no baseline, no IO, no W&B) -----------------
-    if isinstance(seeds, int):
-        assert seeds >= 1, "Number of seeds must be >= 1."
-        seeds = [i for i in range(seeds)]
     summary = run_curriculum(
         seeds=list(seeds),
         envs=envs,
-        baseline_phases=baseline_phases,
-        baseline_evals=baseline_evals,
+        baseline_phases=[],
+        baseline_evals=[],
         item_phases_map=item_phases_map,
         evals_map=evals_map,
         agent_ctor_path=agent_ctor_path,
@@ -379,33 +363,39 @@ def obj_cl_phase_auc(
         metrics_opts=metrics_opts,
     )
 
-    # ----------------- extract metrics (strict checks) -----------------
+    # ---- strict extraction: expect auc_p1/auc_p2 (NOT 'auc_phase') ----
     if not isinstance(summary, dict):
         raise ValueError("obj_cl_phase_auc: invalid summary (not a dict).")
-
     metrics = summary.get("metrics", None)
     if not isinstance(metrics, dict):
         raise ValueError("obj_cl_phase_auc: metrics missing from trainer summary.")
-
-    items_metrics = metrics.get("items", None)
-    if not (isinstance(items_metrics, dict) and "CAND" in items_metrics):
+    items_m = metrics.get("items", None)
+    if not (isinstance(items_m, dict) and "CAND" in items_m):
         raise ValueError("obj_cl_phase_auc: metrics.items['CAND'] missing.")
 
-    cand = items_metrics["CAND"]
-    if curve_key not in cand:
+    cand = items_m["CAND"]
+    if scope_key not in cand:
+        raise ValueError(f"obj_cl_phase_auc: items['CAND']['{scope_key}'] missing.")
+    scope_block = cand[scope_key]
+
+    if curve_key not in scope_block:
         raise ValueError(
-            f"obj_cl_phase_auc: metrics for curve '{curve_key}' missing under items['CAND']."
+            f"obj_cl_phase_auc: items['CAND']['{scope_key}']['{curve_key}'] missing."
+        )
+    ch = scope_block[curve_key]
+
+    if "auc_p1" not in ch or "auc_p2" not in ch:
+        raise ValueError(
+            f"obj_cl_phase_auc: 'auc_p1'/'auc_p2' missing at items['CAND']['{scope_key}']['{curve_key}']."
         )
 
-    auc_phase = cand[curve_key].get("auc_phase", None)
-    if not (isinstance(auc_phase, dict) and "p1" in auc_phase and "p2" in auc_phase):
+    p1_auc, p2_auc = ch["auc_p1"], ch["auc_p2"]
+    if p1_auc is None or p2_auc is None:
         raise ValueError(
-            "obj_cl_phase_auc: 'auc_phase' with 'p1' and 'p2' is missing for items['CAND']."
+            f"obj_cl_phase_auc: auc_p1/auc_p2 contain None at items['CAND']['{scope_key}']['{curve_key}']."
         )
 
-    p1_auc = float(auc_phase["p1"])
-    p2_auc = float(auc_phase["p2"])
-    return [p1_auc, p2_auc]
+    return [float(p1_auc), float(p2_auc)]
 
 
 SCORE_FNS: Dict[str, Callable[..., Sequence[float]]] = {
