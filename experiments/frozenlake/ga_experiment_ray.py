@@ -691,6 +691,7 @@ def main():
                     },
                     "eval_every": 2000,
                     "n_eval_episodes": 25,
+                    "verbose": 1,
                     # optional, default "greedy"
                     # "curve": "greedy",
                     # "evals": [{"name":"Target","env":"target"}],

@@ -275,6 +275,7 @@ def obj_cl_phase_mean(
     evals: Optional[Sequence[Dict[str, Any]]] = None,
     curve: str = "greedy",        # "greedy" | "train"
     eval_scope: str = "target",   # "target" | "item" — which eval branch to score on
+    verbose: int = 0,             # >0 -> print underlying (avg across seeds) curves for p1/p2
 ) -> Sequence[float]:
     """
     Score by curriculum-learning phase-wise MEANS (not areas) on the chosen curve/scope.
@@ -289,9 +290,9 @@ def obj_cl_phase_mean(
     - Expects metrics at:
         summary["metrics"]["items"]["CAND"][eval_scope][curve]["mean_p1"|"mean_p2"]
 
-    Notes:
-    - This function assumes the trainer has been updated to produce `mean_*` metrics
-      (i.e., RayCurriculumTrainer._compute_metrics now writes mean_p1/mean_p2).
+    Verbose printing (when verbose > 0):
+    - Prints the aggregated (mean across seeds) step/value series used for p1 and p2.
+    - The series are segmented at B = phase_steps[0] with an interpolated value at B.
     """
 
     # ---- strict arg checks ----
@@ -319,7 +320,6 @@ def obj_cl_phase_mean(
             if not isinstance(es, dict) or "name" not in es or "env" not in es:
                 raise ValueError("obj_cl_phase_mean: each eval needs 'name' and 'env'.")
             evals_final.append({"name": str(es["name"]), "env": str(es["env"])})
-        # Ensure required eval exists for the chosen scope
         required_name = "CAND" if scope_key == "item" else "Target"
         if required_name not in {e["name"] for e in evals_final}:
             raise ValueError(
@@ -380,7 +380,7 @@ def obj_cl_phase_mean(
         metrics_opts=metrics_opts,
     )
 
-    # ---- strict extraction: expect mean_p1/mean_p2 ----
+    # ---- strict extraction of means ----
     if not isinstance(summary, dict):
         raise ValueError("obj_cl_phase_mean: invalid summary (not a dict).")
     metrics = summary.get("metrics", None)
@@ -411,6 +411,49 @@ def obj_cl_phase_mean(
         raise ValueError(
             f"obj_cl_phase_mean: mean_p1/mean_p2 contain None at items['CAND']['{scope_key}']['{curve_key}']."
         )
+
+    # ---- optional verbose printing of the underlying (avg across seeds) curves ----
+    if int(verbose) > 0:
+        # pick the aggregated curve from summary (not metrics)
+        eval_name = "Target" if scope_key == "target" else "CAND"
+        items_block = summary.get("items", {})
+        if not (isinstance(items_block, dict) and "CAND" in items_block):
+            raise ValueError("obj_cl_phase_mean: summary.items['CAND'] missing.")
+        eval_dict = items_block["CAND"]
+        if eval_name not in eval_dict:
+            raise ValueError(f"obj_cl_phase_mean: summary.items['CAND']['{eval_name}'] missing.")
+
+        series = eval_dict[eval_name]
+        xs = np.asarray(series.get("steps", []), dtype=float)
+        ys = np.asarray(series.get(f"{curve_key}_mean", []), dtype=float)
+        if xs.size < 1 or ys.size != xs.size:
+            raise ValueError("obj_cl_phase_mean: invalid aggregated curve in summary.")
+
+        B = float(p1)
+        if not (xs[0] <= B <= xs[-1]):
+            raise ValueError(f"obj_cl_phase_mean: phase boundary B={B} out of curve range [{xs[0]}, {xs[-1]}].")
+
+        # interpolate y at boundary B
+        yB = float(np.interp(B, xs, ys))
+
+        # build p1 segment (x < B) + [B]
+        mask_p1 = xs < B
+        p1_steps = xs[mask_p1].tolist() + [B]
+        p1_vals  = ys[mask_p1].tolist() + [yB]
+
+        # build p2 segment [B] + (x > B)
+        mask_p2 = xs > B
+        p2_steps = [B] + xs[mask_p2].tolist()
+        p2_vals  = [yB] + ys[mask_p2].tolist()
+
+        # print concise dump
+        print(f"[obj_cl_phase_mean] scope={scope_key} curve={curve_key}")
+        print(f"  phase_boundary_B={B}")
+        print(f"  p1_mean={float(p1_mean):.6f}, p2_mean={float(p2_mean):.6f}")
+        print("  p1_steps=", p1_steps)
+        print("  p1_values=", p1_vals)
+        print("  p2_steps=", p2_steps)
+        print("  p2_values=", p2_vals)
 
     return [float(p1_mean), float(p2_mean)]
 
