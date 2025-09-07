@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List, Tuple, Dict, Sequence, Callable, Union
+from typing import Any, List, Tuple, Dict, Sequence, Callable, Union, Optional
 
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
@@ -255,8 +255,8 @@ def obj_multi_perf(
     return [float(integral0), float(integral1)]
 
 
-def obj_cl_phase_auc(
-    mdp: MDPNetwork,
+def obj_cl_phase_mean(
+    mdp: "MDPNetwork",
     shared: Dict[str, Any],
     *,
     # ---- required environment inputs ----
@@ -272,47 +272,60 @@ def obj_cl_phase_auc(
     eval_every: int,
     n_eval_episodes: int,
     # ---- optional knobs ----
-    evals: Sequence[Dict[str, Any]] | None = None,
+    evals: Optional[Sequence[Dict[str, Any]]] = None,
     curve: str = "greedy",        # "greedy" | "train"
     eval_scope: str = "target",   # "target" | "item" — which eval branch to score on
 ) -> Sequence[float]:
     """
-    Score by curriculum-learning phase-wise AUCs on the chosen curve/scope.
+    Score by curriculum-learning phase-wise MEANS (not areas) on the chosen curve/scope.
 
     Returns:
-        [auc_p1, auc_p2]  (maximize both)
+        [mean_p1, mean_p2]  (maximize both)
 
     Contract (strict):
     - Runs CL ONLY (no baseline), no W&B, no filesystem outputs.
     - Uses the candidate MDP as the 'item' env via in-memory portable.
     - Requires >= 2 phases: phase-1 on item, phase-2 on target.
     - Expects metrics at:
-        summary["metrics"]["items"]["CAND"][eval_scope][curve]["auc_p1"|"auc_p2"]
+        summary["metrics"]["items"]["CAND"][eval_scope][curve]["mean_p1"|"mean_p2"]
+
+    Notes:
+    - This function assumes the trainer has been updated to produce `mean_*` metrics
+      (i.e., RayCurriculumTrainer._compute_metrics now writes mean_p1/mean_p2).
     """
 
     # ---- strict arg checks ----
     curve_key = str(curve).lower()
     if curve_key not in ("greedy", "train"):
-        raise ValueError("obj_cl_phase_auc: 'curve' must be 'greedy' or 'train'.")
+        raise ValueError("obj_cl_phase_mean: 'curve' must be 'greedy' or 'train'.")
     scope_key = str(eval_scope).lower()
     if scope_key not in ("target", "item"):
-        raise ValueError("obj_cl_phase_auc: 'eval_scope' must be 'target' or 'item'.")
+        raise ValueError("obj_cl_phase_mean: 'eval_scope' must be 'target' or 'item'.")
     if not isinstance(phase_steps, (list, tuple)) or len(phase_steps) < 2:
-        raise ValueError("obj_cl_phase_auc: needs at least two phases (p1, p2).")
+        raise ValueError("obj_cl_phase_mean: needs at least two phases (p1, p2).")
+    if int(phase_steps[0]) <= 0 or int(phase_steps[1]) <= 0:
+        raise ValueError("obj_cl_phase_mean: phase steps must be positive for p1 and p2.")
 
-    # ---- default evals: record Target; add Item if you want item-scope curves too ----
+    # ---- default evals: always record Target; record CAND if item-scope is requested ----
     if evals is None:
         evals_final: List[Dict[str, Any]] = [{"name": "Target", "env": "target"}]
-        # If you also want item-scope metrics produced during the run, include:
-        # evals_final.append({"name": "CAND", "env": "CAND"})
+        if scope_key == "item":
+            evals_final.append({"name": "CAND", "env": "CAND"})
     else:
         if not isinstance(evals, (list, tuple)) or len(evals) == 0:
-            raise ValueError("obj_cl_phase_auc: 'evals' must be a non-empty list.")
+            raise ValueError("obj_cl_phase_mean: 'evals' must be a non-empty list.")
         evals_final = []
         for es in evals:
             if not isinstance(es, dict) or "name" not in es or "env" not in es:
-                raise ValueError("obj_cl_phase_auc: each eval needs 'name' and 'env'.")
+                raise ValueError("obj_cl_phase_mean: each eval needs 'name' and 'env'.")
             evals_final.append({"name": str(es["name"]), "env": str(es["env"])})
+        # Ensure required eval exists for the chosen scope
+        required_name = "CAND" if scope_key == "item" else "Target"
+        if required_name not in {e["name"] for e in evals_final}:
+            raise ValueError(
+                f"obj_cl_phase_mean: evals must include '{{\"name\":\"{required_name}\",\"env\":\"{required_name if required_name=='CAND' else 'target'}\"}}' "
+                f"for eval_scope='{scope_key}'."
+            )
 
     # ---- build registry: target + item=CAND (in-memory portable) ----
     envs = {
@@ -333,8 +346,12 @@ def obj_cl_phase_auc(
     # ---- CL run: baseline OFF, no I/O/W&B ----
     if isinstance(seeds, int):
         if seeds < 1:
-            raise ValueError("obj_cl_phase_auc: seeds must be >= 1.")
+            raise ValueError("obj_cl_phase_mean: seeds must be >= 1.")
         seeds = [i for i in range(seeds)]
+    else:
+        seeds = list(seeds)
+        if len(seeds) < 1:
+            raise ValueError("obj_cl_phase_mean: provide at least one seed.")
 
     metrics_opts = {
         "enabled": True,
@@ -343,7 +360,7 @@ def obj_cl_phase_auc(
     }
 
     summary = run_curriculum(
-        seeds=list(seeds),
+        seeds=seeds,
         envs=envs,
         baseline_phases=[],
         baseline_evals=[],
@@ -363,43 +380,43 @@ def obj_cl_phase_auc(
         metrics_opts=metrics_opts,
     )
 
-    # ---- strict extraction: expect auc_p1/auc_p2 (NOT 'auc_phase') ----
+    # ---- strict extraction: expect mean_p1/mean_p2 ----
     if not isinstance(summary, dict):
-        raise ValueError("obj_cl_phase_auc: invalid summary (not a dict).")
+        raise ValueError("obj_cl_phase_mean: invalid summary (not a dict).")
     metrics = summary.get("metrics", None)
     if not isinstance(metrics, dict):
-        raise ValueError("obj_cl_phase_auc: metrics missing from trainer summary.")
+        raise ValueError("obj_cl_phase_mean: metrics missing from trainer summary.")
     items_m = metrics.get("items", None)
     if not (isinstance(items_m, dict) and "CAND" in items_m):
-        raise ValueError("obj_cl_phase_auc: metrics.items['CAND'] missing.")
+        raise ValueError("obj_cl_phase_mean: metrics.items['CAND'] missing.")
 
     cand = items_m["CAND"]
     if scope_key not in cand:
-        raise ValueError(f"obj_cl_phase_auc: items['CAND']['{scope_key}'] missing.")
+        raise ValueError(f"obj_cl_phase_mean: items['CAND']['{scope_key}'] missing.")
     scope_block = cand[scope_key]
 
     if curve_key not in scope_block:
         raise ValueError(
-            f"obj_cl_phase_auc: items['CAND']['{scope_key}']['{curve_key}'] missing."
+            f"obj_cl_phase_mean: items['CAND']['{scope_key}']['{curve_key}'] missing."
         )
     ch = scope_block[curve_key]
 
-    if "auc_p1" not in ch or "auc_p2" not in ch:
+    if "mean_p1" not in ch or "mean_p2" not in ch:
         raise ValueError(
-            f"obj_cl_phase_auc: 'auc_p1'/'auc_p2' missing at items['CAND']['{scope_key}']['{curve_key}']."
+            f"obj_cl_phase_mean: 'mean_p1'/'mean_p2' missing at items['CAND']['{scope_key}']['{curve_key}']."
         )
 
-    p1_auc, p2_auc = ch["auc_p1"], ch["auc_p2"]
-    if p1_auc is None or p2_auc is None:
+    p1_mean, p2_mean = ch["mean_p1"], ch["mean_p2"]
+    if p1_mean is None or p2_mean is None:
         raise ValueError(
-            f"obj_cl_phase_auc: auc_p1/auc_p2 contain None at items['CAND']['{scope_key}']['{curve_key}']."
+            f"obj_cl_phase_mean: mean_p1/mean_p2 contain None at items['CAND']['{scope_key}']['{curve_key}']."
         )
 
-    return [float(p1_auc), float(p2_auc)]
+    return [float(p1_mean), float(p2_mean)]
 
 
 SCORE_FNS: Dict[str, Callable[..., Sequence[float]]] = {
     "obj_multi_kl_and_perf": obj_multi_kl_and_perf,
     "obj_multi_perf": obj_multi_perf,
-    "obj_cl_phase_auc": obj_cl_phase_auc,
+    "obj_cl_phase_mean": obj_cl_phase_mean,
 }

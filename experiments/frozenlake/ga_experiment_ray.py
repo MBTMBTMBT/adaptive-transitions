@@ -474,8 +474,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=25)
-    p.add_argument("--ga-generations", type=int, default=25)
+    p.add_argument("--ga-pop-size", type=int, default=20)
+    p.add_argument("--ga-generations", type=int, default=20)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -545,7 +545,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Seeds and parallelism for training
     p.add_argument(
-        "--train-seeds", type=int, default=25, help="Use N to get seeds [0..N-1]."
+        "--train-seeds", type=int, default=5, help="Use N to get seeds [0..N-1]."
     )
     p.add_argument("--train-save-intermediate", type=str2bool, default=True)
 
@@ -667,7 +667,7 @@ def main():
             # Score selection:
             # Active: curriculum-learning AUC with two phases (item -> target).
             score = (
-                "obj_cl_phase_auc",
+                "obj_cl_phase_mean",
                 {
                     "target_factory_path": TARGET_FACTORY_PATH,
                     "target_cfg": {
@@ -677,7 +677,7 @@ def main():
                     },
                     "item_factory_path": SOURCE_FACTORY_PATH,
                     "item_max_steps": int(args.max_steps),
-                    "phase_steps": (20_000, 130_000),
+                    "phase_steps": (20_000, 80_000),
                     "seeds": 5,
                     "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                     "agent_kwargs": {

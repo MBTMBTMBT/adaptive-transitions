@@ -338,7 +338,7 @@ class SeedTrainer:
             return self.envs["target"]
         if "items" in self.envs and key in self.envs["items"]:
             return self.envs["items"][key]
-        return self.envs[key]  # fallback if you ever pass a flat registry
+        raise KeyError(f"env key '{key}' not found in target/items")
 
     # --- eval helper ---
     def _eval_once(self, model, env, det: bool, seed_base: int) -> float:
@@ -667,11 +667,38 @@ class RayCurriculumTrainer:
                 Y = np.concatenate([Y, np.array([y_at], float)])
             return X, Y
 
-        def _auc_total(xs, ys, max_step):
-            X, Y = _cap(xs, ys, max_step)
-            if X.size < 2:
+        def _mean_over(xs, ys, lo: Optional[float] = None, hi: Optional[float] = None,
+                       clamp_hi: Optional[float] = None):
+            xs = np.asarray(xs, float)
+            ys = np.asarray(ys, float)
+            if xs.size < 1 or ys.size != xs.size:
                 return None
-            return float(np.trapz(Y, X))
+
+            x0, x1 = float(xs[0]), float(xs[-1])
+
+            # Default interval = full support
+            lo = x0 if lo is None else float(lo)
+            hi = x1 if hi is None else float(hi)
+
+            # Optional global clamp on the right (used by mean_total with use_max_step)
+            if clamp_hi is not None:
+                hi = min(float(clamp_hi), hi)
+
+            # Clip to support
+            lo = max(lo, x0)
+            hi = min(hi, x1)
+            if not (hi > lo):
+                return None
+
+            # Interpolate endpoints
+            y_lo = float(np.interp(lo, xs, ys))
+            y_hi = float(np.interp(hi, xs, ys))
+
+            # Interior samples strictly inside (lo, hi)
+            mask = (xs > lo) & (xs < hi)
+            vals = [y_lo, *ys[mask].tolist(), y_hi]
+
+            return float(np.mean(vals)) if len(vals) > 0 else None
 
         def _ap_last_k(xs, ys, k, max_step):
             X, Y = _cap(xs, ys, max_step)
@@ -687,29 +714,6 @@ class RayCurriculumTrainer:
             thr = float(np.max(Y)) * float(frac)
             idx = np.where(Y >= thr)[0]
             return int(X[int(idx[0])]) if idx.size > 0 else None
-
-        def _seg_auc(xs, ys, lo, hi):
-            """Trapezoidal area on [lo, hi]; None if not enough support."""
-            if hi is None or lo is None or hi <= lo:
-                return None
-            xs = np.asarray(xs, float)
-            ys = np.asarray(ys, float)
-            if xs.size < 1 or ys.size != xs.size:
-                return None
-            x0, x1 = float(xs[0]), float(xs[-1])
-            lo = max(float(lo), x0)
-            hi = min(float(hi), x1)
-            if hi <= lo:
-                return None
-            # both bounds must be interpolable within [x0, x1]
-            y_lo = float(np.interp(lo, xs, ys))
-            y_hi = float(np.interp(hi, xs, ys))
-            mask = (xs > lo) & (xs < hi)
-            X = np.concatenate(([lo], xs[mask], [hi]))
-            Y = np.concatenate(([y_lo], ys[mask], [y_hi]))
-            if X.size < 2:
-                return None
-            return float(np.trapz(Y, X))
 
         def _interp_at(xs, ys, s):
             xs = np.asarray(xs, float)
@@ -757,10 +761,15 @@ class RayCurriculumTrainer:
             # Greedy/train totals/AP/TTT; write None if not enough samples.
             def _fill_baseline(chan: str):
                 xs, ys = _ensure_curve(baseline_target, f"{chan}_mean")
+                # mean_total over [start, end], optionally clamped by use_max_step
+                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=cfg["use_max_step"])
                 return {
-                    "auc_total": _auc_total(xs, ys, cfg["use_max_step"]),
+                    "mean_total": mean_total,
+                    # (keep other non-AUC metrics unchanged)
                     "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], cfg["use_max_step"]),
                     "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], cfg["use_max_step"]),
+                    # ---- optional backward-compat aliases (remove if not needed) ----
+                    "auc_total": mean_total,  # deprecated alias
                 }
 
             if cfg["compute_greedy"]:
@@ -831,21 +840,40 @@ class RayCurriculumTrainer:
             # --- fill a channel packer ---
             def _pack_env(block, chan: str):
                 if block is None:
-                    return {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None, "ttt_fraction": None}
+                    return {"mean_total": None, "mean_p1": None, "mean_p2": None,
+                            "ap_last_k": None, "ttt_fraction": None,
+                            # optional deprecated aliases
+                            "auc_total": None, "auc_p1": None, "auc_p2": None}
+
                 xs, ys = _ensure_curve(block, f"{chan}_mean")
+
+                # Whole-interval mean, optionally clamped by use_max_step
+                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=cfg["use_max_step"])
+
                 outp = {
-                    "auc_total": _auc_total(xs, ys, cfg["use_max_step"]),
+                    "mean_total": mean_total,
                     "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], cfg["use_max_step"]),
                     "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], cfg["use_max_step"]),
+                    "mean_p1": None,
+                    "mean_p2": None,
+                    # ---- optional deprecated aliases (remove if not needed) ----
+                    "auc_total": mean_total,
                     "auc_p1": None,
                     "auc_p2": None,
                 }
-                if B is not None:
-                    # segment AUCs; None if not enough support inside each segment
-                    start_s = float(xs[0]) if xs.size else None
-                    end_s = float(xs[-1]) if xs.size else None
-                    outp["auc_p1"] = _seg_auc(xs, ys, start_s, float(B)) if xs.size else None
-                    outp["auc_p2"] = _seg_auc(xs, ys, float(B), end_s) if xs.size else None
+
+                if B is not None and xs.size:
+                    start_s = float(xs[0])
+                    end_s = float(xs[-1])
+                    # segment means without use_max_step clamping
+                    m1 = _mean_over(xs, ys, lo=start_s, hi=float(B), clamp_hi=None)
+                    m2 = _mean_over(xs, ys, lo=float(B), hi=end_s, clamp_hi=None)
+                    outp["mean_p1"] = m1
+                    outp["mean_p2"] = m2
+                    # ---- optional aliases ----
+                    outp["auc_p1"] = m1
+                    outp["auc_p2"] = m2
+
                 return outp
 
             # target/item metrics
