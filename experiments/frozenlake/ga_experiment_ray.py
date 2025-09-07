@@ -44,7 +44,7 @@ from two_stage_cl.tabular_curriculum_trainer_ray import run_curriculum
 
 # -------- FrozenLake-specific factories stay here (kept as constants) --------
 TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
-SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_nx_env_from_mdp"
+SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
 
 
 def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
@@ -474,8 +474,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=20)
-    p.add_argument("--ga-generations", type=int, default=20)
+    p.add_argument("--ga-pop-size", type=int, default=50)
+    p.add_argument("--ga-generations", type=int, default=200)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -537,7 +537,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="20000,80000",
+        default="10000,140000",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
     p.add_argument("--eval-every", type=int, default=1000)
@@ -545,7 +545,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Seeds and parallelism for training
     p.add_argument(
-        "--train-seeds", type=int, default=5, help="Use N to get seeds [0..N-1]."
+        "--train-seeds", type=int, default=50, help="Use N to get seeds [0..N-1]."
     )
     p.add_argument("--train-save-intermediate", type=str2bool, default=True)
 
@@ -671,13 +671,13 @@ def main():
                 {
                     "target_factory_path": TARGET_FACTORY_PATH,
                     "target_cfg": {
-                        "map_name": "8x8",
-                        "is_slippery": True,
+                        "map_name": args.map,
+                        "is_slippery": bool(args.slippery),
                         "max_steps": int(args.max_steps),
                     },
                     "item_factory_path": SOURCE_FACTORY_PATH,
                     "item_max_steps": int(args.max_steps),
-                    "phase_steps": (20_000, 80_000),
+                    "phase_steps": (10_000, 90_000),
                     "seeds": 5,
                     "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                     "agent_kwargs": {
@@ -690,8 +690,8 @@ def main():
                         "verbose": 0,
                     },
                     "eval_every": 2000,
-                    "n_eval_episodes": 25,
-                    "verbose": 1,
+                    "n_eval_episodes": 50,
+                    # "wandb_actor": wandb_actor,
                     # optional, default "greedy"
                     # "curve": "greedy",
                     # "evals": [{"name":"Target","env":"target"}],

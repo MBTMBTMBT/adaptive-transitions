@@ -277,7 +277,7 @@ def obj_cl_phase_mean(
     evals: Optional[Sequence[Dict[str, Any]]] = None,
     curve: str = "greedy",        # "greedy" | "train"
     eval_scope: str = "target",   # "target" | "item" — which eval branch to score on
-    verbose: int = 0,             # >0 -> print underlying (avg across seeds) curves for p1/p2
+    wandb_actor: Optional["ActorHandle"] = None,  # if provided, dump curves via WandbActor.write_console
 ) -> Sequence[float]:
     """
     Score by curriculum-learning phase-wise MEANS (not areas) on the chosen curve/scope.
@@ -286,15 +286,15 @@ def obj_cl_phase_mean(
         [mean_p1, mean_p2]  (maximize both)
 
     Contract (strict):
-    - Runs CL ONLY (no baseline), no W&B, no filesystem outputs.
+    - Runs CL ONLY (no baseline), no filesystem outputs.
     - Uses the candidate MDP as the 'item' env via in-memory portable.
     - Requires >= 2 phases: phase-1 on item, phase-2 on target.
     - Expects metrics at:
         summary["metrics"]["items"]["CAND"][eval_scope][curve]["mean_p1"|"mean_p2"]
 
-    Verbose printing (when verbose > 0):
-    - Prints the aggregated (mean across seeds) step/value series used for p1 and p2.
-    - The series are segmented at B = phase_steps[0] with an interpolated value at B.
+    Logging:
+    - If `wandb_actor` is provided, will emit the aggregated (mean across seeds) curves
+      and the p1/p2 segments via `WandbActor.write_console(...)`. Otherwise stays silent.
     """
 
     # ---- strict arg checks ----
@@ -345,7 +345,7 @@ def obj_cl_phase_mean(
     item_phases_map = {"CAND": [{"env": "CAND", "steps": p1}, {"env": "target", "steps": p2}]}
     evals_map = {"CAND": list(evals_final)}
 
-    # ---- CL run: baseline OFF, no I/O/W&B ----
+    # ---- CL run: baseline OFF, no I/O/W&B (metrics only) ----
     if isinstance(seeds, int):
         if seeds < 1:
             raise ValueError("obj_cl_phase_mean: seeds must be >= 1.")
@@ -374,7 +374,7 @@ def obj_cl_phase_mean(
         n_eval_episodes=int(n_eval_episodes),
         output_dir=None,
         save_intermediate=False,
-        wandb_actor=None,
+        wandb_actor=None,   # <-- keep training silent; only console dump uses wandb_actor
         media_opts=None,
         wandb_step_base=0,
         run_baseline=False,
@@ -414,9 +414,9 @@ def obj_cl_phase_mean(
             f"obj_cl_phase_mean: mean_p1/mean_p2 contain None at items['CAND']['{scope_key}']['{curve_key}']."
         )
 
-    # ---- optional verbose printing of the underlying (avg across seeds) curves ----
-    if int(verbose) > 0:
-        # pick the aggregated curve from summary (not metrics)
+    # ---- optional console dump via WandbActor.write_console ----
+    if wandb_actor is not None:
+        # use aggregated (mean across seeds) curve from summary
         eval_name = "Target" if scope_key == "target" else "CAND"
         items_block = summary.get("items", {})
         if not (isinstance(items_block, dict) and "CAND" in items_block):
@@ -438,24 +438,28 @@ def obj_cl_phase_mean(
         # interpolate y at boundary B
         yB = float(np.interp(B, xs, ys))
 
-        # build p1 segment (x < B) + [B]
+        # segment p1: (x < B) + [B]; segment p2: [B] + (x > B)
         mask_p1 = xs < B
-        p1_steps = xs[mask_p1].tolist() + [B]
-        p1_vals  = ys[mask_p1].tolist() + [yB]
-
-        # build p2 segment [B] + (x > B)
+        p1_steps = (xs[mask_p1].tolist() + [B])
+        p1_vals  = (ys[mask_p1].tolist() + [yB])
         mask_p2 = xs > B
-        p2_steps = [B] + xs[mask_p2].tolist()
-        p2_vals  = [yB] + ys[mask_p2].tolist()
+        p2_steps = ([B] + xs[mask_p2].tolist())
+        p2_vals  = ([yB] + ys[mask_p2].tolist())
 
-        # print concise dump
-        print(f"[obj_cl_phase_mean] scope={scope_key} curve={curve_key}")
-        print(f"  phase_boundary_B={B}")
-        print(f"  p1_mean={float(p1_mean):.6f}, p2_mean={float(p2_mean):.6f}")
-        print("  p1_steps=", p1_steps)
-        print("  p1_values=", p1_vals)
-        print("  p2_steps=", p2_steps)
-        print("  p2_values=", p2_vals)
+        # compact multi-line text (WandbActor.write_console will chunk/flush)
+        txt = []
+        txt.append(f"[obj_cl_phase_mean] scope={scope_key} curve={curve_key}")
+        txt.append(f"phase_boundary_B={B}")
+        txt.append(f"mean_p1={float(p1_mean):.6f}, mean_p2={float(p2_mean):.6f}")
+        txt.append(f"p1_steps={p1_steps}")
+        txt.append(f"p1_values={p1_vals}")
+        txt.append(f"p2_steps={p2_steps}")
+        txt.append(f"p2_values={p2_vals}")
+        try:
+            wandb_actor.write_console.remote("\n".join(txt))
+        except Exception:
+            # best-effort: don't fail scoring if console write fails
+            pass
 
     return [float(p1_mean), float(p2_mean)]
 
