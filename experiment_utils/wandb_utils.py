@@ -114,20 +114,30 @@ class WandbActor:
         # Example: call_wandb("alert", title="x", text="y")
         return getattr(self.wandb, method)(*args, **kwargs)
 
+    # In WandbActor
     def write_console(self, text: str, stream: str = "stdout") -> None:
-        """Forward a line into this actor's console, which W&B Logs captures."""
+        """Write to this actor's real TTY in <=950-char chunks to avoid W&B log truncation."""
         import sys
 
-        s = str(text)
-        # Ensure line break to avoid sticking lines together
-        if not (s.endswith("\n") or s.endswith("\r")):
-            s += "\n"
-        if stream == "stderr":
-            sys.stderr.write(s)
-            sys.stderr.flush()
-        else:
-            sys.stdout.write(s)
-            sys.stdout.flush()
+        out = sys.__stderr__ if stream == "stderr" else sys.__stdout__
+        # Normalize to LF and split into logical lines
+        s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+        lines = s.split("\n")
+
+        MAX_CHARS = 950  # stay safely below ~1000-char limit per log line
+        for i, line in enumerate(lines):
+            # Preserve empty lines
+            if line == "":
+                out.write("\n")
+                continue
+            # Chunk the line if it is too long
+            start = 0
+            n = len(line)
+            while start < n:
+                chunk = line[start:start + MAX_CHARS]
+                out.write(chunk + "\n")
+                start += MAX_CHARS
+        out.flush()
 
     def finish(self) -> None:
         self.run.finish()

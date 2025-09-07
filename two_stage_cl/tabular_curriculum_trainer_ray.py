@@ -18,7 +18,6 @@ from ray.actor import ActorHandle
 from experiment_utils.utils import _import, ensure_dir
 from experiment_utils.save_media import save_policy_media
 from experiment_utils.env_factories import make_env
-from two_stage_cl.metrics import _auc, _ap, _ttt, _value_at
 
 from two_stage_cl.utils import plot_pairwise, save_csv
 
