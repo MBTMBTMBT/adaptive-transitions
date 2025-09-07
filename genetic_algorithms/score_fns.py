@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, List, Tuple, Dict, Sequence, Callable, Union, Optional
 
+import numpy as np
+
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
     PolicyTable,
