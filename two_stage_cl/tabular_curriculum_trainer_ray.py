@@ -18,8 +18,15 @@ from ray.actor import ActorHandle
 from experiment_utils.utils import _import, ensure_dir
 from experiment_utils.save_media import save_policy_media
 from experiment_utils.env_factories import make_env
-from two_stage_cl.metrics import _mean_over, _ap_last_k, _ttt_frac, _interp_at, _ensure_curve, _auc_over, \
-    _jumpstart_fields
+from two_stage_cl.metrics import (
+    _mean_over,
+    _ap_last_k,
+    _ttt_frac,
+    _interp_at,
+    _ensure_curve,
+    _auc_over,
+    _jumpstart_fields,
+)
 
 from two_stage_cl.utils import plot_pairwise, save_csv
 
@@ -633,7 +640,9 @@ class RayCurriculumTrainer:
             "ap_last_k": int(mo.get("ap_last_k", 10)),
             # it will be treated as baseline cap for backward convenience.
             "cap_steps": {
-                "baseline": (mo.get("cap_steps", {}) or {}).get("baseline", mo.get("use_max_step", None)),
+                "baseline": (mo.get("cap_steps", {}) or {}).get(
+                    "baseline", mo.get("use_max_step", None)
+                ),
                 "target": (mo.get("cap_steps", {}) or {}).get("target", None),
                 "item": (mo.get("cap_steps", {}) or {}).get("item", None),
             },
@@ -646,11 +655,11 @@ class RayCurriculumTrainer:
 
     # --- compute metrics independent of CSV/plots ---
     def _compute_metrics(
-            self,
-            summary: Dict[str, Any],
-            item_phases_map: Dict[str, List[Dict[str, Any]]],
-            evals_map: Dict[str, List[Dict[str, Any]]],
-            baseline_evals: List[Dict[str, Any]],
+        self,
+        summary: Dict[str, Any],
+        item_phases_map: Dict[str, List[Dict[str, Any]]],
+        evals_map: Dict[str, List[Dict[str, Any]]],
+        baseline_evals: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
         Produce a stable metrics dict with float|None leaves.
@@ -691,61 +700,131 @@ class RayCurriculumTrainer:
 
         # ---- baseline metrics (only if configuration declares Target and run_baseline=True) ----
         baseline_declares_target = (
-                self.run_baseline
-                and isinstance(baseline_evals, (list, tuple))
-                and any(str(e.get("name")) == "Target" for e in baseline_evals)
+            self.run_baseline
+            and isinstance(baseline_evals, (list, tuple))
+            and any(str(e.get("name")) == "Target" for e in baseline_evals)
         )
 
         baseline_block = summary.get("baseline", {}) or {}
         baseline_target = None
         if baseline_declares_target:
             if "Target" not in baseline_block:
-                raise ValueError("baseline config declares 'Target' but summary.baseline['Target'] missing")
+                raise ValueError(
+                    "baseline config declares 'Target' but summary.baseline['Target'] missing"
+                )
             baseline_target = baseline_block["Target"]
 
             def _fill_baseline(chan: str):
                 xs, ys = _ensure_curve(baseline_target, f"{chan}_mean")
-                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for("baseline"))
-                auc_total = _auc_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for("baseline"))
+                mean_total = _mean_over(
+                    xs, ys, lo=None, hi=None, clamp_hi=_cap_for("baseline")
+                )
+                auc_total = _auc_over(
+                    xs, ys, lo=None, hi=None, clamp_hi=_cap_for("baseline")
+                )
                 return {
                     "mean_total": mean_total,
                     "auc_total": auc_total,
-                    "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], _cap_for("baseline")),
-                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], _cap_for("baseline")),
+                    "ap_last_k": _ap_last_k(
+                        xs, ys, cfg["ap_last_k"], _cap_for("baseline")
+                    ),
+                    "ttt_fraction": _ttt_frac(
+                        xs, ys, cfg["ttt_fraction"], _cap_for("baseline")
+                    ),
                 }
 
-            out["baseline"]["greedy"] = _fill_baseline("greedy") if cfg["compute_greedy"] else {
-                "mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None
-            }
-            out["baseline"]["train"] = _fill_baseline("train") if cfg["compute_train"] else {
-                "mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None
-            }
+            out["baseline"]["greedy"] = (
+                _fill_baseline("greedy")
+                if cfg["compute_greedy"]
+                else {
+                    "mean_total": None,
+                    "auc_total": None,
+                    "ap_last_k": None,
+                    "ttt_fraction": None,
+                }
+            )
+            out["baseline"]["train"] = (
+                _fill_baseline("train")
+                if cfg["compute_train"]
+                else {
+                    "mean_total": None,
+                    "auc_total": None,
+                    "ap_last_k": None,
+                    "ttt_fraction": None,
+                }
+            )
         else:
-            out["baseline"]["greedy"] = {"mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None}
-            out["baseline"]["train"] = {"mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None}
+            out["baseline"]["greedy"] = {
+                "mean_total": None,
+                "auc_total": None,
+                "ap_last_k": None,
+                "ttt_fraction": None,
+            }
+            out["baseline"]["train"] = {
+                "mean_total": None,
+                "auc_total": None,
+                "ap_last_k": None,
+                "ttt_fraction": None,
+            }
 
         # ---- per-item metrics ----
         for lb, eval_dict in (summary.get("items", {}) or {}).items():
             item_out: Dict[str, Any] = {
                 "target": {
-                    "greedy": {"mean_total": None, "mean_p1": None, "mean_p2": None,
-                               "auc_total": None, "auc_p1": None, "auc_p2": None,
-                               "ap_last_k": None, "ttt_fraction": None},
-                    "train": {"mean_total": None, "mean_p1": None, "mean_p2": None,
-                              "auc_total": None, "auc_p1": None, "auc_p2": None,
-                              "ap_last_k": None, "ttt_fraction": None},
+                    "greedy": {
+                        "mean_total": None,
+                        "mean_p1": None,
+                        "mean_p2": None,
+                        "auc_total": None,
+                        "auc_p1": None,
+                        "auc_p2": None,
+                        "ap_last_k": None,
+                        "ttt_fraction": None,
+                    },
+                    "train": {
+                        "mean_total": None,
+                        "mean_p1": None,
+                        "mean_p2": None,
+                        "auc_total": None,
+                        "auc_p1": None,
+                        "auc_p2": None,
+                        "ap_last_k": None,
+                        "ttt_fraction": None,
+                    },
                 },
                 "item": {
-                    "greedy": {"mean_total": None, "mean_p1": None, "mean_p2": None,
-                               "auc_total": None, "auc_p1": None, "auc_p2": None,
-                               "ap_last_k": None, "ttt_fraction": None},
-                    "train": {"mean_total": None, "mean_p1": None, "mean_p2": None,
-                              "auc_total": None, "auc_p1": None, "auc_p2": None,
-                              "ap_last_k": None, "ttt_fraction": None},
+                    "greedy": {
+                        "mean_total": None,
+                        "mean_p1": None,
+                        "mean_p2": None,
+                        "auc_total": None,
+                        "auc_p1": None,
+                        "auc_p2": None,
+                        "ap_last_k": None,
+                        "ttt_fraction": None,
+                    },
+                    "train": {
+                        "mean_total": None,
+                        "mean_p1": None,
+                        "mean_p2": None,
+                        "auc_total": None,
+                        "auc_p1": None,
+                        "auc_p2": None,
+                        "ap_last_k": None,
+                        "ttt_fraction": None,
+                    },
                 },
                 "jumpstart": {
-                    "greedy": {"target_start": None, "p2_head": None, "baseline_B": None},
-                    "train": {"target_start": None, "p2_head": None, "baseline_B": None},
+                    "greedy": {
+                        "target_start": None,
+                        "p2_head": None,
+                        "baseline_B": None,
+                    },
+                    "train": {
+                        "target_start": None,
+                        "p2_head": None,
+                        "baseline_B": None,
+                    },
                 },
             }
 
@@ -758,13 +837,17 @@ class RayCurriculumTrainer:
             tgt_block = None
             if has_target_eval:
                 if "Target" not in eval_dict:
-                    raise ValueError(f"item '{lb}' config declares Target eval but summary missing it")
+                    raise ValueError(
+                        f"item '{lb}' config declares Target eval but summary missing it"
+                    )
                 tgt_block = eval_dict["Target"]
 
             self_block = None
             if has_self_eval:
                 if lb not in eval_dict:
-                    raise ValueError(f"item '{lb}' config declares self eval '{lb}' but summary missing it")
+                    raise ValueError(
+                        f"item '{lb}' config declares self eval '{lb}' but summary missing it"
+                    )
                 self_block = eval_dict[lb]
 
             # phase boundary (for p1/p2/jumpstart)
@@ -783,39 +866,68 @@ class RayCurriculumTrainer:
                 p1/p2 segments are computed on the natural segments (no cap).
                 """
                 if block is None:
-                    return {"mean_total": None, "mean_p1": None, "mean_p2": None,
-                            "auc_total": None, "auc_p1": None, "auc_p2": None,
-                            "ap_last_k": None, "ttt_fraction": None}
+                    return {
+                        "mean_total": None,
+                        "mean_p1": None,
+                        "mean_p2": None,
+                        "auc_total": None,
+                        "auc_p1": None,
+                        "auc_p2": None,
+                        "ap_last_k": None,
+                        "ttt_fraction": None,
+                    }
 
                 xs, ys = _ensure_curve(block, f"{chan}_mean")
-                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for(scope))
-                auc_total = _auc_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for(scope))
+                mean_total = _mean_over(
+                    xs, ys, lo=None, hi=None, clamp_hi=_cap_for(scope)
+                )
+                auc_total = _auc_over(
+                    xs, ys, lo=None, hi=None, clamp_hi=_cap_for(scope)
+                )
 
                 outp = {
                     "mean_total": mean_total,
                     "auc_total": auc_total,
                     "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], _cap_for(scope)),
-                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], _cap_for(scope)),
-                    "mean_p1": None, "mean_p2": None,
-                    "auc_p1": None, "auc_p2": None,
+                    "ttt_fraction": _ttt_frac(
+                        xs, ys, cfg["ttt_fraction"], _cap_for(scope)
+                    ),
+                    "mean_p1": None,
+                    "mean_p2": None,
+                    "auc_p1": None,
+                    "auc_p2": None,
                 }
 
                 if B is not None and xs.size:
                     start_s = float(xs[0])
                     end_s = float(xs[-1])
                     if start_s <= B <= end_s:
-                        outp["mean_p1"] = _mean_over(xs, ys, lo=start_s, hi=float(B), clamp_hi=None)
-                        outp["mean_p2"] = _mean_over(xs, ys, lo=float(B), hi=end_s, clamp_hi=None)
-                        outp["auc_p1"] = _auc_over(xs, ys, lo=start_s, hi=float(B), clamp_hi=None)
-                        outp["auc_p2"] = _auc_over(xs, ys, lo=float(B), hi=end_s, clamp_hi=None)
+                        outp["mean_p1"] = _mean_over(
+                            xs, ys, lo=start_s, hi=float(B), clamp_hi=None
+                        )
+                        outp["mean_p2"] = _mean_over(
+                            xs, ys, lo=float(B), hi=end_s, clamp_hi=None
+                        )
+                        outp["auc_p1"] = _auc_over(
+                            xs, ys, lo=start_s, hi=float(B), clamp_hi=None
+                        )
+                        outp["auc_p2"] = _auc_over(
+                            xs, ys, lo=float(B), hi=end_s, clamp_hi=None
+                        )
                 return outp
 
             # target/item metrics
             if cfg["compute_greedy"]:
-                item_out["target"]["greedy"] = _pack_env(tgt_block, "greedy", scope="target")
-                item_out["item"]["greedy"] = _pack_env(self_block, "greedy", scope="item")
+                item_out["target"]["greedy"] = _pack_env(
+                    tgt_block, "greedy", scope="target"
+                )
+                item_out["item"]["greedy"] = _pack_env(
+                    self_block, "greedy", scope="item"
+                )
             if cfg["compute_train"]:
-                item_out["target"]["train"] = _pack_env(tgt_block, "train", scope="target")
+                item_out["target"]["train"] = _pack_env(
+                    tgt_block, "train", scope="target"
+                )
                 item_out["item"]["train"] = _pack_env(self_block, "train", scope="item")
 
             # ---- jumpstart: absolute levels (target_start, p2_head, baseline_B) ----
@@ -1049,14 +1161,20 @@ class RayCurriculumTrainer:
             if os.path.isdir(media_root_dir):
                 to_log = []
 
-                def _enqueue(seed_id: int, label: str, media_map: Dict[str, Optional[str]]):
+                def _enqueue(
+                    seed_id: int, label: str, media_map: Dict[str, Optional[str]]
+                ):
                     if not isinstance(media_map, dict):
                         return
                     for name, path in media_map.items():
                         if path:
-                            to_log.append((f"media/seed_{seed_id}/{label}/{name}", path))
+                            to_log.append(
+                                (f"media/seed_{seed_id}/{label}/{name}", path)
+                            )
 
-                def _enqueue_boundary(seed_id: int, label: str, boundary_map: Dict[str, Any]):
+                def _enqueue_boundary(
+                    seed_id: int, label: str, boundary_map: Dict[str, Any]
+                ):
                     if not isinstance(boundary_map, dict):
                         return
                     for phase_key, per_eval in boundary_map.items():
@@ -1065,18 +1183,27 @@ class RayCurriculumTrainer:
                         for eval_name, rec in per_eval.items():
                             p = (rec or {}).get("media_path", None)
                             if p:
-                                to_log.append((f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}", p))
+                                to_log.append(
+                                    (
+                                        f"media/seed_{seed_id}/{label}/{eval_name}_{phase_key}",
+                                        p,
+                                    )
+                                )
 
                 for r in merged_results:
                     sd = int(r.get("seed", 0))
                     base = r.get("baseline", None)
                     if base and self.run_baseline:
                         _enqueue(sd, "baseline", base.get("media", {}) or {})
-                        _enqueue_boundary(sd, "baseline", base.get("boundary", {}) or {})
+                        _enqueue_boundary(
+                            sd, "baseline", base.get("boundary", {}) or {}
+                        )
                     items = r.get("items", {}) or {}
                     for lb, d in items.items():
                         _enqueue(sd, str(lb), (d or {}).get("media", {}) or {})
-                        _enqueue_boundary(sd, str(lb), (d or {}).get("boundary", {}) or {})
+                        _enqueue_boundary(
+                            sd, str(lb), (d or {}).get("boundary", {}) or {}
+                        )
 
                 fps = int(self.media_opts.get("fps", 8))
                 for key, path in to_log:
@@ -1094,17 +1221,21 @@ class RayCurriculumTrainer:
         if self.outdir is not None:
             # Does configuration declare baseline Target?
             baseline_declares_target = (
-                    self.run_baseline
-                    and isinstance(baseline_evals, (list, tuple))
-                    and any(str(e.get("name")) == "Target" for e in baseline_evals)
+                self.run_baseline
+                and isinstance(baseline_evals, (list, tuple))
+                and any(str(e.get("name")) == "Target" for e in baseline_evals)
             )
 
             steps_base = None
             base_curves = None
             if baseline_declares_target:
                 if "baseline" not in summary or "Target" not in summary["baseline"]:
-                    raise ValueError("baseline config declares 'Target' but summary.baseline['Target'] missing")
-                steps_base = np.asarray(summary["baseline"]["Target"]["steps"], dtype=int)
+                    raise ValueError(
+                        "baseline config declares 'Target' but summary.baseline['Target'] missing"
+                    )
+                steps_base = np.asarray(
+                    summary["baseline"]["Target"]["steps"], dtype=int
+                )
                 base = summary["baseline"]["Target"]
                 base_curves = {
                     "greedy_mean": np.asarray(base["greedy_mean"], dtype=float),
@@ -1124,7 +1255,11 @@ class RayCurriculumTrainer:
                 for ph in phs[:-1]:
                     acc += int(ph.get("steps", 0))
                     item_boundaries.append(acc)
-                boundaries_str = "-".join(str(b) for b in item_boundaries) if item_boundaries else "none"
+                boundaries_str = (
+                    "-".join(str(b) for b in item_boundaries)
+                    if item_boundaries
+                    else "none"
+                )
 
                 # What evals are declared for this item?
                 item_cfg = evals_map.get(lb, []) or []
@@ -1134,7 +1269,9 @@ class RayCurriculumTrainer:
                 # ---- CSV dumps ----
                 if has_target_eval:
                     if "Target" not in dd:
-                        raise ValueError(f"item '{lb}' config declares Target eval but summary missing it")
+                        raise ValueError(
+                            f"item '{lb}' config declares Target eval but summary missing it"
+                        )
                     tgt = dd["Target"]
                     steps_tgt = np.asarray(tgt["steps"], dtype=int)
                     tgt_g_mean = np.asarray(tgt["greedy_mean"], dtype=float)
@@ -1143,17 +1280,31 @@ class RayCurriculumTrainer:
                     tgt_t_std = np.asarray(tgt["train_std"], dtype=float)
 
                     save_csv(
-                        os.path.join(item_dir, f"curriculum_eval_target_phase_{boundaries_str}.csv"),
-                        steps_tgt, tgt_g_mean, tgt_g_std, header="greedy",
+                        os.path.join(
+                            item_dir,
+                            f"curriculum_eval_target_phase_{boundaries_str}.csv",
+                        ),
+                        steps_tgt,
+                        tgt_g_mean,
+                        tgt_g_std,
+                        header="greedy",
                     )
                     save_csv(
-                        os.path.join(item_dir, f"curriculum_eval_target_train_phase_{boundaries_str}.csv"),
-                        steps_tgt, tgt_t_mean, tgt_t_std, header="train",
+                        os.path.join(
+                            item_dir,
+                            f"curriculum_eval_target_train_phase_{boundaries_str}.csv",
+                        ),
+                        steps_tgt,
+                        tgt_t_mean,
+                        tgt_t_std,
+                        header="train",
                     )
 
                 if has_self_eval:
                     if lb not in dd:
-                        raise ValueError(f"item '{lb}' config declares self eval '{lb}' but summary missing it")
+                        raise ValueError(
+                            f"item '{lb}' config declares self eval '{lb}' but summary missing it"
+                        )
                     selfb = dd[lb]
                     steps_self = np.asarray(selfb["steps"], dtype=int)
                     self_g_mean = np.asarray(selfb["greedy_mean"], dtype=float)
@@ -1162,20 +1313,35 @@ class RayCurriculumTrainer:
                     self_t_std = np.asarray(selfb["train_std"], dtype=float)
 
                     save_csv(
-                        os.path.join(item_dir, f"curriculum_eval_item_phase_{boundaries_str}.csv"),
-                        steps_self, self_g_mean, self_g_std, header="greedy",
+                        os.path.join(
+                            item_dir, f"curriculum_eval_item_phase_{boundaries_str}.csv"
+                        ),
+                        steps_self,
+                        self_g_mean,
+                        self_g_std,
+                        header="greedy",
                     )
                     save_csv(
-                        os.path.join(item_dir, f"curriculum_eval_item_train_phase_{boundaries_str}.csv"),
-                        steps_self, self_t_mean, self_t_std, header="train",
+                        os.path.join(
+                            item_dir,
+                            f"curriculum_eval_item_train_phase_{boundaries_str}.csv",
+                        ),
+                        steps_self,
+                        self_t_mean,
+                        self_t_std,
+                        header="train",
                     )
 
                 # ---- Pairwise plot (baseline Target vs item Target) ----
                 if baseline_declares_target and has_target_eval:
                     if base_curves is None or steps_base is None:
-                        raise ValueError("baseline Target curves are required but missing")
+                        raise ValueError(
+                            "baseline Target curves are required but missing"
+                        )
                     if "Target" not in dd:
-                        raise ValueError(f"item '{lb}' Target curves required for plotting but missing")
+                        raise ValueError(
+                            f"item '{lb}' Target curves required for plotting but missing"
+                        )
 
                     item_total_steps = sum(int(p.get("steps", 0)) for p in phs)
                     assert item_total_steps > 0, f"empty phases for item {lb}"
@@ -1192,26 +1358,38 @@ class RayCurriculumTrainer:
 
                     msg_base = f"[plot-check] baseline tail={_tail(steps_base)} len={len(steps_base)}"
                     msg_tgt = f"[plot-check] tgt({lb}) tail={_tail(steps_tgt)} len={len(steps_tgt)}"
-                    assert _tail(steps_base) == item_total_steps, \
-                        f"baseline total({_tail(steps_base)}) != item_total({item_total_steps}). {msg_base}"
-                    assert _tail(steps_tgt) == item_total_steps, \
-                        f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
+                    assert (
+                        _tail(steps_base) == item_total_steps
+                    ), f"baseline total({_tail(steps_base)}) != item_total({item_total_steps}). {msg_base}"
+                    assert (
+                        _tail(steps_tgt) == item_total_steps
+                    ), f"target total({_tail(steps_tgt)}) != item_total({item_total_steps}). {msg_tgt}"
 
                     X = steps_base
 
                     def _interp_strict(x_old, mean, std, x_new, name):
                         assert x_old[0] <= x_new[0], f"{name}: x_old starts after x_new"
-                        assert x_old[-1] >= x_new[-1], f"{name}: x_old ends before x_new"
+                        assert (
+                            x_old[-1] >= x_new[-1]
+                        ), f"{name}: x_old ends before x_new"
                         return (
                             np.interp(x_new, x_old, mean),
                             np.interp(x_new, x_old, std),
                         )
 
                     base_g_mean_i, base_g_std_i = _interp_strict(
-                        steps_base, base_curves["greedy_mean"], base_curves["greedy_std"], X, "baseline/greedy"
+                        steps_base,
+                        base_curves["greedy_mean"],
+                        base_curves["greedy_std"],
+                        X,
+                        "baseline/greedy",
                     )
                     base_t_mean_i, base_t_std_i = _interp_strict(
-                        steps_base, base_curves["train_mean"], base_curves["train_std"], X, "baseline/train"
+                        steps_base,
+                        base_curves["train_mean"],
+                        base_curves["train_std"],
+                        X,
+                        "baseline/train",
                     )
 
                     tgt_g_mean_i, tgt_g_std_i = _interp_strict(
@@ -1225,34 +1403,49 @@ class RayCurriculumTrainer:
                     if has_self_eval:
                         selfb = dd[lb]
                         steps_self = np.asarray(selfb["steps"], dtype=int)
-                        assert steps_self[-1] == item_total_steps, \
-                            f"self total({steps_self[-1]}) != item_total({item_total_steps}) for {lb}"
+                        assert (
+                            steps_self[-1] == item_total_steps
+                        ), f"self total({steps_self[-1]}) != item_total({item_total_steps}) for {lb}"
                         self_g_mean_i, self_g_std_i = _interp_strict(
-                            steps_self, np.asarray(selfb["greedy_mean"], float), np.asarray(selfb["greedy_std"], float),
-                            X, f"item({lb})/greedy"
+                            steps_self,
+                            np.asarray(selfb["greedy_mean"], float),
+                            np.asarray(selfb["greedy_std"], float),
+                            X,
+                            f"item({lb})/greedy",
                         )
                         self_t_mean_i, self_t_std_i = _interp_strict(
-                            steps_self, np.asarray(selfb["train_mean"], float), np.asarray(selfb["train_std"], float),
-                            X, f"item({lb})/train"
+                            steps_self,
+                            np.asarray(selfb["train_mean"], float),
+                            np.asarray(selfb["train_std"], float),
+                            X,
+                            f"item({lb})/train",
                         )
                         curves_item_i = {
-                            "greedy_mean": self_g_mean_i, "greedy_std": self_g_std_i,
-                            "train_mean": self_t_mean_i, "train_std": self_t_std_i,
+                            "greedy_mean": self_g_mean_i,
+                            "greedy_std": self_g_std_i,
+                            "train_mean": self_t_mean_i,
+                            "train_std": self_t_std_i,
                         }
 
-                    png_path = os.path.join(item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png")
+                    png_path = os.path.join(
+                        item_dir, f"pairwise_{lb}_phase_{boundaries_str}.png"
+                    )
                     plot_pairwise(
                         out_png_path=png_path,
                         checkpoints=X,
                         phase_boundaries=item_boundaries,
                         title_prefix=f"Pairwise for '{lb}'",
                         baseline={
-                            "greedy_mean": base_g_mean_i, "greedy_std": base_g_std_i,
-                            "train_mean": base_t_mean_i, "train_std": base_t_std_i,
+                            "greedy_mean": base_g_mean_i,
+                            "greedy_std": base_g_std_i,
+                            "train_mean": base_t_mean_i,
+                            "train_std": base_t_std_i,
                         },
                         curves_target={
-                            "greedy_mean": tgt_g_mean_i, "greedy_std": tgt_g_std_i,
-                            "train_mean": tgt_t_mean_i, "train_std": tgt_t_std_i,
+                            "greedy_mean": tgt_g_mean_i,
+                            "greedy_std": tgt_g_std_i,
+                            "train_mean": tgt_t_mean_i,
+                            "train_std": tgt_t_std_i,
                         },
                         curves_source=curves_item_i,  # optional (self-eval)
                     )
@@ -1268,9 +1461,9 @@ class RayCurriculumTrainer:
 
     # --- offline aggregation ---
     def _aggregate(
-            self,
-            per_seed: List[Dict[str, Any]],
-            item_phases_map: Dict[str, List[Dict[str, Any]]],
+        self,
+        per_seed: List[Dict[str, Any]],
+        item_phases_map: Dict[str, List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
         """Aggregate per-seed traces. No eval-name fallback; keep all evals explicitly."""
         assert per_seed, "no results"
@@ -1286,10 +1479,10 @@ class RayCurriculumTrainer:
         # -------- baseline: aggregate all eval names if present (no fallback) --------
         first_base = per_seed[0].get("baseline", None)
         has_baseline = (
-                isinstance(first_base, dict)
-                and "steps" in first_base
-                and isinstance(first_base["steps"], dict)
-                and len(first_base["steps"]) > 0
+            isinstance(first_base, dict)
+            and "steps" in first_base
+            and isinstance(first_base["steps"], dict)
+            and len(first_base["steps"]) > 0
         )
         if has_baseline:
             base_names = list(first_base["steps"].keys())
@@ -1299,7 +1492,7 @@ class RayCurriculumTrainer:
                 ref_steps = per_seed[0]["baseline"]["steps"][eval_name]
                 for r in per_seed:
                     assert (
-                            r["baseline"]["steps"][eval_name] == ref_steps
+                        r["baseline"]["steps"][eval_name] == ref_steps
                     ), f"baseline steps mismatch on eval '{eval_name}'"
 
                 g_mean, g_std = _stack(
@@ -1318,12 +1511,16 @@ class RayCurriculumTrainer:
 
             # Reference steps only if baseline contains "Target"
             out["steps"] = (
-                out["baseline"]["Target"]["steps"] if "Target" in out["baseline"] else None
+                out["baseline"]["Target"]["steps"]
+                if "Target" in out["baseline"]
+                else None
             )
 
         # -------- items: aggregate each configured eval name for each item --------
         for lb in labels:
-            assert "items" in per_seed[0] and lb in per_seed[0]["items"], f"missing item '{lb}'"
+            assert (
+                "items" in per_seed[0] and lb in per_seed[0]["items"]
+            ), f"missing item '{lb}'"
             # available eval names for this item (skip helper keys)
             eval_names = [
                 k
@@ -1337,7 +1534,7 @@ class RayCurriculumTrainer:
                 ref_steps = steps_ref_map[nm]
                 for r in per_seed:
                     assert (
-                            r["items"][lb]["steps"][nm] == ref_steps
+                        r["items"][lb]["steps"][nm] == ref_steps
                     ), f"steps mismatch for item '{lb}' eval '{nm}'"
 
                 gm, gs = _stack([r["items"][lb][nm]["greedy"] for r in per_seed])

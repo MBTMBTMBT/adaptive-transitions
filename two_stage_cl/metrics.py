@@ -39,8 +39,13 @@ def _cap(xs: np.ndarray, ys: np.ndarray, max_step: Optional[int]):
     return X, Y
 
 
-def _mean_over(xs, ys, lo: Optional[float] = None, hi: Optional[float] = None,
-               clamp_hi: Optional[float] = None):
+def _mean_over(
+    xs,
+    ys,
+    lo: Optional[float] = None,
+    hi: Optional[float] = None,
+    clamp_hi: Optional[float] = None,
+):
     xs = np.asarray(xs, float)
     ys = np.asarray(ys, float)
     if xs.size < 1 or ys.size != xs.size:
@@ -100,7 +105,9 @@ def _interp_at(xs, ys, s):
     return float(np.interp(float(s), xs, ys))
 
 
-def _ensure_curve(block: Dict[str, Any], curve_name: str) -> Tuple[np.ndarray, np.ndarray]:
+def _ensure_curve(
+    block: Dict[str, Any], curve_name: str
+) -> Tuple[np.ndarray, np.ndarray]:
     """Return (xs, ys) for curve_name; raise on structural errors."""
     assert "steps" in block and curve_name in block, f"missing '{curve_name}' or steps"
     xs = np.asarray(block["steps"], int)
@@ -109,8 +116,14 @@ def _ensure_curve(block: Dict[str, Any], curve_name: str) -> Tuple[np.ndarray, n
         raise ValueError(f"shape mismatch in '{curve_name}' series")
     return xs, ys
 
-def _auc_over(xs, ys, lo: Optional[float] = None, hi: Optional[float] = None,
-              clamp_hi: Optional[float] = None):
+
+def _auc_over(
+    xs,
+    ys,
+    lo: Optional[float] = None,
+    hi: Optional[float] = None,
+    clamp_hi: Optional[float] = None,
+):
     """
     Trapezoidal area over [lo, hi], with endpoint interpolation.
     If clamp_hi is not None, hi = min(hi, clamp_hi) before clipping to support.
@@ -140,6 +153,7 @@ def _auc_over(xs, ys, lo: Optional[float] = None, hi: Optional[float] = None,
     if X.size < 2:
         return None
     return float(np.trapz(Y, X))
+
 
 def _jumpstart_fields(
     tgt_block: Dict[str, Any],
@@ -187,4 +201,3 @@ def _jumpstart_fields(
         baseline_B = None
 
     return {"target_start": target_start, "p2_head": p2_head, "baseline_B": baseline_B}
-

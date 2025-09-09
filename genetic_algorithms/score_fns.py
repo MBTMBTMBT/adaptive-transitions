@@ -27,7 +27,12 @@ def _normalize_score_spec(spec: Any) -> List[Tuple[str, Dict[str, Any]]]:
         raise TypeError("score_spec must be a list of (name: str, params: dict).")
     items: List[Tuple[str, Dict[str, Any]]] = []
     for it in spec:
-        if (not isinstance(it, tuple)) or len(it) != 2 or not isinstance(it[0], str) or not isinstance(it[1], dict):
+        if (
+            (not isinstance(it, tuple))
+            or len(it) != 2
+            or not isinstance(it[0], str)
+            or not isinstance(it[1], dict)
+        ):
             raise TypeError("Each score item must be ('name', {params}).")
         items.append((it[0], dict(it[1])))
 
@@ -68,34 +73,67 @@ def obj_multi_kl_and_perf(
       - 'perf_integral' (maximize): integral(random -> cand_opt) on candidate MDP.
     """
     pre = shared.get("precomputed", None)
-    if not (isinstance(pre, list) and len(pre) >= 2 and pre[0] is not None and pre[1] is not None):
-        raise ValueError("obj_multi_kl_and_perf requires precomputed[0]=base_policy, [1]=base_occupancy.")
+    if not (
+        isinstance(pre, list)
+        and len(pre) >= 2
+        and pre[0] is not None
+        and pre[1] is not None
+    ):
+        raise ValueError(
+            "obj_multi_kl_and_perf requires precomputed[0]=base_policy, [1]=base_occupancy."
+        )
 
     base_policy = PolicyTable.from_portable(pre[0])
     base_occupancy = ValueTable.from_portable(pre[1])
 
-    _, Q2 = optimal_value_iteration(mdp, gamma=float(vi_gamma), theta=float(vi_theta), max_iterations=int(vi_max_iterations))
+    _, Q2 = optimal_value_iteration(
+        mdp,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
+    )
     policy2: PolicyTable = q_table_to_policy(
-        Q2, states=list(mdp.states), num_actions=mdp.num_actions,
-        mixing=tuple(policy_mixing), temperature=float(policy_temperature), tie_tol=float(policy_tie_tol),
+        Q2,
+        states=list(mdp.states),
+        num_actions=mdp.num_actions,
+        mixing=tuple(policy_mixing),
+        temperature=float(policy_temperature),
+        tie_tol=float(policy_tie_tol),
     )
     occupancy2: ValueTable = compute_occupancy_measure(
-        mdp, policy=policy2, gamma=float(vi_gamma), theta=float(vi_theta), max_iterations=int(vi_max_iterations),
+        mdp,
+        policy=policy2,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
     )
 
     kl = kl_policies(
-        policy1=base_policy, occupancy1=base_occupancy, policy2=policy2, occupancy2=occupancy2, delta=float(kl_delta),
+        policy1=base_policy,
+        occupancy1=base_occupancy,
+        policy2=policy2,
+        occupancy2=occupancy2,
+        delta=float(kl_delta),
     )
     obj_kl = -float(kl)
 
     pgamma = float(vi_gamma) if perf_gamma is None else float(perf_gamma)
     ptheta = float(vi_theta) if perf_theta is None else float(perf_theta)
-    pmax_iter = int(vi_max_iterations) if perf_max_iterations is None else int(perf_max_iterations)
+    pmax_iter = (
+        int(vi_max_iterations)
+        if perf_max_iterations is None
+        else int(perf_max_iterations)
+    )
 
     prior = create_random_policy(mdp)
     _curve, integral = performance_curve_and_integral(
-        prior_policy=prior, target_policy=policy2, mdp_network=mdp,
-        numpoints=int(perf_numpoints), gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
+        prior_policy=prior,
+        target_policy=policy2,
+        mdp_network=mdp,
+        numpoints=int(perf_numpoints),
+        gamma=pgamma,
+        theta=ptheta,
+        max_iterations=pmax_iter,
     )
 
     return {"kl_neg": obj_kl, "perf_integral": float(integral)}
@@ -123,15 +161,31 @@ def obj_multi_perf(
       - 'int_blend_to_base' (maximize): integral(blended -> base_opt) on ORIGINAL base MDP.
     """
     pre = shared.get("precomputed", None)
-    if not (isinstance(pre, list) and len(pre) >= 3 and pre[0] is not None and pre[2] is not None):
-        raise ValueError("obj_multi_perf requires precomputed[0]=base_policy, [2]=base_mdp.")
+    if not (
+        isinstance(pre, list)
+        and len(pre) >= 3
+        and pre[0] is not None
+        and pre[2] is not None
+    ):
+        raise ValueError(
+            "obj_multi_perf requires precomputed[0]=base_policy, [2]=base_mdp."
+        )
     base_policy = PolicyTable.from_portable(pre[0])
     base_mdp = MDPNetwork.from_portable(pre[2])
 
-    _, Q2 = optimal_value_iteration(mdp, gamma=float(vi_gamma), theta=float(vi_theta), max_iterations=int(vi_max_iterations))
+    _, Q2 = optimal_value_iteration(
+        mdp,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
+    )
     policy2: PolicyTable = q_table_to_policy(
-        Q2, states=list(mdp.states), num_actions=mdp.num_actions,
-        mixing=tuple(policy_mixing), temperature=float(policy_temperature), tie_tol=float(policy_tie_tol),
+        Q2,
+        states=list(mdp.states),
+        num_actions=mdp.num_actions,
+        mixing=tuple(policy_mixing),
+        temperature=float(policy_temperature),
+        tie_tol=float(policy_tie_tol),
     )
 
     prior_rand = create_random_policy(mdp)
@@ -139,19 +193,36 @@ def obj_multi_perf(
 
     pgamma = float(vi_gamma) if perf_gamma is None else float(perf_gamma)
     ptheta = float(vi_theta) if perf_theta is None else float(perf_theta)
-    pmax_iter = int(vi_max_iterations) if perf_max_iterations is None else int(perf_max_iterations)
+    pmax_iter = (
+        int(vi_max_iterations)
+        if perf_max_iterations is None
+        else int(perf_max_iterations)
+    )
     N = int(perf_numpoints)
 
     _c0, integral0 = performance_curve_and_integral(
-        prior_policy=prior_rand, target_policy=blended, mdp_network=mdp,
-        numpoints=N, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
+        prior_policy=prior_rand,
+        target_policy=blended,
+        mdp_network=mdp,
+        numpoints=N,
+        gamma=pgamma,
+        theta=ptheta,
+        max_iterations=pmax_iter,
     )
     _c1, integral1 = performance_curve_and_integral(
-        prior_policy=blended, target_policy=base_policy, mdp_network=base_mdp,
-        numpoints=N, gamma=pgamma, theta=ptheta, max_iterations=pmax_iter,
+        prior_policy=blended,
+        target_policy=base_policy,
+        mdp_network=base_mdp,
+        numpoints=N,
+        gamma=pgamma,
+        theta=ptheta,
+        max_iterations=pmax_iter,
     )
 
-    return {"int_rand_to_blend": float(integral0), "int_blend_to_base": float(integral1)}
+    return {
+        "int_rand_to_blend": float(integral0),
+        "int_blend_to_base": float(integral1),
+    }
 
 
 def obj_cl_phase_mean(
@@ -172,8 +243,8 @@ def obj_cl_phase_mean(
     n_eval_episodes: int,
     # ---- optional knobs ----
     evals: Optional[Sequence[Dict[str, Any]]] = None,
-    curve: str = "greedy",        # "greedy" | "train"
-    eval_scope: str = "target",   # "target" | "item"
+    curve: str = "greedy",  # "greedy" | "train"
+    eval_scope: str = "target",  # "target" | "item"
     wandb_actor: Optional["ActorHandle"] = None,  # optional console dump
 ) -> Dict[str, Optional[float]]:
     """
@@ -195,7 +266,9 @@ def obj_cl_phase_mean(
     if not isinstance(phase_steps, (list, tuple)) or len(phase_steps) < 2:
         raise ValueError("obj_cl_phase_mean: needs at least two phases (p1, p2).")
     if int(phase_steps[0]) <= 0 or int(phase_steps[1]) <= 0:
-        raise ValueError("obj_cl_phase_mean: phase steps must be positive for p1 and p2.")
+        raise ValueError(
+            "obj_cl_phase_mean: phase steps must be positive for p1 and p2."
+        )
 
     # ---- eval declarations: always include Target; include CAND if item-scope requested ----
     if evals is None:
@@ -212,7 +285,9 @@ def obj_cl_phase_mean(
             evals_final.append({"name": str(es["name"]), "env": str(es["env"])})
         required_name = "CAND" if scope_key == "item" else "Target"
         if required_name not in {e["name"] for e in evals_final}:
-            raise ValueError(f"obj_cl_phase_mean: evals must include '{required_name}' for scope='{scope_key}'.")
+            raise ValueError(
+                f"obj_cl_phase_mean: evals must include '{required_name}' for scope='{scope_key}'."
+            )
 
     # ---- registry: target + item=CAND (in-memory portable) ----
     envs = {
@@ -220,14 +295,19 @@ def obj_cl_phase_mean(
         "items": {
             "CAND": {
                 "factory_path": item_factory_path,
-                "cfg": {"mdp_portable": mdp.to_portable(), "max_steps": int(item_max_steps)},
+                "cfg": {
+                    "mdp_portable": mdp.to_portable(),
+                    "max_steps": int(item_max_steps),
+                },
             }
         },
     }
 
     # ---- curriculum: p1 on item, p2 on target ----
     p1, p2 = int(phase_steps[0]), int(phase_steps[1])
-    item_phases_map = {"CAND": [{"env": "CAND", "steps": p1}, {"env": "target", "steps": p2}]}
+    item_phases_map = {
+        "CAND": [{"env": "CAND", "steps": p1}, {"env": "target", "steps": p2}]
+    }
     evals_map = {"CAND": list(evals_final)}
 
     # ---- seeds normalization ----
@@ -261,7 +341,7 @@ def obj_cl_phase_mean(
         n_eval_episodes=int(n_eval_episodes),
         output_dir=None,
         save_intermediate=False,
-        wandb_actor=None,   # keep training silent
+        wandb_actor=None,  # keep training silent
         media_opts=None,
         wandb_step_base=0,
         run_baseline=False,  # baseline disabled -> js_baseline_B will likely be None
@@ -284,7 +364,9 @@ def obj_cl_phase_mean(
         raise ValueError(f"obj_cl_phase_mean: items['CAND']['{scope_key}'] missing.")
     scope_block = cand[scope_key]
     if curve_key not in scope_block:
-        raise ValueError(f"obj_cl_phase_mean: items['CAND']['{scope_key}']['{curve_key}'] missing.")
+        raise ValueError(
+            f"obj_cl_phase_mean: items['CAND']['{scope_key}']['{curve_key}'] missing."
+        )
     ch = scope_block[curve_key]
 
     # ---- primary metrics (p1/p2 means & AUCs, totals, last-k, TTT) ----

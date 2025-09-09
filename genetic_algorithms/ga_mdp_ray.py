@@ -43,11 +43,12 @@ from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measu
 def _derive_seed(master_seed: int, *tags: Any) -> int:
     """Deterministic 64-bit seed derived from (master_seed, tags*)."""
     h = hashlib.sha256()
-    h.update(str(int(master_seed)).encode())
+    h.update(str(int(master_seed)).encode("utf-8"))
     for t in tags:
         h.update(b"::")
-        h.update(str(t).encode())
-    return int.from_bytes(h.digest[:8] if hasattr(h, "digest") else hashlib.sha256(h.digest()).digest()[:8], "little", signed=False)
+        h.update(str(t).encode("utf-8"))
+    # take first 8 bytes -> [0, 2**64-1]
+    return int.from_bytes(h.digest()[:8], "little", signed=False)
 
 
 # =========================================================
@@ -95,7 +96,9 @@ def _fast_non_dominated_sort(objs: List[List[float]]) -> List[List[int]]:
     return fronts
 
 
-def _compute_crowding_distance(objs: List[List[float]], idxs: List[int]) -> Dict[int, float]:
+def _compute_crowding_distance(
+    objs: List[List[float]], idxs: List[int]
+) -> Dict[int, float]:
     M = len(objs[0]) if objs else 0
     Nf = len(idxs)
     if Nf == 0:
@@ -141,10 +144,22 @@ class GAWorker:
         self.whitelist: Set[EdgeTriple] = set(tuple(x) for x in whitelist)
         self.ops = dict(ops or {})
         self.distance = {
-            "max_hops": distance_cfg.get("dist_max_hops", distance_cfg.get("max_hops", None)),
-            "node_cap": distance_cfg.get("dist_node_cap", distance_cfg.get("node_cap", None)),
-            "weight_eps": float(distance_cfg.get("dist_weight_eps", distance_cfg.get("weight_eps", 1e-9))),
-            "unreachable": float(distance_cfg.get("dist_unreachable", distance_cfg.get("unreachable", 1e6))),
+            "max_hops": distance_cfg.get(
+                "dist_max_hops", distance_cfg.get("max_hops", None)
+            ),
+            "node_cap": distance_cfg.get(
+                "dist_node_cap", distance_cfg.get("node_cap", None)
+            ),
+            "weight_eps": float(
+                distance_cfg.get(
+                    "dist_weight_eps", distance_cfg.get("weight_eps", 1e-9)
+                )
+            ),
+            "unreachable": float(
+                distance_cfg.get(
+                    "dist_unreachable", distance_cfg.get("unreachable", 1e6)
+                )
+            ),
         }
         self.solver = dict(solver or {})
         self.precomputed_portables = precomputed_portables
@@ -169,24 +184,43 @@ class GAWorker:
                 pb = MDPNetwork.from_portable(pb_portable)
                 ind = (
                     _crossover_action_block(
-                        pa, pb, rng, whitelist=self.whitelist, prob_floor=prob_floor,
+                        pa,
+                        pb,
+                        rng,
+                        whitelist=self.whitelist,
+                        prob_floor=prob_floor,
                     )
-                    if do_crossover else (pa if rng.random() < 0.5 else pb).clone()
+                    if do_crossover
+                    else (pa if rng.random() < 0.5 else pb).clone()
                 )
 
         for _ in range(int(self.ops.get("add_edge_attempts_per_child", 2))):
-            _mutation_add_edge(ind, rng, self.base_ref, self.ops, self.distance, whitelist=self.whitelist)
+            _mutation_add_edge(
+                ind,
+                rng,
+                self.base_ref,
+                self.ops,
+                self.distance,
+                whitelist=self.whitelist,
+            )
         _mutation_prob_pairwise(ind, rng, self.ops, whitelist=self.whitelist)
         if int(self.ops.get("reward_tweak_edges_per_child", 50)) > 0:
             _mutation_reward_smallstep(ind, rng, self.ops)
 
         if self.ops.get("prune_prob_threshold", None) is not None:
             _prune_low_prob_transitions(
-                ind, float(self.ops["prune_prob_threshold"]), whitelist=self.whitelist, prob_floor=prob_floor,
+                ind,
+                float(self.ops["prune_prob_threshold"]),
+                whitelist=self.whitelist,
+                prob_floor=prob_floor,
             )
         return ind.to_portable()
 
-    def score_batch(self, portables: List[Dict[str, Any]], score_spec: List[Tuple[str, Dict[str, Any]]]) -> List[Dict[str, Optional[float]]]:
+    def score_batch(
+        self,
+        portables: List[Dict[str, Any]],
+        score_spec: List[Tuple[str, Dict[str, Any]]],
+    ) -> List[Dict[str, Optional[float]]]:
         """
         Evaluate a batch; return one flat metrics dict per portable.
         - Keys are "simple names" returned by score functions.
@@ -203,11 +237,15 @@ class GAWorker:
                     fn = SCORE_FNS[name]
                     m = fn(mdp, shared, **params)
                     if not isinstance(m, dict):
-                        raise TypeError(f"Score function '{name}' must return Dict[str, float|None].")
+                        raise TypeError(
+                            f"Score function '{name}' must return Dict[str, float|None]."
+                        )
                     # duplicate key detection
                     dup = set(merged.keys()).intersection(m.keys())
                     if dup:
-                        raise ValueError(f"Duplicate metric keys detected across score functions: {sorted(dup)}")
+                        raise ValueError(
+                            f"Duplicate metric keys detected across score functions: {sorted(dup)}"
+                        )
                     # type normalization
                     for k, v in m.items():
                         if v is None:
@@ -219,6 +257,7 @@ class GAWorker:
             return results
         except BaseException as e:
             import traceback
+
             tb = traceback.format_exc()
             print(f"[GAWorker.score_batch] FATAL: {e}\n{tb}")
             raise RuntimeError(f"GAWorker.score_batch crashed with: {e}") from e
@@ -331,7 +370,9 @@ def ga_score_portables_with_metrics(
 
     futs = []
     for p in portables:
-        worker = ga_make_worker(base_portable, whitelist, ops, distance_cfg, solver, precomputed)
+        worker = ga_make_worker(
+            base_portable, whitelist, ops, distance_cfg, solver, precomputed
+        )
         futs.append(worker.score_batch.remote([p], score_spec))
     parts = ray.get(futs)  # List[List[Dict[str,float|None]]], each batch size=1
     metrics_list: List[Dict[str, Optional[float]]] = [one[0] for one in parts]
@@ -342,7 +383,9 @@ def ga_score_portables_with_metrics(
         obj_vals: List[float] = []
         for k in objective_keys:
             if k not in md or md[k] is None or not math.isfinite(float(md[k])):
-                raise ValueError(f"Objective key '{k}' missing/non-finite at gen={gen}, ind={ind_in_gen}.")
+                raise ValueError(
+                    f"Objective key '{k}' missing/non-finite at gen={gen}, ind={ind_in_gen}."
+                )
             obj_vals.append(float(md[k]))
         objs_list.append(obj_vals)
 
@@ -359,7 +402,11 @@ def ga_score_portables_with_metrics(
                 "ga/is_child": bool(is_child),
             }
             for mk, mv in md.items():
-                payload[f"ga/metrics/{mk}"] = float(mv) if (mv is not None and math.isfinite(float(mv))) else float("nan")
+                payload[f"ga/metrics/{mk}"] = (
+                    float(mv)
+                    if (mv is not None and math.isfinite(float(mv)))
+                    else float("nan")
+                )
             for ok in objective_keys:
                 payload[f"ga/objs/{ok}"] = float(md.get(ok, float("nan")))
             try:
@@ -409,7 +456,9 @@ def ga_update_metric_curves(
             metrics_history[k]["max"].append(nan)
 
 
-def ga_export_metric_curves(metrics_dir: Path, metrics_history: Dict[str, Dict[str, List[float]]]) -> None:
+def ga_export_metric_curves(
+    metrics_dir: Path, metrics_history: Dict[str, Dict[str, List[float]]]
+) -> None:
     """Write CSVs and PNGs (3 subplots per metric: min/mean/max)."""
     curves_dir = metrics_dir / "metrics_curves"
     plots_dir = metrics_dir / "metrics_plots"
@@ -422,15 +471,26 @@ def ga_export_metric_curves(metrics_dir: Path, metrics_history: Dict[str, Dict[s
         with open(csv_path, "w", encoding="utf-8") as f:
             f.write("gen,min,mean,max\n")
             for g in range(len(series["min"])):
-                f.write(f"{g},{series['min'][g]},{series['mean'][g]},{series['max'][g]}\n")
+                f.write(
+                    f"{g},{series['min'][g]},{series['mean'][g]},{series['max'][g]}\n"
+                )
 
     # PNG
     for key, series in metrics_history.items():
         gens = list(range(len(series["min"])))
         fig, axes = plt.subplots(3, 1, figsize=(8, 9), constrained_layout=True)
-        axes[0].plot(gens, series["min"]);  axes[0].set_title(f"{key} - min");  axes[0].set_xlabel("gen");  axes[0].set_ylabel("min")
-        axes[1].plot(gens, series["mean"]); axes[1].set_title(f"{key} - mean"); axes[1].set_xlabel("gen");  axes[1].set_ylabel("mean")
-        axes[2].plot(gens, series["max"]);  axes[2].set_title(f"{key} - max");  axes[2].set_xlabel("gen");  axes[2].set_ylabel("max")
+        axes[0].plot(gens, series["min"])
+        axes[0].set_title(f"{key} - min")
+        axes[0].set_xlabel("gen")
+        axes[0].set_ylabel("min")
+        axes[1].plot(gens, series["mean"])
+        axes[1].set_title(f"{key} - mean")
+        axes[1].set_xlabel("gen")
+        axes[1].set_ylabel("mean")
+        axes[2].plot(gens, series["max"])
+        axes[2].set_title(f"{key} - max")
+        axes[2].set_xlabel("gen")
+        axes[2].set_ylabel("max")
         png_path = plots_dir / f"{_safe_name(key)}.png"
         fig.savefig(png_path, dpi=150)
         plt.close(fig)
@@ -450,8 +510,8 @@ def run_ga(
     ops: Optional[Dict[str, Any]] = None,
     distance: Optional[Dict[str, Any]] = None,
     solver: Optional[Dict[str, Any]] = None,
-    score: List[Tuple[str, Dict[str, Any]]] = None,   # strict format
-    objective_keys: List[str] = None,                  # required: keys used as GA objectives
+    score: List[Tuple[str, Dict[str, Any]]] = None,  # strict format
+    objective_keys: List[str] = None,  # required: keys used as GA objectives
 ) -> Tuple[List[MDPNetwork], List[List[float]], List[MDPNetwork], List[List[float]]]:
     """
     GA driver (NSGA-II, maximize objectives).
@@ -466,7 +526,11 @@ def run_ga(
     - End of run:
         * For each metric key, save CSV(gen,min,mean,max) and a PNG with 3 subplots (min/mean/max).
     """
-    if objective_keys is None or not isinstance(objective_keys, list) or not objective_keys:
+    if (
+        objective_keys is None
+        or not isinstance(objective_keys, list)
+        or not objective_keys
+    ):
         raise ValueError("objective_keys must be a non-empty list of metric keys.")
     score = score or [("obj_multi_perf", {})]
 
@@ -477,7 +541,9 @@ def run_ga(
     logger = logging.getLogger("ga")
     if not logger.handlers:
         _h = logging.StreamHandler(sys.stdout)
-        _h.setFormatter(logging.Formatter(fmt="%(asctime)s | %(levelname)s | %(message)s"))
+        _h.setFormatter(
+            logging.Formatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+        )
         logger.addHandler(_h)
     logger.setLevel(logging.INFO)
 
@@ -499,18 +565,32 @@ def run_ga(
     tie_tol = float(solver.get("policy_tie_tol", 1e-6))
 
     t0 = time.perf_counter()
-    _, Q = optimal_value_iteration(base_mdp, gamma=gamma, theta=theta, max_iterations=max_iters)
-    base_policy = q_table_to_policy(
-        Q, states=list(base_mdp.states), num_actions=base_mdp.num_actions,
-        mixing=policy_mix, temperature=policy_temp, tie_tol=tie_tol,
+    _, Q = optimal_value_iteration(
+        base_mdp, gamma=gamma, theta=theta, max_iterations=max_iters
     )
-    base_occupancy = compute_occupancy_measure(base_mdp, base_policy, gamma=gamma, theta=theta, max_iterations=max_iters)
-    precomputed = [base_policy.to_portable(), base_occupancy.to_portable(), base_mdp.to_portable()]
+    base_policy = q_table_to_policy(
+        Q,
+        states=list(base_mdp.states),
+        num_actions=base_mdp.num_actions,
+        mixing=policy_mix,
+        temperature=policy_temp,
+        tie_tol=tie_tol,
+    )
+    base_occupancy = compute_occupancy_measure(
+        base_mdp, base_policy, gamma=gamma, theta=theta, max_iterations=max_iters
+    )
+    precomputed = [
+        base_policy.to_portable(),
+        base_occupancy.to_portable(),
+        base_mdp.to_portable(),
+    ]
     t1 = time.perf_counter()
 
     if wandb_writer is not None:
         try:
-            wandb_writer.log.remote({"ga/time/precompute_sec": float(t1 - t0), "ga/gen": -1})
+            wandb_writer.log.remote(
+                {"ga/time/precompute_sec": float(t1 - t0), "ga/gen": -1}
+            )
         except Exception:
             pass
 
@@ -536,7 +616,9 @@ def run_ga(
     if need > 0:
         futs = []
         for i in range(need):
-            worker = ga_make_worker(base_portable, whitelist, ops, distance, solver, precomputed)
+            worker = ga_make_worker(
+                base_portable, whitelist, ops, distance, solver, precomputed
+            )
             futs.append(worker.mutate.remote(seed=_derive_seed(seed, "init", i)))
         children_portables = ray.get(futs)
         pop.extend([MDPNetwork.from_portable(p) for p in children_portables])
@@ -562,7 +644,9 @@ def run_ga(
     )
 
     # ===== Metric curves state =====
-    all_metric_keys: Set[str] = set().union(*[set(md.keys()) for md in pop_metrics]) if pop_metrics else set()
+    all_metric_keys: Set[str] = (
+        set().union(*[set(md.keys()) for md in pop_metrics]) if pop_metrics else set()
+    )
     metrics_history: Dict[str, Dict[str, List[float]]] = {}
     ga_update_metric_curves(pop_metrics, metrics_history, all_metric_keys)
 
@@ -576,7 +660,8 @@ def run_ga(
             f"mean={init_stats.get(f'mean_{m}', float('nan')):.4f} "
             f"max={init_stats.get(f'max_{m}', float('nan')):.4f}"
             for m in range(len(objs[0]) if objs else 0)
-        ) or "NA",
+        )
+        or "NA",
     )
     if wandb_writer is not None:
         payload = {"ga/init/pop_size": int(len(pop)), "ga/gen": 0}
@@ -606,7 +691,9 @@ def run_ga(
         elite_k = max(0, min(int(elitism), population_size, len(pop)))
         elite_parent_idxs = set()
         if elite_k > 0:
-            order_prev = sorted(range(len(pop)), key=lambda i: (ranks[i], -crowding.get(i, 0.0)))
+            order_prev = sorted(
+                range(len(pop)), key=lambda i: (ranks[i], -crowding.get(i, 0.0))
+            )
             elite_parent_idxs = set(order_prev[:elite_k])
 
         # tournament selection
@@ -616,13 +703,19 @@ def run_ga(
             best = int(idxs[0])
             for j in idxs[1:]:
                 j = int(j)
-                if ranks[j] < ranks[best] or (ranks[j] == ranks[best] and crowding.get(j, 0.0) > crowding.get(best, 0.0)):
+                if ranks[j] < ranks[best] or (
+                    ranks[j] == ranks[best]
+                    and crowding.get(j, 0.0) > crowding.get(best, 0.0)
+                ):
                     best = j
             idxs2 = rng_drv.choice(len(pop), size=int(tournament_k), replace=False)
             best2 = int(idxs2[0])
             for j in idxs2[1:]:
                 j = int(j)
-                if ranks[j] < ranks[best2] or (ranks[j] == ranks[best2] and crowding.get(j, 0.0) > crowding.get(best2, 0.0)):
+                if ranks[j] < ranks[best2] or (
+                    ranks[j] == ranks[best2]
+                    and crowding.get(j, 0.0) > crowding.get(best2, 0.0)
+                ):
                     best2 = j
             parents_pairs.append((pop[best], pop[best2]))
 
@@ -630,7 +723,9 @@ def run_ga(
         futs = []
         for k, (pa, pb) in enumerate(parents_pairs):
             do_x = rng_drv.random() < float(crossover_rate)
-            worker = ga_make_worker(base_portable, whitelist, ops, distance, solver, precomputed)
+            worker = ga_make_worker(
+                base_portable, whitelist, ops, distance, solver, precomputed
+            )
             futs.append(
                 worker.mutate.remote(
                     seed=_derive_seed(seed, "child", gen, k),
@@ -670,7 +765,9 @@ def run_ga(
 
         new_pop: List[MDPNetwork] = [union_pop[i] for i in locked]
         new_objs: List[List[float]] = [union_objs[i] for i in locked]
-        new_metrics: List[Dict[str, Optional[float]]] = [union_metrics[i] for i in locked]
+        new_metrics: List[Dict[str, Optional[float]]] = [
+            union_metrics[i] for i in locked
+        ]
 
         for F in union_fronts:
             F_remaining = [i for i in F if i not in locked]
@@ -680,7 +777,9 @@ def run_ga(
                 new_metrics.extend([union_metrics[i] for i in F_remaining])
             else:
                 dist = _compute_crowding_distance(union_objs, F_remaining)
-                sorted_F = sorted(F_remaining, key=lambda i: dist.get(i, 0.0), reverse=True)
+                sorted_F = sorted(
+                    F_remaining, key=lambda i: dist.get(i, 0.0), reverse=True
+                )
                 remain = population_size - len(new_pop)
                 chosen = sorted_F[:remain]
                 new_pop.extend([union_pop[i] for i in chosen])
@@ -707,13 +806,16 @@ def run_ga(
         gen_stats = _summ_stats(objs)
         logger.info(
             "[Gen %d/%d] pop=%d | %s | F1=%d",
-            gen + 1, generations, len(pop),
+            gen + 1,
+            generations,
+            len(pop),
             " | ".join(
                 f"obj{m}: min={gen_stats.get(f'min_{m}', float('nan')):.4f} "
                 f"mean={gen_stats.get(f'mean_{m}', float('nan')):.4f} "
                 f"max={gen_stats.get(f'max_{m}', float('nan')):.4f}"
                 for m in range(len(objs[0]) if objs else 0)
-            ) or "NA",
+            )
+            or "NA",
             len(fronts[0]) if fronts else 0,
         )
         if wandb_writer is not None:
@@ -726,7 +828,9 @@ def run_ga(
             M = len(objs[0]) if objs else 0
             for m in range(M):
                 payload[f"ga/pop/obj{m}_min"] = gen_stats.get(f"min_{m}", float("nan"))
-                payload[f"ga/pop/obj{m}_mean"] = gen_stats.get(f"mean_{m}", float("nan"))
+                payload[f"ga/pop/obj{m}_mean"] = gen_stats.get(
+                    f"mean_{m}", float("nan")
+                )
                 payload[f"ga/pop/obj{m}_max"] = gen_stats.get(f"max_{m}", float("nan"))
             try:
                 wandb_writer.log.remote(payload)

@@ -124,7 +124,7 @@ class WandbActor:
                 out.write("\n")
                 continue
             for i in range(0, len(line), MAX_CHARS):
-                out.write(line[i:i + MAX_CHARS] + "\n")
+                out.write(line[i : i + MAX_CHARS] + "\n")
         out.flush()
 
     def finish(self) -> None:
