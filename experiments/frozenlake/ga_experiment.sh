@@ -92,7 +92,7 @@ SLUR_CACHE_DEFAULT="/scratch/users/${USER}/singularity/cache"
 # CLI
 # -----------------------------
 EXP_NAME=""
-MAPS_INPUT="8x8,env0,env1,env2,env3,env4"
+MAPS_INPUT="8x8,env1,env2,env3,env4"  # env0,
 EXTRA_ARGS=()
 LOCAL_EXP_OUTROOT="${LOCAL_EXP_OUTROOT_DEFAULT}"
 SLURM_EXP_OUTROOT="${SLURM_EXP_OUTROOT_DEFAULT}"
