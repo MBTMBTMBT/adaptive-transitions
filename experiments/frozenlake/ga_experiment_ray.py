@@ -475,7 +475,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=50)
-    p.add_argument("--ga-generations", type=int, default=75)
+    p.add_argument("--ga-generations", type=int, default=250)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -537,7 +537,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="20000,130000",
+        default="20000,180000",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
     p.add_argument("--eval-every", type=int, default=1000)
@@ -717,7 +717,23 @@ def main():
                         # "eval_scope": "target",    # "target" | "item"
                         # "evals": [{"name":"Target","env":"target"}],  # explicit eval declarations
                     },
-                )
+                ),
+                (
+                    "obj_multi_perf",
+                    {
+                        "vi_gamma": 0.99,
+                        "vi_theta": 1e-3,
+                        "vi_max_iterations": 1000,
+                        "policy_mixing": (0.9, 0.0, 0.1),
+                        "policy_temperature": 0.01,
+                        "policy_tie_tol": 1e-2,
+                        "perf_numpoints": 16,
+                        "perf_gamma": 0.99,
+                        "perf_theta": 1e-3,
+                        "perf_max_iterations": 1000,
+                        "blend_weight": 0.8,
+                    },
+                ),
             ]
             objective_keys: List[str] = [
                 "p1_mean",
@@ -763,8 +779,8 @@ def main():
                 ops=ops,
                 distance=distance,
                 solver=solver,
-                score=score,                        # strict: list of (name, params)
-                objective_keys=objective_keys,      # strict: list of metric keys to optimize
+                score=score,  # strict: list of (name, params)
+                objective_keys=objective_keys,  # strict: list of metric keys to optimize
             )
 
             # Collect saved JSONs from GA
@@ -772,13 +788,17 @@ def main():
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
                 json_files = json_files[: args.json_max]
-            print(f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}.")
+            print(
+                f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}."
+            )
         else:
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
                 json_files = json_files[: args.json_max]
-            print(f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}.")
+            print(
+                f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}."
+            )
 
     # ----------------------------- Curriculum Training -----------------------------
     if not args.skip_train and json_files:
@@ -830,7 +850,10 @@ def main():
 
         evals_map: Dict[str, List[Dict[str, Any]]] = {}
         for key in envs["items"].keys():
-            evals_map[key] = [{"name": key, "env": key}, {"name": "Target", "env": "target"}]
+            evals_map[key] = [
+                {"name": key, "env": key},
+                {"name": "Target", "env": "target"},
+            ]
 
         # Agent config for CL
         agent_kwargs = {

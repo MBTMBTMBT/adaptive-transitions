@@ -303,28 +303,6 @@ def _finite_vals(vals: List[Optional[float]]) -> List[float]:
     return out
 
 
-def _safe_name(s: str) -> str:
-    """Sanitize metric key for filenames."""
-    t = s.replace("/", "__").replace("\\", "__").replace(" ", "_")
-    return "".join(c for c in t if (c.isalnum() or c in "._-+%=:@#[]{}()"))
-
-
-def _jsonl_append(path: str, rec: Dict[str, Any]) -> None:
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-
-def _finite_vals(vals: List[Optional[float]]) -> List[float]:
-    out: List[float] = []
-    for v in vals:
-        if v is None:
-            continue
-        fv = float(v)
-        if math.isfinite(fv):
-            out.append(fv)
-    return out
-
-
 def ga_make_worker(
     base_portable: Dict[str, Any],
     whitelist: List[Tuple[int, int, int]],
@@ -362,8 +340,12 @@ def ga_score_portables_with_metrics(
     uid_counter: int,
 ) -> Tuple[List[List[float]], List[Dict[str, Optional[float]]], int]:
     """
-    Fan-out evaluate -> returns (objs_list, metrics_list, new_uid_counter).
-    Also logs to W&B and JSONL (if provided).
+    Fan-out evaluate -> (objs_list, metrics_list, new_uid_counter).
+    Also logs to W&B and JSONL.
+    W&B policy:
+      - All finite metrics (non-None) -> ga_metrics/<key>
+      - Objective keys                -> ga_object/<key>
+      - Meta info (ids/flags/indices) -> ga_meta/*
     """
     if not portables:
         return [], [], uid_counter
@@ -389,26 +371,33 @@ def ga_score_portables_with_metrics(
             obj_vals.append(float(md[k]))
         objs_list.append(obj_vals)
 
-        # per-evaluation logging id
+        # per-evaluation id
         uid = uid_counter
         uid_counter += 1
 
-        # W&B payload
+        # W&B payload (groups renamed; booleans cast to int under ga_meta/*)
         if wandb_writer is not None:
-            payload = {
+            payload: Dict[str, Any] = {
                 "ga/gen": int(gen),
-                "ga/uid": int(uid),
-                "ga/ind_in_gen": int(ind_in_gen),
-                "ga/is_child": bool(is_child),
+                "ga_meta/uid": int(uid),
+                "ga_meta/ind_in_gen": int(ind_in_gen),
+                "ga_meta/is_child": int(bool(is_child)),  # avoid media warning
             }
+            # full metrics (finite only) -> ga_metrics/*
             for mk, mv in md.items():
-                payload[f"ga/metrics/{mk}"] = (
-                    float(mv)
-                    if (mv is not None and math.isfinite(float(mv)))
-                    else float("nan")
-                )
+                if mv is None:
+                    continue
+                fv = float(mv)
+                if math.isfinite(fv):
+                    payload[f"ga_metrics/{mk}"] = fv
+            # objectives (subset) -> ga_object/*
             for ok in objective_keys:
-                payload[f"ga/objs/{ok}"] = float(md.get(ok, float("nan")))
+                v = md.get(ok, None)
+                if v is None:
+                    continue
+                fv = float(v)
+                if math.isfinite(fv):
+                    payload[f"ga_object/{ok}"] = fv
             try:
                 wandb_writer.log.remote(payload)
             except Exception:
@@ -457,9 +446,11 @@ def ga_update_metric_curves(
 
 
 def ga_export_metric_curves(
-    metrics_dir: Path, metrics_history: Dict[str, Dict[str, List[float]]]
+    metrics_dir: Path,
+    metrics_history: Dict[str, Dict[str, List[float]]],
+    wandb_writer: Optional[ActorHandle] = None,
 ) -> None:
-    """Write CSVs and PNGs (3 subplots per metric: min/mean/max)."""
+    """Write CSVs and PNGs (3 subplots per metric: min/mean/max), also upload PNGs to W&B."""
     curves_dir = metrics_dir / "metrics_curves"
     plots_dir = metrics_dir / "metrics_plots"
     ensure_dir(curves_dir)
@@ -475,25 +466,39 @@ def ga_export_metric_curves(
                     f"{g},{series['min'][g]},{series['mean'][g]},{series['max'][g]}\n"
                 )
 
-    # PNG
+    # PNG (+ upload to W&B)
     for key, series in metrics_history.items():
         gens = list(range(len(series["min"])))
         fig, axes = plt.subplots(3, 1, figsize=(8, 9), constrained_layout=True)
-        axes[0].plot(gens, series["min"])
-        axes[0].set_title(f"{key} - min")
-        axes[0].set_xlabel("gen")
-        axes[0].set_ylabel("min")
-        axes[1].plot(gens, series["mean"])
-        axes[1].set_title(f"{key} - mean")
-        axes[1].set_xlabel("gen")
-        axes[1].set_ylabel("mean")
-        axes[2].plot(gens, series["max"])
-        axes[2].set_title(f"{key} - max")
-        axes[2].set_xlabel("gen")
-        axes[2].set_ylabel("max")
+        axes[0].plot(gens, series["min"]);  axes[0].set_title(f"{key} - min");  axes[0].set_xlabel("gen");  axes[0].set_ylabel("min")
+        axes[1].plot(gens, series["mean"]); axes[1].set_title(f"{key} - mean"); axes[1].set_xlabel("gen");  axes[1].set_ylabel("mean")
+        axes[2].plot(gens, series["max"]);  axes[2].set_title(f"{key} - max");  axes[2].set_xlabel("gen");  axes[2].set_ylabel("max")
         png_path = plots_dir / f"{_safe_name(key)}.png"
         fig.savefig(png_path, dpi=150)
         plt.close(fig)
+
+        if wandb_writer is not None:
+            # one image per metric under a consistent namespace
+            try:
+                wandb_writer.log_image.remote(
+                    key=f"ga_metric_plots/{key}",
+                    path=str(png_path),
+                    caption=f"{key} (min/mean/max vs gen)",
+                )
+            except Exception:
+                pass
+
+    # (optional) also log the whole plots directory as an artifact for easy download
+    if wandb_writer is not None:
+        try:
+            wandb_writer.log_artifact_dir.remote(
+                name="ga-metric-plots",
+                a_type="plots",
+                dir_path=str(plots_dir),
+                metadata={"kind": "metric_curves_pngs"},
+            )
+        except Exception:
+            pass
 
 
 def run_ga(
@@ -517,10 +522,10 @@ def run_ga(
     GA driver (NSGA-II, maximize objectives).
     - score: list of ('name', {params}); each function returns a flat metrics dict with simple keys.
     - objective_keys: the exact metric keys to optimize; must exist & be finite per individual.
-    - W&B:
-        * Full metrics -> ga/metrics/<key>
-        * Objectives   -> ga/objs/<key>
-      All bound to step 'ga/gen'.
+    W&B:
+      * Full metrics -> ga_metrics/<key>   (only values that are not None and finite)
+      * Objectives   -> ga_object/<key>    (subset of metrics, optimized by GA)
+    All bound to step 'ga/gen'.
     - Logging:
         * Append per-evaluation records to <output_dir>/ga/metrics.jsonl.
     - End of run:
@@ -552,7 +557,18 @@ def run_ga(
 
     if wandb_writer is not None:
         try:
-            wandb_writer.define_metric.remote("ga/*", step_metric="ga/gen")
+            # bind curves to x-axis "ga/gen"
+            wandb_writer.define_metric.remote("ga_metrics/*", step_metric="ga/gen")
+            wandb_writer.define_metric.remote("ga_object/*", step_metric="ga/gen")
+            # optional meta streams (ids, flags, etc.)
+            wandb_writer.define_metric.remote("ga_meta/*", step_metric="ga/gen")
+            # keep existing families if you still log them
+            wandb_writer.define_metric.remote("ga/pop/*", step_metric="ga/gen")
+            wandb_writer.define_metric.remote("ga/time/*", step_metric="ga/gen")
+            wandb_writer.define_metric.remote("ga/init/*", step_metric="ga/gen")
+            wandb_writer.define_metric.remote("ga/final/*", step_metric="ga/gen")
+            # images (media) do not need step binding, but this is harmless
+            wandb_writer.define_metric.remote("ga_metric_plots/*", step_metric="ga/gen")
         except Exception:
             pass
 
@@ -869,6 +885,6 @@ def run_ga(
 
     # ===== Export per-metric curves: CSV + PNG =====
     if metrics_dir is not None:
-        ga_export_metric_curves(metrics_dir, metrics_history)
+        ga_export_metric_curves(metrics_dir, metrics_history, wandb_writer=wandb_writer)
 
     return pareto_mdps, pareto_objs, pop, objs
