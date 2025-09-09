@@ -18,6 +18,8 @@ from ray.actor import ActorHandle
 from experiment_utils.utils import _import, ensure_dir
 from experiment_utils.save_media import save_policy_media
 from experiment_utils.env_factories import make_env
+from two_stage_cl.metrics import _mean_over, _ap_last_k, _ttt_frac, _interp_at, _ensure_curve, _auc_over, \
+    _jumpstart_fields
 
 from two_stage_cl.utils import plot_pairwise, save_csv
 
@@ -629,11 +631,17 @@ class RayCurriculumTrainer:
             "enabled": bool(mo.get("enabled", True)),
             "ttt_fraction": float(mo.get("ttt_fraction", 0.90)),
             "ap_last_k": int(mo.get("ap_last_k", 10)),
-            "use_max_step": mo.get("use_max_step", None),  # None or int
+            # it will be treated as baseline cap for backward convenience.
+            "cap_steps": {
+                "baseline": (mo.get("cap_steps", {}) or {}).get("baseline", mo.get("use_max_step", None)),
+                "target": (mo.get("cap_steps", {}) or {}).get("target", None),
+                "item": (mo.get("cap_steps", {}) or {}).get("item", None),
+            },
             "compute_greedy": bool(mo.get("compute_greedy", True)),
             "compute_train": bool(mo.get("compute_train", True)),
-            "js_baseline_first_k": int(mo.get("js_baseline_first_k", 1)),
+            "js_first_n": max(1, int(mo.get("js_first_n", 1))),
         }
+
         self.verbose = int(self.agent_kwargs.get("verbose", 0))
 
     # --- compute metrics independent of CSV/plots ---
@@ -649,100 +657,37 @@ class RayCurriculumTrainer:
         - No eval-name fallback.
         - None only when the metric is not definable by configuration or sampling.
         - Raise if configuration declares an eval that is missing in summary.
+
+        Changes:
+        - Per-scope cap steps: cfg['cap_steps'] with keys 'baseline'/'target'/'item'.
+        - Remove all compatibility aliases.
+        - Add real AUC metrics: auc_total / auc_p1 / auc_p2 (trapezoidal).
+        - Redefine jumpstart to absolute levels:
+            * target_start    : value at the start of the target curve.
+            * p2_head         : mean of the first N points of the P2 segment
+                                (N = cfg['js_first_n']; if N=1, it's value at boundary B).
+            * baseline_B      : baseline Target value interpolated at B (if available).
+          No baseline_start, no difference terms.
         """
 
-        def _cap(xs: np.ndarray, ys: np.ndarray, max_step: Optional[int]):
-            if max_step is None:
-                return xs, ys
-            if xs.size == 0 or max_step < xs[0]:
-                return xs[:0], ys[:0]  # empty -> undefined
-            mask = xs <= max_step
-            X = xs[mask]
-            Y = ys[mask]
-            if X.size == 0:
-                return X, Y
-            if X[-1] < max_step and xs[-1] >= max_step:
-                y_at = float(np.interp(max_step, xs, ys))
-                X = np.concatenate([X, np.array([max_step], int)])
-                Y = np.concatenate([Y, np.array([y_at], float)])
-            return X, Y
-
-        def _mean_over(xs, ys, lo: Optional[float] = None, hi: Optional[float] = None,
-                       clamp_hi: Optional[float] = None):
-            xs = np.asarray(xs, float)
-            ys = np.asarray(ys, float)
-            if xs.size < 1 or ys.size != xs.size:
-                return None
-
-            x0, x1 = float(xs[0]), float(xs[-1])
-
-            # Default interval = full support
-            lo = x0 if lo is None else float(lo)
-            hi = x1 if hi is None else float(hi)
-
-            # Optional global clamp on the right (used by mean_total with use_max_step)
-            if clamp_hi is not None:
-                hi = min(float(clamp_hi), hi)
-
-            # Clip to support
-            lo = max(lo, x0)
-            hi = min(hi, x1)
-            if not (hi > lo):
-                return None
-
-            # Interpolate endpoints
-            y_lo = float(np.interp(lo, xs, ys))
-            y_hi = float(np.interp(hi, xs, ys))
-
-            # Interior samples strictly inside (lo, hi)
-            mask = (xs > lo) & (xs < hi)
-            vals = [y_lo, *ys[mask].tolist(), y_hi]
-
-            return float(np.mean(vals)) if len(vals) > 0 else None
-
-        def _ap_last_k(xs, ys, k, max_step):
-            X, Y = _cap(xs, ys, max_step)
-            if Y.size < 1:
-                return None
-            k = max(1, min(int(k), int(Y.size)))
-            return float(np.mean(Y[-k:]))
-
-        def _ttt_frac(xs, ys, frac, max_step):
-            X, Y = _cap(xs, ys, max_step)
-            if Y.size < 1:
-                return None
-            thr = float(np.max(Y)) * float(frac)
-            idx = np.where(Y >= thr)[0]
-            return int(X[int(idx[0])]) if idx.size > 0 else None
-
-        def _interp_at(xs, ys, s):
-            xs = np.asarray(xs, float)
-            ys = np.asarray(ys, float)
-            if xs.size < 1 or ys.size != xs.size:
-                return None
-            if s < xs[0] or s > xs[-1]:
-                return None
-            return float(np.interp(float(s), xs, ys))
-
-        def _ensure_curve(block: Dict[str, Any], curve_name: str) -> Tuple[np.ndarray, np.ndarray]:
-            """Return (xs, ys) for curve_name; raise on structural errors."""
-            assert "steps" in block and curve_name in block, f"missing '{curve_name}' or steps"
-            xs = np.asarray(block["steps"], int)
-            ys = np.asarray(block[curve_name], float)
-            if xs.ndim != 1 or ys.ndim != 1 or xs.size != ys.size:
-                raise ValueError(f"shape mismatch in '{curve_name}' series")
-            return xs, ys
-
         # ---- config snapshot ----
+        cap = dict(self.metrics_opts.get("cap_steps", {}) or {})
         cfg = {
             "ttt_fraction": float(self.metrics_opts["ttt_fraction"]),
             "ap_last_k": int(self.metrics_opts["ap_last_k"]),
-            "use_max_step": self.metrics_opts["use_max_step"],
+            "cap_steps": {
+                "baseline": cap.get("baseline", None),
+                "target": cap.get("target", None),
+                "item": cap.get("item", None),
+            },
             "compute_greedy": bool(self.metrics_opts["compute_greedy"]),
             "compute_train": bool(self.metrics_opts["compute_train"]),
-            "js_baseline_first_k": int(self.metrics_opts["js_baseline_first_k"]),
+            "js_first_n": int(self.metrics_opts["js_first_n"]),
         }
         out: Dict[str, Any] = {"config": cfg, "baseline": {}, "items": {}}
+
+        def _cap_for(scope: str) -> Optional[int]:
+            return cfg["cap_steps"].get(scope, None)
 
         # ---- baseline metrics (only if configuration declares Target and run_baseline=True) ----
         baseline_declares_target = (
@@ -758,55 +703,49 @@ class RayCurriculumTrainer:
                 raise ValueError("baseline config declares 'Target' but summary.baseline['Target'] missing")
             baseline_target = baseline_block["Target"]
 
-            # Greedy/train totals/AP/TTT; write None if not enough samples.
             def _fill_baseline(chan: str):
                 xs, ys = _ensure_curve(baseline_target, f"{chan}_mean")
-                # mean_total over [start, end], optionally clamped by use_max_step
-                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=cfg["use_max_step"])
+                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for("baseline"))
+                auc_total = _auc_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for("baseline"))
                 return {
                     "mean_total": mean_total,
-                    # (keep other non-AUC metrics unchanged)
-                    "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], cfg["use_max_step"]),
-                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], cfg["use_max_step"]),
-                    # ---- optional backward-compat aliases (remove if not needed) ----
-                    "auc_total": mean_total,  # deprecated alias
+                    "auc_total": auc_total,
+                    "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], _cap_for("baseline")),
+                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], _cap_for("baseline")),
                 }
 
-            if cfg["compute_greedy"]:
-                out["baseline"]["greedy"] = _fill_baseline("greedy")
-            else:
-                out["baseline"]["greedy"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
-            if cfg["compute_train"]:
-                out["baseline"]["train"] = _fill_baseline("train")
-            else:
-                out["baseline"]["train"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
+            out["baseline"]["greedy"] = _fill_baseline("greedy") if cfg["compute_greedy"] else {
+                "mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None
+            }
+            out["baseline"]["train"] = _fill_baseline("train") if cfg["compute_train"] else {
+                "mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None
+            }
         else:
-            # not definable by configuration
-            out["baseline"]["greedy"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
-            out["baseline"]["train"] = {"auc_total": None, "ap_last_k": None, "ttt_fraction": None}
+            out["baseline"]["greedy"] = {"mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None}
+            out["baseline"]["train"] = {"mean_total": None, "auc_total": None, "ap_last_k": None, "ttt_fraction": None}
 
         # ---- per-item metrics ----
         for lb, eval_dict in (summary.get("items", {}) or {}).items():
             item_out: Dict[str, Any] = {
-                "target": {"greedy": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
-                                      "ttt_fraction": None},
-                           "train": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
-                                     "ttt_fraction": None}},
-                "item": {"greedy": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
-                                    "ttt_fraction": None},
-                         "train": {"auc_total": None, "auc_p1": None, "auc_p2": None, "ap_last_k": None,
-                                   "ttt_fraction": None}},
+                "target": {
+                    "greedy": {"mean_total": None, "mean_p1": None, "mean_p2": None,
+                               "auc_total": None, "auc_p1": None, "auc_p2": None,
+                               "ap_last_k": None, "ttt_fraction": None},
+                    "train": {"mean_total": None, "mean_p1": None, "mean_p2": None,
+                              "auc_total": None, "auc_p1": None, "auc_p2": None,
+                              "ap_last_k": None, "ttt_fraction": None},
+                },
+                "item": {
+                    "greedy": {"mean_total": None, "mean_p1": None, "mean_p2": None,
+                               "auc_total": None, "auc_p1": None, "auc_p2": None,
+                               "ap_last_k": None, "ttt_fraction": None},
+                    "train": {"mean_total": None, "mean_p1": None, "mean_p2": None,
+                              "auc_total": None, "auc_p1": None, "auc_p2": None,
+                              "ap_last_k": None, "ttt_fraction": None},
+                },
                 "jumpstart": {
-                    "greedy": {
-                        "target_B_minus_baseline_start": None,
-                        "target_B_minus_target_start": None,
-                        "target_B_minus_baseline_B": None,
-                    },
-                    "train": {
-                        "target_B_minus_baseline_start": None,
-                        "target_B_minus_target_start": None,
-                        "target_B_minus_baseline_B": None,
-                    },
+                    "greedy": {"target_start": None, "p2_head": None, "baseline_B": None},
+                    "train": {"target_start": None, "p2_head": None, "baseline_B": None},
                 },
             }
 
@@ -815,7 +754,7 @@ class RayCurriculumTrainer:
             has_target_eval = any(str(e.get("name")) == "Target" for e in item_cfg)
             has_self_eval = any(str(e.get("name")) == str(lb) for e in item_cfg)
 
-            # local pointer for curves (raise if config says it must exist)
+            # required blocks
             tgt_block = None
             if has_target_eval:
                 if "Target" not in eval_dict:
@@ -828,111 +767,75 @@ class RayCurriculumTrainer:
                     raise ValueError(f"item '{lb}' config declares self eval '{lb}' but summary missing it")
                 self_block = eval_dict[lb]
 
-            # phase boundary (for p1/p2/jumpstart); None if len<2
+            # phase boundary (for p1/p2/jumpstart)
             phs = item_phases_map.get(lb, []) or []
             if len(phs) >= 2:
                 B = int(phs[0].get("steps", 0))
                 if B < 0:
                     raise ValueError(f"invalid phase boundary for item '{lb}': {B}")
             else:
-                B = None  # not definable
+                B = None
 
-            # --- fill a channel packer ---
-            def _pack_env(block, chan: str):
+            # --- pack one env/channel ---
+            def _pack_env(block, chan: str, scope: str):
+                """
+                scope: 'target' or 'item' -> choose its own cap for *_total & last-k/ttt.
+                p1/p2 segments are computed on the natural segments (no cap).
+                """
                 if block is None:
                     return {"mean_total": None, "mean_p1": None, "mean_p2": None,
-                            "ap_last_k": None, "ttt_fraction": None,
-                            # optional deprecated aliases
-                            "auc_total": None, "auc_p1": None, "auc_p2": None}
+                            "auc_total": None, "auc_p1": None, "auc_p2": None,
+                            "ap_last_k": None, "ttt_fraction": None}
 
                 xs, ys = _ensure_curve(block, f"{chan}_mean")
-
-                # Whole-interval mean, optionally clamped by use_max_step
-                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=cfg["use_max_step"])
+                mean_total = _mean_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for(scope))
+                auc_total = _auc_over(xs, ys, lo=None, hi=None, clamp_hi=_cap_for(scope))
 
                 outp = {
                     "mean_total": mean_total,
-                    "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], cfg["use_max_step"]),
-                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], cfg["use_max_step"]),
-                    "mean_p1": None,
-                    "mean_p2": None,
-                    # ---- optional deprecated aliases (remove if not needed) ----
-                    "auc_total": mean_total,
-                    "auc_p1": None,
-                    "auc_p2": None,
+                    "auc_total": auc_total,
+                    "ap_last_k": _ap_last_k(xs, ys, cfg["ap_last_k"], _cap_for(scope)),
+                    "ttt_fraction": _ttt_frac(xs, ys, cfg["ttt_fraction"], _cap_for(scope)),
+                    "mean_p1": None, "mean_p2": None,
+                    "auc_p1": None, "auc_p2": None,
                 }
 
                 if B is not None and xs.size:
                     start_s = float(xs[0])
                     end_s = float(xs[-1])
-                    # segment means without use_max_step clamping
-                    m1 = _mean_over(xs, ys, lo=start_s, hi=float(B), clamp_hi=None)
-                    m2 = _mean_over(xs, ys, lo=float(B), hi=end_s, clamp_hi=None)
-                    outp["mean_p1"] = m1
-                    outp["mean_p2"] = m2
-                    # ---- optional aliases ----
-                    outp["auc_p1"] = m1
-                    outp["auc_p2"] = m2
-
+                    if start_s <= B <= end_s:
+                        outp["mean_p1"] = _mean_over(xs, ys, lo=start_s, hi=float(B), clamp_hi=None)
+                        outp["mean_p2"] = _mean_over(xs, ys, lo=float(B), hi=end_s, clamp_hi=None)
+                        outp["auc_p1"] = _auc_over(xs, ys, lo=start_s, hi=float(B), clamp_hi=None)
+                        outp["auc_p2"] = _auc_over(xs, ys, lo=float(B), hi=end_s, clamp_hi=None)
                 return outp
 
             # target/item metrics
             if cfg["compute_greedy"]:
-                item_out["target"]["greedy"] = _pack_env(tgt_block, "greedy")
-                item_out["item"]["greedy"] = _pack_env(self_block, "greedy")
+                item_out["target"]["greedy"] = _pack_env(tgt_block, "greedy", scope="target")
+                item_out["item"]["greedy"] = _pack_env(self_block, "greedy", scope="item")
             if cfg["compute_train"]:
-                item_out["target"]["train"] = _pack_env(tgt_block, "train")
-                item_out["item"]["train"] = _pack_env(self_block, "train")
+                item_out["target"]["train"] = _pack_env(tgt_block, "train", scope="target")
+                item_out["item"]["train"] = _pack_env(self_block, "train", scope="item")
 
-            # jumpstarts (only definitions; write None when prerequisites absent)
+            # ---- jumpstart: absolute levels (target_start, p2_head, baseline_B) ----
             if B is not None and tgt_block is not None:
-                # y_tgt(B)
-                xs_g, yg = _ensure_curve(tgt_block, "greedy_mean") if cfg["compute_greedy"] else (None, None)
-                xs_t, yt = _ensure_curve(tgt_block, "train_mean") if cfg["compute_train"] else (None, None)
-                ytg_B_g = _interp_at(xs_g, yg, B) if cfg["compute_greedy"] else None
-                ytg_B_t = _interp_at(xs_t, yt, B) if cfg["compute_train"] else None
-
-                # target start values
-                ytg_0_g = float(yg[0]) if cfg["compute_greedy"] and yg is not None and yg.size else None
-                ytg_0_t = float(yt[0]) if cfg["compute_train"] and yt is not None and yt.size else None
-
-                # baseline references (if baseline Target configured)
-                if baseline_declares_target and baseline_target is not None:
-                    bx_g_xs, bx_g = _ensure_curve(baseline_target, "greedy_mean") if cfg["compute_greedy"] else (None,
-                                                                                                                 None)
-                    bx_t_xs, bx_t = _ensure_curve(baseline_target, "train_mean") if cfg["compute_train"] else (None,
-                                                                                                               None)
-                    k0 = max(1, int(cfg["js_baseline_first_k"]))
-                    base_start_g = float(np.mean(bx_g[:k0])) if cfg[
-                                                                    "compute_greedy"] and bx_g is not None and bx_g.size >= 1 else None
-                    base_start_t = float(np.mean(bx_t[:k0])) if cfg[
-                                                                    "compute_train"] and bx_t is not None and bx_t.size >= 1 else None
-                    base_B_g = _interp_at(bx_g_xs, bx_g, B) if cfg["compute_greedy"] else None
-                    base_B_t = _interp_at(bx_t_xs, bx_t, B) if cfg["compute_train"] else None
-                else:
-                    base_start_g = base_start_t = base_B_g = base_B_t = None
-
-                # greedy channel jumpstarts
+                baseline_for_js = baseline_target if baseline_declares_target else None
                 if cfg["compute_greedy"]:
-                    item_out["jumpstart"]["greedy"]["target_B_minus_baseline_start"] = (
-                        None if (ytg_B_g is None or base_start_g is None) else float(ytg_B_g - base_start_g)
+                    item_out["jumpstart"]["greedy"] = _jumpstart_fields(
+                        tgt_block=tgt_block,
+                        baseline_target=baseline_for_js,
+                        B=B,
+                        chan="greedy",
+                        first_n=cfg["js_first_n"],
                     )
-                    item_out["jumpstart"]["greedy"]["target_B_minus_target_start"] = (
-                        None if (ytg_B_g is None or ytg_0_g is None) else float(ytg_B_g - ytg_0_g)
-                    )
-                    item_out["jumpstart"]["greedy"]["target_B_minus_baseline_B"] = (
-                        None if (ytg_B_g is None or base_B_g is None) else float(ytg_B_g - base_B_g)
-                    )
-                # train channel jumpstarts
                 if cfg["compute_train"]:
-                    item_out["jumpstart"]["train"]["target_B_minus_baseline_start"] = (
-                        None if (ytg_B_t is None or base_start_t is None) else float(ytg_B_t - base_start_t)
-                    )
-                    item_out["jumpstart"]["train"]["target_B_minus_target_start"] = (
-                        None if (ytg_B_t is None or ytg_0_t is None) else float(ytg_B_t - ytg_0_t)
-                    )
-                    item_out["jumpstart"]["train"]["target_B_minus_baseline_B"] = (
-                        None if (ytg_B_t is None or base_B_t is None) else float(ytg_B_t - base_B_t)
+                    item_out["jumpstart"]["train"] = _jumpstart_fields(
+                        tgt_block=tgt_block,
+                        baseline_target=baseline_for_js,
+                        B=B,
+                        chan="train",
+                        first_n=cfg["js_first_n"],
                     )
 
             out["items"][str(lb)] = item_out

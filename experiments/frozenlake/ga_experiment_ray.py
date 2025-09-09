@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 import ray
 from ray.actor import ActorHandle
@@ -475,7 +475,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=50)
-    p.add_argument("--ga-generations", type=int, default=200)
+    p.add_argument("--ga-generations", type=int, default=75)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -537,7 +537,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="10000,140000",
+        default="20000,130000",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
     p.add_argument("--eval-every", type=int, default=1000)
@@ -583,30 +583,23 @@ def main():
     parser = build_arg_parser()
     args = resolve_args(parser)
 
-    # # Place Ray's temp/session directory under the timestamped outdir
-    # ray_tmp_dir = Path(args.outdir).parents[1]
-    # ensure_dir(ray_tmp_dir)
-    # os.environ["RAY_TMPDIR"] = str(ray_tmp_dir)
-
     # Wrap outdir with a timestamped run folder: <outdir>/ga-frozenlake/<ts>
     run_dir = _timestamped_outdir(args.outdir, leaf="ga-frozenlake")
     ensure_dir(run_dir)
-    # Overwrite args.outdir so all subsequent code writes under the timestamped path
     args.outdir = str(run_dir)
 
     print(f"[SETUP] Results outdir: {args.outdir}")
-    # print(f"[SETUP] Ray tmp base:   {os.environ['RAY_TMPDIR']}")
 
-    # Save full config for reproducibility (now under the timestamped outdir)
+    # Save full config
     meta_dir = Path(args.outdir) / "meta"
     ensure_dir(meta_dir)
     save_json(meta_dir / "config.json", {k: getattr(args, k) for k in vars(args)})
 
-    # Init Ray after RAY_TMPDIR is set
+    # Init Ray
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, log_to_driver=False)
 
-    # Create WandbWriter actor (unchanged)
+    # W&B actor
     init_kwargs: Dict[str, Any] = {
         "project": args.wandb_project,
         "name": args.run_name,
@@ -663,77 +656,100 @@ def main():
                 "policy_tie_tol": args.ga_tie_tol,
             }
 
-            # -----------------------------------------------------------------
-            # Score selection:
-            # Active: curriculum-learning AUC with two phases (item -> target).
-            score = (
-                "obj_cl_phase_mean",
-                {
-                    "target_factory_path": TARGET_FACTORY_PATH,
-                    "target_cfg": {
-                        "map_name": args.map,
-                        "is_slippery": bool(args.slippery),
-                        "max_steps": int(args.max_steps),
+            # ---------------------------------------------------------------------------------
+            # Score & objectives (STRICT):
+            # - score: List[("name", {params})]
+            # - objective_keys: List[str]  (must exist & be finite for every individual)
+            #
+            # ===================== All available objective (metric) keys =====================
+            # 1) obj_cl_phase_mean  (two-phase CL on candidate -> target; single (scope, curve) slice)
+            #    Keys (always present; may be None when undefined):
+            #      - "p1_mean", "p2_mean"               # phase-1/2 means
+            #      - "p1_auc", "p2_auc"                 # phase-1/2 trapezoid areas
+            #      - "mean_total", "auc_total"          # whole-interval average / area
+            #      - "ap_last_k"                        # last-K mean (per trainer cfg)
+            #      - "ttt_frac"                         # time-to-threshold fraction index
+            #      - "js_target_start"                  # target curve start value
+            #      - "js_p2_head"                       # first-N of phase-2 (incl. boundary)
+            #      - "js_baseline_B"                    # baseline target at boundary (if baseline available)
+            #
+            # 2) obj_multi_perf
+            #    Keys (maximize both):
+            #      - "perf_cand_blended"    # integral(random -> blended(policy_opt_cand, random, w)) on CAND MDP
+            #      - "perf_blended_to_base" # integral(blended -> base_optimal) on BASE MDP
+            #
+            # 3) obj_multi_kl_and_perf
+            #    Keys (maximize both):
+            #      - "kl_neg"   # -KL(base_policy || opt_cand_policy) evaluated with base occupancy
+            #      - "perf_opt" # integral(random -> opt_cand_policy) on CAND MDP
+            # =================================================================================
+
+            # =========================== Recommended setups ===========================
+            # Example A (default here): maximize CL phase means on greedy/target slice
+            score: List[Tuple[str, Dict[str, Any]]] = [
+                (
+                    "obj_cl_phase_mean",
+                    {
+                        "target_factory_path": TARGET_FACTORY_PATH,
+                        "target_cfg": {
+                            "map_name": args.map,
+                            "is_slippery": bool(args.slippery),
+                            "max_steps": int(args.max_steps),
+                        },
+                        "item_factory_path": SOURCE_FACTORY_PATH,
+                        "item_max_steps": int(args.max_steps),
+                        "phase_steps": (20_000, 80_000),
+                        "seeds": 5,
+                        "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
+                        "agent_kwargs": {
+                            "learning_rate": 0.1,
+                            "gamma": 0.99,
+                            "policy_mix": (0.9, 0.0, 0.1),
+                            "temperature": 0.01,
+                            "default_q_value": 0.05,
+                            "tie_tol": 1e-2,
+                            "verbose": 0,
+                        },
+                        "eval_every": 2000,
+                        "n_eval_episodes": 50,
+                        # Optional slice control (defaults used by the scorer):
+                        # "curve": "greedy",         # "greedy" | "train"
+                        # "eval_scope": "target",    # "target" | "item"
+                        # "evals": [{"name":"Target","env":"target"}],  # explicit eval declarations
                     },
-                    "item_factory_path": SOURCE_FACTORY_PATH,
-                    "item_max_steps": int(args.max_steps),
-                    "phase_steps": (10_000, 90_000),
-                    "seeds": 5,
-                    "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
-                    "agent_kwargs": {
-                        "learning_rate": 0.1,
-                        "gamma": 0.99,
-                        "policy_mix": (0.9, 0.0, 0.1),
-                        "temperature": 0.01,
-                        "default_q_value": 0.05,
-                        "tie_tol": 1e-2,
-                        "verbose": 0,
-                    },
-                    "eval_every": 2000,
-                    "n_eval_episodes": 50,
-                    # "wandb_actor": wandb_actor,
-                    # optional, default "greedy"
-                    # "curve": "greedy",
-                    # "evals": [{"name":"Target","env":"target"}],
-                },
-            )
+                )
+            ]
+            objective_keys: List[str] = [
+                "p1_mean",
+                "p2_mean",
+            ]
 
-            # Example 1: Explicitly use obj_multi_kl_and_perf (all knobs local)
-            # score = (
-            #     "obj_multi_kl_and_perf",
-            #     {
-            #         "vi_gamma": 0.99,
-            #         "vi_theta": 1e-3,
-            #         "vi_max_iterations": 1000,
-            #         "policy_mixing": (0.9, 0.0, 0.1),
-            #         "policy_temperature": 0.01,
-            #         "policy_tie_tol": 1e-2,
-            #         "perf_numpoints": 16,
-            #         "perf_gamma": 0.99,
-            #         "perf_theta": 1e-3,
-            #         "perf_max_iterations": 1000,
-            #         "kl_delta": 1e-3,
-            #     },
-            # )
+            # Example B: policy distance + candidate performance (two-objective)
+            # score = [("obj_multi_kl_and_perf", {
+            #     "vi_gamma": 0.99, "vi_theta": 1e-3, "vi_max_iterations": 1000,
+            #     "policy_mixing": (0.9, 0.0, 0.1), "policy_temperature": 0.01, "policy_tie_tol": 1e-2,
+            #     "perf_numpoints": 16, "perf_gamma": 0.99, "perf_theta": 1e-3, "perf_max_iterations": 1000,
+            #     "kl_delta": 1e-3,
+            # })]
+            # objective_keys = ["kl_neg", "perf_opt"]
 
-            # Example 2: Explicitly use obj_multi_perf (all knobs local)
-            # score = (
-            #     "obj_multi_perf",
-            #     {
-            #         "vi_gamma": 0.99,
-            #         "vi_theta": 1e-3,
-            #         "vi_max_iterations": 1000,
-            #         "policy_mixing": (0.9, 0.0, 0.1),
-            #         "policy_temperature": 0.01,
-            #         "policy_tie_tol": 1e-2,
-            #         "perf_numpoints": 16,
-            #         "perf_gamma": 0.99,
-            #         "perf_theta": 1e-3,
-            #         "perf_max_iterations": 1000,
-            #         "blend_weight": 0.8,
-            #     },
-            # )
+            # Example C: two-stage performance (candidate + transfer-to-base)
+            # score = [("obj_multi_perf", {
+            #     "vi_gamma": 0.99, "vi_theta": 1e-3, "vi_max_iterations": 1000,
+            #     "policy_mixing": (0.9, 0.0, 0.1), "policy_temperature": 0.01, "policy_tie_tol": 1e-2,
+            #     "perf_numpoints": 16, "perf_gamma": 0.99, "perf_theta": 1e-3, "perf_max_iterations": 1000,
+            #     "blend_weight": 0.8,
+            # })]
+            # objective_keys = ["perf_cand_blended", "perf_blended_to_base"]
 
+            # Example D: combine multiple scorers (keys必须唯一，否则 GA 报错)
+            # score = [
+            #     ("obj_multi_perf", {...}),
+            #     ("obj_cl_phase_mean", {...}),
+            # ]
+            # objective_keys = ["perf_cand_blended", "p2_mean"]
+
+            # Run GA (new API will log: ga/metrics/* and ga/objs/*; export CSV/PNG)
             _ = run_ga(
                 base_mdp=base_mdp,
                 population_size=args.ga_pop_size,
@@ -747,25 +763,22 @@ def main():
                 ops=ops,
                 distance=distance,
                 solver=solver,
-                score=score,
+                score=score,                        # strict: list of (name, params)
+                objective_keys=objective_keys,      # strict: list of metric keys to optimize
             )
 
-            # Collect saved JSONs
+            # Collect saved JSONs from GA
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
                 json_files = json_files[: args.json_max]
-            print(
-                f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}."
-            )
+            print(f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}.")
         else:
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
                 json_files = json_files[: args.json_max]
-            print(
-                f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}."
-            )
+            print(f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}.")
 
     # ----------------------------- Curriculum Training -----------------------------
     if not args.skip_train and json_files:
@@ -774,7 +787,7 @@ def main():
         # Seeds [0..N-1]
         seeds = args.train_seeds
 
-        # Env registry (passed as pure dicts to the CL API)
+        # Env registry for CL
         envs: Dict[str, Any] = {
             "target": {
                 "factory_path": TARGET_FACTORY_PATH,
@@ -817,10 +830,7 @@ def main():
 
         evals_map: Dict[str, List[Dict[str, Any]]] = {}
         for key in envs["items"].keys():
-            evals_map[key] = [
-                {"name": key, "env": key},
-                {"name": "Target", "env": "target"},
-            ]
+            evals_map[key] = [{"name": key, "env": key}, {"name": "Target", "env": "target"}]
 
         # Agent config for CL
         agent_kwargs = {
@@ -832,7 +842,7 @@ def main():
             "verbose": int(args.agent_verbose),
         }
 
-        # Call the new curriculum runner (no manual concurrency arg anymore)
+        # Run CL
         cl_summary = run_curriculum(
             seeds=seeds,
             envs=envs,
@@ -847,9 +857,7 @@ def main():
             output_dir=args.outdir,
             save_intermediate=bool(args.train_save_intermediate),
             wandb_actor=wandb_actor,
-            media_opts={
-                "target_size": (128, 128),
-            },
+            media_opts={"target_size": (128, 128)},
         )
         print(f"[MAIN] Curriculum run done; summary:\n{cl_summary}")
     else:
