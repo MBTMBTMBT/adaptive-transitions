@@ -295,7 +295,7 @@ if ! ${USE_SLURM}; then
       echo "==> MAP=${map}  OBJ_GROUP=${g}"
       build_cmd_for_map "${map}" "${g}"
       echo "[CMD] $(print_cmd_line "${CMD_ARR[@]}")"
-      "${CMD_ARR[@]}" 2>&1 | tee "${LOGDIR}/ga_${EXP_NAME}_${map}__${g}.log"
+      "${CMD_ARR[@]}" 2>&1 | tee "${LOGDIR}/ga_${EXP_NAME}_${map}_${g}.log"
     done
   done
   echo "[Local] All (map, obj_group) combinations finished."
@@ -313,7 +313,7 @@ echo "[SLURM] DRIVER LOGS = ${LOGDIR}"
 for map in "${MAPS[@]}"; do
   for g in "${OBJ_GROUPS[@]}"; do
     job_script="$(mktemp)"
-    job_name="ga_${EXP_NAME}_${map}__${g}"
+    job_name="ga_${EXP_NAME}_${map}_${g}"
     out_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.out"
     err_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.err"
 
