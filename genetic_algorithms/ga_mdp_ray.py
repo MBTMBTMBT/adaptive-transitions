@@ -35,7 +35,7 @@ from genetic_algorithms.mdp_ops import (
 from genetic_algorithms.score_fns import _normalize_score_spec, SCORE_FNS
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
-    q_table_to_policy,
+    q_table_to_policy, create_random_policy,
 )
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 
@@ -583,10 +583,12 @@ def run_ga(
     base_occupancy = compute_occupancy_measure(
         base_mdp, base_policy, gamma=gamma, theta=theta, max_iterations=max_iters
     )
+    rand_policy = create_random_policy(base_mdp)
     precomputed = {
         "base_policy": base_policy.to_portable(),
         "base_occupancy": base_occupancy.to_portable(),
         "base_mdp": base_mdp.to_portable(),
+        "rand_policy": rand_policy.to_portable(),
     }
     t1 = time.perf_counter()
 

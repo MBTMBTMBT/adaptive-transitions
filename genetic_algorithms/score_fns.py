@@ -43,35 +43,38 @@ def _normalize_score_spec(spec: Any) -> List[Tuple[str, Dict[str, Any]]]:
     return items
 
 
-def obj_multi_kl_and_perf(
+def obj_multi_kl(
     mdp: MDPNetwork,
     shared: Dict[str, Any],
     *,
-    vi_gamma: float = 0.99,
-    vi_theta: float = 1e-6,
-    vi_max_iterations: int = 1000,
-    policy_temperature: float = 1.0,
-    policy_mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0),
-    policy_tie_tol: float = 1e-6,
-    perf_numpoints: int = 100,
-    perf_gamma: float | None = None,
-    perf_theta: float | None = None,
-    perf_max_iterations: int | None = None,
-    kl_delta: float = 1e-3,
+    kl_gamma: float | None = None,
+    kl_theta: float | None = None,
+    kl_max_iterations: int | None = None,
 ) -> Dict[str, Optional[float]]:
     """
     Outputs:
       - 'kl_neg' (maximize): -KL(base||cand_opt) with occupancy weighting.
       - 'perf_integral' (maximize): integral(random -> cand_opt) on candidate MDP.
     """
-    pre = shared.get("precomputed", None)
-    if not (isinstance(pre, dict) and "base_policy" in pre and "base_occupancy" in pre):
-        raise ValueError(
-            "obj_multi_kl_and_perf requires precomputed['base_policy'] and ['base_occupancy']."
-        )
+    solver = shared["solver"]
+    vi_gamma = float(solver.get("vi_gamma", 0.99))
+    vi_theta = float(solver.get("vi_theta", 1e-6))
+    vi_max_iterations = int(solver.get("vi_max_iterations", 1000))
+    policy_temperature = float(solver.get("policy_temperature", 1.0))
+    policy_mix = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
+    policy_tie_tol = float(solver.get("policy_tie_tol", 1e-6))
 
-    base_policy = PolicyTable.from_portable(pre["base_policy"])
-    base_occupancy = ValueTable.from_portable(pre["base_occupancy"])
+    pgamma = float(vi_gamma) if kl_gamma is None else float(kl_gamma)
+    ptheta = float(vi_theta) if kl_theta is None else float(kl_theta)
+    pmax_iter = (
+        int(vi_max_iterations)
+        if kl_max_iterations is None
+        else int(kl_max_iterations)
+    )
+
+    pre = shared["precomputed"]
+    target_policy = PolicyTable.from_portable(pre["base_policy"])
+    rand_policy = PolicyTable.from_portable(pre["rand_policy"])
 
     _, Q2 = optimal_value_iteration(
         mdp,
@@ -79,63 +82,47 @@ def obj_multi_kl_and_perf(
         theta=float(vi_theta),
         max_iterations=int(vi_max_iterations),
     )
-    policy2: PolicyTable = q_table_to_policy(
+    prior_policy: PolicyTable = q_table_to_policy(
         Q2,
         states=list(mdp.states),
         num_actions=mdp.num_actions,
-        mixing=tuple(policy_mixing),
+        mixing=tuple(policy_mix),
         temperature=float(policy_temperature),
         tie_tol=float(policy_tie_tol),
     )
-    occupancy2: ValueTable = compute_occupancy_measure(
-        mdp,
-        policy=policy2,
-        gamma=float(vi_gamma),
-        theta=float(vi_theta),
-        max_iterations=int(vi_max_iterations),
-    )
 
-    kl = kl_policies(
-        policy1=base_policy,
-        occupancy1=base_occupancy,
-        policy2=policy2,
-        occupancy2=occupancy2,
-        delta=float(kl_delta),
-    )
-    obj_kl = -float(kl)
-
-    pgamma = float(vi_gamma) if perf_gamma is None else float(perf_gamma)
-    ptheta = float(vi_theta) if perf_theta is None else float(perf_theta)
-    pmax_iter = (
-        int(vi_max_iterations)
-        if perf_max_iterations is None
-        else int(perf_max_iterations)
-    )
-
-    prior = create_random_policy(mdp)
-    _curve, integral = performance_curve_and_integral(
-        prior_policy=prior,
-        target_policy=policy2,
+    control_kl = kl_policies(
+        prior_policy=rand_policy,
+        target_policy=prior_policy,
         mdp_network=mdp,
-        numpoints=int(perf_numpoints),
-        gamma=pgamma,
-        theta=ptheta,
-        max_iterations=pmax_iter,
+        gamma=float(pgamma),
+        theta=float(ptheta),
+        max_iterations=int(pmax_iter),
     )
+    obj_control_kl = -float(control_kl)
 
-    return {"kl_neg": obj_kl, "perf_integral": float(integral)}
+    target_kl = kl_policies(
+        prior_policy=prior_policy,
+        target_policy=target_policy,
+        mdp_network=mdp,
+        gamma=float(pgamma),
+        theta=float(ptheta),
+        max_iterations=int(pmax_iter),
+    )
+    obj_target_kl = -float(target_kl)
+
+    return {
+        "control_kl": control_kl,
+        "target_kl": target_kl,
+        "minus_control_kl": obj_control_kl,
+        "minus_target_kl": obj_target_kl,
+    }
 
 
 def obj_multi_perf(
     mdp: MDPNetwork,
     shared: Dict[str, Any],
     *,
-    vi_gamma: float = 0.99,
-    vi_theta: float = 1e-6,
-    vi_max_iterations: int = 1000,
-    policy_temperature: float = 1.0,
-    policy_mixing: Tuple[float, float, float] = (0.0, 1.0, 0.0),
-    policy_tie_tol: float = 1e-6,
     perf_numpoints: int = 100,
     perf_gamma: float | None = None,
     perf_theta: float | None = None,
@@ -147,11 +134,15 @@ def obj_multi_perf(
       - 'int_rand_to_blend' (maximize): integral(random -> blended(cand_opt, random, w)) on candidate MDP.
       - 'int_blend_to_base' (maximize): integral(blended -> base_opt) on ORIGINAL base MDP.
     """
-    pre = shared.get("precomputed", None)
-    if not (isinstance(pre, dict) and "base_policy" in pre and "base_mdp" in pre):
-        raise ValueError(
-            "obj_multi_perf requires precomputed['base_policy'] and ['base_mdp']."
-        )
+    solver = shared["solver"]
+    vi_gamma = float(solver.get("vi_gamma", 0.99))
+    vi_theta = float(solver.get("vi_theta", 1e-6))
+    vi_max_iterations = int(solver.get("vi_max_iterations", 1000))
+    policy_temperature = float(solver.get("policy_temperature", 1.0))
+    policy_mix = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
+    policy_tie_tol = float(solver.get("policy_tie_tol", 1e-6))
+
+    pre = shared["precomputed"]
     base_policy = PolicyTable.from_portable(pre["base_policy"])
     base_mdp = MDPNetwork.from_portable(pre["base_mdp"])
 
@@ -165,7 +156,7 @@ def obj_multi_perf(
         Q2,
         states=list(mdp.states),
         num_actions=mdp.num_actions,
-        mixing=tuple(policy_mixing),
+        mixing=tuple(policy_mix),
         temperature=float(policy_temperature),
         tie_tol=float(policy_tie_tol),
     )
@@ -385,7 +376,7 @@ def obj_cl_phase_mean(
 
 
 SCORE_FNS: Dict[str, Callable[..., Dict[str, Optional[float]]]] = {
-    "obj_multi_kl_and_perf": obj_multi_kl_and_perf,
+    "obj_multi_kl": obj_multi_kl,
     "obj_multi_perf": obj_multi_perf,
     "obj_cl_phase_mean": obj_cl_phase_mean,
 }

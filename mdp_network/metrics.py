@@ -9,92 +9,105 @@ from mdp_network.solvers import policy_evaluation
 from mdp_network.mdp_tables import PolicyTable, ValueTable, blend_policies
 
 
-# How to actually compute this, we need a discussion.
 def kl_policies(
-    policy1: PolicyTable,
-    occupancy1: ValueTable,
-    policy2: PolicyTable,
-    occupancy2: ValueTable,
-    delta: float = 1e-3,
+    prior_policy: PolicyTable,
+    target_policy: PolicyTable,
+    mdp_network: MDPNetwork,
+    gamma: float = 0.99,
+    theta: float = 1e-6,
+    max_iterations: int = 1000,
 ) -> float:
     """
-    Symmetric, occupancy-weighted KL between two policies. (THIS IS NOT JS THOUGH!)
+    Compute discounted expected sum of per-state KL(target || prior) under the target policy.
+    Returns the uniform average of V(s) over mdp_network.start_states.
 
-    For each state s in the union of states (from policies/occupancies):
-      KL12(s) = KL(pi1(.|s) || pi2(.|s)), KL21(s) = KL(pi2(.|s) || pi1(.|s)).
-    Use the union action set and additive smoothing (tie_tol) so all probs > 0.
-    Aggregate: sum1 = Σ_s occ1[s]*KL12(s), sum2 = Σ_s occ2[s]*KL21(s).
-    Return 0.5 * (sum1 + sum2) as a single float.
-
-    Args: policy1, occupancy1, policy2, occupancy2, tie_tol.
+    Notes
+    -----
+    - Per-state immediate "reward": r(s) = KL( target(.|s) || prior(.|s) ).
+      Defined as sum_a p_t(a) * log(p_t(a) / p_p(a)); 0 * log(0/q) := 0.
+      If p_p(a) == 0 while p_t(a) > 0, r(s) = +inf.
+    - Value iteration style policy evaluation with target_policy:
+        V(s) = r(s) + gamma * E_{a~pi_t, s'~P(·|s,a)}[ V(s') ]
+    - Terminal states are fixed to V(s)=0 and do not accrue KL reward.
     """
+    states = mdp_network.states
+    A = mdp_network.num_actions
+    start_states = list(mdp_network.start_states)
 
-    # Build the union of all states that appear anywhere.
-    states: Set[int] = (
-        set(policy1.get_all_states())
-        | set(policy2.get_all_states())
-        | set(occupancy1.get_all_states())
-        | set(occupancy2.get_all_states())
-    )
+    if not states or not start_states:
+        return 0.0
 
-    def smoothed_dist(
-        dist: Dict[int, float], actions: Set[int], eps: float
-    ) -> Dict[int, float]:
-        """Additive-smooth distribution over `actions`, then renormalize."""
-        K = len(actions)
-        # Sum of raw probs over the union action set (missing -> 0.0)
-        raw_sum = 0.0
-        for a in actions:
-            raw_sum += float(dist.get(a, 0.0))
-        denom = raw_sum + eps * K if K > 0 else 1.0  # guard K=0 (shouldn't happen)
-
-        # Return (p(a)+eps)/denom for all a in union
-        return (
-            {int(a): (float(dist.get(a, 0.0)) + eps) / denom for a in actions}
-            if K > 0
-            else {}
-        )
-
-    def kl(
-        p: Dict[int, float], q: Dict[int, float], actions: Set[int], eps: float
-    ) -> float:
-        """KL( P || Q ) with additive smoothing on the union action set."""
-        if not actions:
-            return 0.0
-        P = smoothed_dist(p, actions, eps)
-        Q = smoothed_dist(q, actions, eps)
-        acc = 0.0
-        for a in actions:
-            pa = P[a]
-            qa = Q[a]
-            acc += pa * math.log(pa / qa)
-        return acc
-
-    sum1 = 0.0
-    sum2 = 0.0
-
+    # Precompute per-state KL rewards
+    kl_reward: Dict[int, float] = {}
     for s in states:
-        # Action union at this state (if a state is unseen by a policy, the API gives {0:1.0})
-        acts1 = set(policy1.get_action_probabilities(s).keys())
-        acts2 = set(policy2.get_action_probabilities(s).keys())
-        actions = acts1 | acts2
-        if not actions:
-            # Extremely defensive; PolicyTable.get_action_probabilities should never yield empty.
-            actions = {0}
+        if mdp_network.is_terminal_state(s):
+            kl_reward[s] = 0.0
+            continue
 
-        # Per-state KLs
-        p1 = policy1.get_action_probabilities(s)
-        p2 = policy2.get_action_probabilities(s)
-        kl12 = kl(p1, p2, actions, delta)
-        kl21 = kl(p2, p1, actions, delta)
+        tgt = target_policy.get_action_probabilities(s)
+        pri = prior_policy.get_action_probabilities(s)
 
-        # Occupancy-weighted accumulation
-        w1 = float(occupancy1.get_value(s))
-        w2 = float(occupancy2.get_value(s))
-        sum1 += w1 * kl12
-        sum2 += w2 * kl21
+        # KL(target || prior) with standard conventions:
+        # Only actions with p_t > 0 contribute; if p_p == 0 while p_t > 0 -> +inf.
+        kl = 0.0
+        inf_flag = False
+        for a in range(A):
+            pt = float(tgt.get(a, 0.0))
+            if pt <= 0.0:
+                continue  # 0 * log(0/q) := 0
+            pq = float(pri.get(a, 0.0))
+            if pq <= 0.0:
+                inf_flag = True
+                break
+            kl += pt * (np.log(pt) - np.log(pq))
 
-    return 0.5 * (sum1 + sum2)
+        kl_reward[s] = float("inf") if inf_flag else float(kl)
+
+    # If any reachable state's KL is +inf, the value becomes +inf for its ancestors.
+    # We still run VI; it will propagate +inf forward. (Fast exit not strictly needed.)
+
+    # Initialize values
+    V: Dict[int, float] = {s: 0.0 for s in states}
+
+    # Value iteration under target policy with state-reward kl_reward[s]
+    for _ in range(max_iterations):
+        max_delta = 0.0
+        for s in states:
+            if mdp_network.is_terminal_state(s):
+                V[s] = 0.0
+                continue
+
+            old_v = V[s]
+            # Expected next value under the target policy
+            exp_next = 0.0
+            action_probs = target_policy.get_action_probabilities(s)
+            for a, pi_sa in action_probs.items():
+                if pi_sa <= 0.0:
+                    continue
+                trans = mdp_network.get_transition_probabilities(s, a)
+                if not trans:
+                    # Fallback: self-loop if no explicit transitions
+                    exp_next += pi_sa * V[s]
+                else:
+                    for sp, p in trans.items():
+                        exp_next += pi_sa * p * V[sp]
+
+            # Bellman update with state-only reward
+            new_v = kl_reward[s] + gamma * exp_next
+            V[s] = new_v
+            # Track largest absolute change; handles inf naturally
+            delta = abs(new_v - old_v) if np.isfinite(new_v) and np.isfinite(old_v) else (
+                0.0 if (np.isinf(new_v) and np.isinf(old_v)) else float("inf")
+            )
+            max_delta = max(max_delta, delta)
+
+        if max_delta < theta:
+            break
+
+    # Uniform average over labeled start states
+    start_vals = [V[s] for s in start_states]
+    # If any start value is +inf, the mean is +inf; numpy handles this naturally.
+    return float(np.mean(start_vals))
 
 
 def performance_curve_and_integral(

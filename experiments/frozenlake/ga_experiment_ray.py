@@ -678,10 +678,10 @@ def main():
             #      - "perf_cand_blended"    # integral(random -> blended(policy_opt_cand, random, w)) on CAND MDP
             #      - "perf_blended_to_base" # integral(blended -> base_optimal) on BASE MDP
             #
-            # 3) obj_multi_kl_and_perf
+            # 3) obj_multi_kl
             #    Keys (maximize both):
-            #      - "kl_neg"   # -KL(base_policy || opt_cand_policy) evaluated with base occupancy
-            #      - "perf_opt" # integral(random -> opt_cand_policy) on CAND MDP
+            #      - "obj_control_kl"
+            #      - "obj_target_kl"
             # =================================================================================
 
             # =========================== Recommended setups ===========================
@@ -712,21 +712,11 @@ def main():
                         },
                         "eval_every": 2000,
                         "n_eval_episodes": 50,
-                        # Optional slice control (defaults used by the scorer):
-                        # "curve": "greedy",         # "greedy" | "train"
-                        # "eval_scope": "target",    # "target" | "item"
-                        # "evals": [{"name":"Target","env":"target"}],  # explicit eval declarations
                     },
                 ),
                 (
                     "obj_multi_perf",
                     {
-                        "vi_gamma": 0.99,
-                        "vi_theta": 1e-3,
-                        "vi_max_iterations": 1000,
-                        "policy_mixing": (0.9, 0.0, 0.1),
-                        "policy_temperature": 0.01,
-                        "policy_tie_tol": 1e-2,
                         "perf_numpoints": 16,
                         "perf_gamma": 0.99,
                         "perf_theta": 1e-3,
@@ -734,36 +724,19 @@ def main():
                         "blend_weight": 0.8,
                     },
                 ),
+                (
+                    "obj_multi_kl",
+                    {
+                        "kl_gamma": 0.99,
+                        "kl_theta": 1e-3,
+                        "kl_max_iterations": 1000,
+                    },
+                )
             ]
             objective_keys: List[str] = [
                 "p1_mean",
                 "p2_mean",
             ]
-
-            # Example B: policy distance + candidate performance (two-objective)
-            # score = [("obj_multi_kl_and_perf", {
-            #     "vi_gamma": 0.99, "vi_theta": 1e-3, "vi_max_iterations": 1000,
-            #     "policy_mixing": (0.9, 0.0, 0.1), "policy_temperature": 0.01, "policy_tie_tol": 1e-2,
-            #     "perf_numpoints": 16, "perf_gamma": 0.99, "perf_theta": 1e-3, "perf_max_iterations": 1000,
-            #     "kl_delta": 1e-3,
-            # })]
-            # objective_keys = ["kl_neg", "perf_opt"]
-
-            # Example C: two-stage performance (candidate + transfer-to-base)
-            # score = [("obj_multi_perf", {
-            #     "vi_gamma": 0.99, "vi_theta": 1e-3, "vi_max_iterations": 1000,
-            #     "policy_mixing": (0.9, 0.0, 0.1), "policy_temperature": 0.01, "policy_tie_tol": 1e-2,
-            #     "perf_numpoints": 16, "perf_gamma": 0.99, "perf_theta": 1e-3, "perf_max_iterations": 1000,
-            #     "blend_weight": 0.8,
-            # })]
-            # objective_keys = ["perf_cand_blended", "perf_blended_to_base"]
-
-            # Example D: combine multiple scorers (keys必须唯一，否则 GA 报错)
-            # score = [
-            #     ("obj_multi_perf", {...}),
-            #     ("obj_cl_phase_mean", {...}),
-            # ]
-            # objective_keys = ["perf_cand_blended", "p2_mean"]
 
             # Run GA (new API will log: ga/metrics/* and ga/objs/*; export CSV/PNG)
             _ = run_ga(
