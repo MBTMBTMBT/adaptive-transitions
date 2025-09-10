@@ -44,16 +44,13 @@
 # 8) Pass extra args through to ga_experiment.py (after “--”):
 #      experiments/frozenlake/ga_experiment.sh --exp my_flk -- --wandb-mode offline --skip-train
 #
-# 9) Select objective groups (Cartesian with maps):
-#      # default uses all groups: auc_source_target,perf_source_target,perf_kl_source_target,kl
-#      experiments/frozenlake/ga_experiment.sh --exp my_flk --groups kl,perf_source_target
-#      # from file:
-#      printf "kl\nauc_source_target\n" > groups.txt
-#      experiments/frozenlake/ga_experiment.sh --exp my_flk --groups-file groups.txt
+# 9) Select objective groups (CSV or file; default = ALL groups):
+#      experiments/frozenlake/ga_experiment.sh --exp my_flk --obj-groups perf_source_target,kl
+#      experiments/frozenlake/ga_experiment.sh --exp my_flk --obj-groups-file groups.txt
 #
 # Output structure:
-#   LOCAL  -> <LOCAL_EXP_OUTROOT>/<exp>/<map>/<group>/  (default: ./experiment_output/<exp>/<map>/<group>/)
-#   SLURM  -> <SLURM_EXP_OUTROOT>/<exp>/<map>/<group>/
+#   LOCAL  -> <LOCAL_EXP_OUTROOT>/<exp>/<map>/ (default: ./experiment_output/<exp>/<map>/)
+#   SLURM  -> <SLURM_EXP_OUTROOT>/<exp>/<map>/ (default: /scratch/users/$USER/experiment_output/<exp>/<map>/)
 #   W&B    -> <...>/wandb_runs/  (kept away from top-level to avoid import shadowing)
 #   SLURM stdout/err -> /scratch/users/$USER/slurm_out/  (customizable)
 # ---------------------------------------------------------------------------
@@ -100,7 +97,7 @@ SLUR_CACHE_DEFAULT="/scratch/users/${USER}/singularity/cache"
 # -----------------------------
 EXP_NAME=""
 MAPS_INPUT="8x8,env2,env3,env4"  # env0,env1
-GROUPS_INPUT="auc_source_target,perf_source_target,perf_kl_source_target,kl"
+OBJ_GROUPS_INPUT="auc_source_target,perf_source_target,perf_kl_source_target,kl"
 EXTRA_ARGS=()
 LOCAL_EXP_OUTROOT="${LOCAL_EXP_OUTROOT_DEFAULT}"
 SLURM_EXP_OUTROOT="${SLURM_EXP_OUTROOT_DEFAULT}"
@@ -109,7 +106,7 @@ LOGDIR_CLI=""  # Optional override for driver logs.
 
 usage() {
   cat <<EOF
-Usage: $0 --exp <name> [--maps <csv>|--maps-file <path>] [--groups <csv>|--groups-file <path>] [options]
+Usage: $0 --exp <name> [--maps <csv>|--maps-file <path>] [--obj-groups <csv>|--obj-groups-file <path>] [options]
 Options:
   --days <float>     Walltime in DAYS (supports decimals, e.g., 0.5 -> 12h).
 EOF
@@ -121,8 +118,8 @@ while [[ $# -gt 0 ]]; do
     --exp)                 EXP_NAME="${2:-}"; shift ;;
     --maps)                MAPS_INPUT="${2:-}"; shift ;;
     --maps-file)           MAPS_INPUT="FILE:${2:-}"; shift ;;
-    --groups)              GROUPS_INPUT="${2:-}"; shift ;;
-    --groups-file)         GROUPS_INPUT="FILE:${2:-}"; shift ;;
+    --obj-groups)          OBJ_GROUPS_INPUT="${2:-}"; shift ;;
+    --obj-groups-file)     OBJ_GROUPS_INPUT="FILE:${2:-}"; shift ;;
     --use-slurm)           USE_SLURM=true ;;
     --no-container)        CONTAINER="" ;;
     --container)           CONTAINER="${2:-}"; shift ;;
@@ -166,20 +163,20 @@ fi
 [[ "${#MAPS[@]}" -gt 0 ]] || { echo "No maps parsed."; exit 2; }
 
 # -----------------------------
-# Build group list
+# Build objective group list
 # -----------------------------
-declare -a GROUPS=()
-if [[ "${GROUPS_INPUT}" == FILE:* ]]; then
-  GROUP_FILE="${GROUPS_INPUT#FILE:}"
-  [[ -f "${GROUP_FILE}" ]] || { echo "Group file not found: ${GROUP_FILE}"; exit 2; }
+declare -a OBJ_GROUPS=()
+if [[ "${OBJ_GROUPS_INPUT}" == FILE:* ]]; then
+  OG_FILE="${OBJ_GROUPS_INPUT#FILE:}"
+  [[ -f "${OG_FILE}" ]] || { echo "Obj-groups file not found: ${OG_FILE}"; exit 2; }
   while IFS= read -r line; do
     g="$(echo "$line" | tr -d '[:space:]')"
-    [[ -n "${g}" ]] && GROUPS+=("${g}")
-  done < "${GROUP_FILE}"
+    [[ -n "${g}" ]] && OBJ_GROUPS+=("${g}")
+  done < "${OG_FILE}"
 else
-  IFS=',' read -r -a GROUPS <<< "${GROUPS_INPUT}"
+  IFS=',' read -r -a OBJ_GROUPS <<< "${OBJ_GROUPS_INPUT}"
 fi
-[[ "${#GROUPS[@]}" -gt 0 ]] || { echo "No groups parsed."; exit 2; }
+[[ "${#OBJ_GROUPS[@]}" -gt 0 ]] || { echo "No objective groups parsed."; exit 2; }
 
 # -----------------------------
 # Derived paths
@@ -245,9 +242,9 @@ fi
 CMD_ARR=()
 build_cmd_for_map() {
   local map="$1"
-  local group="$2"
-  local run_name="${EXP_NAME}_${map}__${group}"
-  local outdir="${EXP_OUTROOT%/}/${EXP_NAME}/${map}/${group}"
+  local obj_group="$2"
+  local run_name="${EXP_NAME}_${map}__${obj_group}"
+  local outdir="${EXP_OUTROOT%/}/${EXP_NAME}/${map}"
 
   mkdir -p "${outdir}"
 
@@ -259,7 +256,7 @@ build_cmd_for_map() {
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
                "${CONTAINER}" "${PYTHON}" "${SCRIPT_PATH}"
-               --run-name "${run_name}" --map "${map}" --obj-group "${group}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
+               --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
     else
       # SLURM: Singularity
       CMD_ARR=(singularity exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}"
@@ -267,14 +264,14 @@ build_cmd_for_map() {
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
                "${CONTAINER}" "${PYTHON}" "${SCRIPT_PATH}"
-               --run-name "${run_name}" --map "${map}" --obj-group "${group}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
+               --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
     fi
   else
     # Host venv
     export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
     export WANDB_DIR="${WB_DIR}"
     CMD_ARR=("${PYTHON}" "${SCRIPT_PATH}"
-             --run-name "${run_name}" --map "${map}" --obj-group "${group}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
+             --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
   fi
 
   if ((${#EXTRA_ARGS[@]})); then
@@ -289,34 +286,34 @@ print_cmd_line() { printf "%q " "$@"; }
 # -----------------------------
 if ! ${USE_SLURM}; then
   echo "[Local/${ENGINE:-host}] Running ${#MAPS[@]} map(s): ${MAPS[*]}"
-  echo "[Local] Groups       = ${GROUPS[*]}"
-  echo "[Local] EXP_OUTROOT  = ${EXP_OUTROOT}"
-  echo "[Local] WANDB_DIR    = ${WB_DIR}"
-  echo "[Local] LOGDIR       = ${LOGDIR}"
+  echo "[Local] Objective groups = ${OBJ_GROUPS[*]}"
+  echo "[Local] EXP_OUTROOT = ${EXP_OUTROOT}"
+  echo "[Local] WANDB_DIR   = ${WB_DIR}"
+  echo "[Local] LOGDIR      = ${LOGDIR}"
   for map in "${MAPS[@]}"; do
-    for group in "${GROUPS[@]}"; do
-      echo "==> MAP=${map}  GROUP=${group}"
-      build_cmd_for_map "${map}" "${group}"
+    for g in "${OBJ_GROUPS[@]}"; do
+      echo "==> MAP=${map}  OBJ_GROUP=${g}"
+      build_cmd_for_map "${map}" "${g}"
       echo "[CMD] $(print_cmd_line "${CMD_ARR[@]}")"
-      "${CMD_ARR[@]}" 2>&1 | tee "${LOGDIR}/ga_${EXP_NAME}_${map}__${group}.log"
+      "${CMD_ARR[@]}" 2>&1 | tee "${LOGDIR}/ga_${EXP_NAME}_${map}__${g}.log"
     done
   done
-  echo "[Local] All maps × groups finished."
+  echo "[Local] All (map, obj_group) combinations finished."
   exit 0
 fi
 
-# -------- SLURM submission path (one job per (map, group)) --------
+# -------- SLURM submission path (one job per (map, obj_group)) --------
 mkdir -p "${SLURM_STDOUT_DIR}"
 echo "[SLURM] Submitting ${#MAPS[@]} map(s): ${MAPS[*]}"
-echo "[SLURM] Groups       = ${GROUPS[*]}"
-echo "[SLURM] EXP_OUTROOT  = ${EXP_OUTROOT}"
-echo "[SLURM] STDOUT_DIR   = ${SLURM_STDOUT_DIR}"
-echo "[SLURM] DRIVER LOGS  = ${LOGDIR}"
+echo "[SLURM] Objective groups = ${OBJ_GROUPS[*]}"
+echo "[SLURM] EXP_OUTROOT = ${EXP_OUTROOT}"
+echo "[SLURM] STDOUT_DIR  = ${SLURM_STDOUT_DIR}"
+echo "[SLURM] DRIVER LOGS = ${LOGDIR}"
 
 for map in "${MAPS[@]}"; do
-  for group in "${GROUPS[@]}"; do
+  for g in "${OBJ_GROUPS[@]}"; do
     job_script="$(mktemp)"
-    job_name="ga_${EXP_NAME}_${map}__${group}"
+    job_name="ga_${EXP_NAME}_${map}__${g}"
     out_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.out"
     err_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.err"
 
@@ -357,7 +354,7 @@ export WANDB_DIR="${WB_DIR}"
 EOF
 
     # actual command
-    build_cmd_for_map "${map}" "${group}"
+    build_cmd_for_map "${map}" "${g}"
     echo "$(print_cmd_line "${CMD_ARR[@]}")" >> "${job_script}"
 
     # submit
