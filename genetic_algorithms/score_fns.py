@@ -216,20 +216,22 @@ def obj_cl_phase_mean(
     n_eval_episodes: int,
     # ---- optional knobs ----
     evals: Optional[Sequence[Dict[str, Any]]] = None,
-    curve: str = "greedy",  # "greedy" | "train"
-    eval_scope: str = "target",  # "target" | "item"
+    curve: str = "greedy",        # "greedy" | "train"
+    eval_scope: str = "target",   # "target" | "item"
+    item_label: str = "Source",
     wandb_actor: Optional["ActorHandle"] = None,  # optional console dump
 ) -> Dict[str, Optional[float]]:
     """
     Return a flat metrics dict (float or None) for the chosen (scope, curve) on a 2-phase CL run.
-    We mirror keys produced by the trainer's `_compute_metrics` for the selected branch only.
+    Keys mirror trainer's `_compute_metrics` for the selected branch, plus source-segment metrics.
 
-    Output keys (all present; values may be None if undefined):
-      - "p1_mean", "p2_mean", "p1_auc", "p2_auc"
+    Output keys (always present; values may be None if undefined):
+      - "mean_p1", "mean_p2", "auc_p1", "auc_p2"
       - "mean_total", "auc_total", "ap_last_k", "ttt_frac"
+      - "mean_p1_source", "auc_p1_source"
       - "js_target_start", "js_p2_head", "js_baseline_B"
     """
-    # ---- strict arg checks (shape and semantics) ----
+    # ---- strict arg checks ----
     curve_key = str(curve).lower()
     if curve_key not in ("greedy", "train"):
         raise ValueError("obj_cl_phase_mean: 'curve' must be 'greedy' or 'train'.")
@@ -239,49 +241,53 @@ def obj_cl_phase_mean(
     if not isinstance(phase_steps, (list, tuple)) or len(phase_steps) < 2:
         raise ValueError("obj_cl_phase_mean: needs at least two phases (p1, p2).")
     if int(phase_steps[0]) <= 0 or int(phase_steps[1]) <= 0:
-        raise ValueError(
-            "obj_cl_phase_mean: phase steps must be positive for p1 and p2."
-        )
+        raise ValueError("obj_cl_phase_mean: phase steps must be positive for p1 and p2.")
 
-    # ---- eval declarations: always include Target; include CAND if item-scope requested ----
+    # ---- eval declarations: ALWAYS include both 'Target' and item_label ----
     if evals is None:
-        evals_final: List[Dict[str, Any]] = [{"name": "Target", "env": "target"}]
-        if scope_key == "item":
-            evals_final.append({"name": "CAND", "env": "CAND"})
+        evals_final: List[Dict[str, Any]] = [
+            {"name": "Target",    "env": "target"},
+            {"name": str(item_label), "env": str(item_label)},
+        ]
     else:
         if not (isinstance(evals, (list, tuple)) and len(evals) > 0):
             raise ValueError("obj_cl_phase_mean: 'evals' must be a non-empty list.")
         evals_final = []
         for es in evals:
-            if not (isinstance(es, dict) and "name" in es and "env" in es):
-                raise ValueError("obj_cl_phase_mean: each eval needs 'name' and 'env'.")
-            evals_final.append({"name": str(es["name"]), "env": str(es["env"])})
-        required_name = "CAND" if scope_key == "item" else "Target"
-        if required_name not in {e["name"] for e in evals_final}:
-            raise ValueError(
-                f"obj_cl_phase_mean: evals must include '{required_name}' for scope='{scope_key}'."
-            )
+            if not (isinstance(es, dict) and "name" in es):
+                raise ValueError("obj_cl_phase_mean: each eval needs 'name' (and usually 'env').")
+            nm = str(es["name"])
+            # Coerce env for the two required evals; keep others as provided (if any).
+            if nm == "Target":
+                ev = "target"
+            elif nm == str(item_label):
+                ev = str(item_label)
+            else:
+                ev = str(es.get("env", nm))
+            evals_final.append({"name": nm, "env": ev})
+        names = {e["name"] for e in evals_final}
+        if "Target" not in names:
+            evals_final.append({"name": "Target", "env": "target"})
+        if str(item_label) not in names:
+            evals_final.append({"name": str(item_label), "env": str(item_label)})
 
-    # ---- registry: target + item=CAND (in-memory portable) ----
+    # ---- registry: target + one item labeled by `item_label` ----
     envs = {
         "target": {"factory_path": target_factory_path, "cfg": dict(target_cfg)},
         "items": {
-            "CAND": {
+            str(item_label): {
                 "factory_path": item_factory_path,
-                "cfg": {
-                    "mdp_portable": mdp.to_portable(),
-                    "max_steps": int(item_max_steps),
-                },
+                "cfg": {"mdp_portable": mdp.to_portable(), "max_steps": int(item_max_steps)},
             }
         },
     }
 
-    # ---- curriculum: p1 on item, p2 on target ----
+    # ---- curriculum: p1 on item_label, p2 on target ----
     p1, p2 = int(phase_steps[0]), int(phase_steps[1])
     item_phases_map = {
-        "CAND": [{"env": "CAND", "steps": p1}, {"env": "target", "steps": p2}]
+        str(item_label): [{"env": str(item_label), "steps": p1}, {"env": "target", "steps": p2}]
     }
-    evals_map = {"CAND": list(evals_final)}
+    evals_map = {str(item_label): list(evals_final)}
 
     # ---- seeds normalization ----
     if isinstance(seeds, int):
@@ -293,13 +299,8 @@ def obj_cl_phase_mean(
         if len(seeds) < 1:
             raise ValueError("obj_cl_phase_mean: provide at least one seed.")
 
-    # ---- metrics options: compute both channels so the dict is complete; baseline OFF ----
-    metrics_opts = {
-        "enabled": True,
-        "compute_greedy": True,
-        "compute_train": True,
-        # rely on trainer defaults for cap_steps/js_first_n, etc.
-    }
+    # ---- metrics options: compute both channels; baseline OFF ----
+    metrics_opts = {"enabled": True, "compute_greedy": True, "compute_train": True}
 
     summary = run_curriculum(
         seeds=seeds,
@@ -314,35 +315,35 @@ def obj_cl_phase_mean(
         n_eval_episodes=int(n_eval_episodes),
         output_dir=None,
         save_intermediate=False,
-        wandb_actor=None,  # keep training silent
+        wandb_actor=None,
         media_opts=None,
         wandb_step_base=0,
-        run_baseline=False,  # baseline disabled -> js_baseline_B will likely be None
+        run_baseline=False,
         run_items=True,
         metrics_opts=metrics_opts,
     )
 
-    # ---- strict structural checks, but DO NOT require non-None numeric values ----
+    # ---- structural checks ----
     if not isinstance(summary, dict):
         raise ValueError("obj_cl_phase_mean: invalid summary (not a dict).")
     metrics = summary.get("metrics", None)
     if not isinstance(metrics, dict):
         raise ValueError("obj_cl_phase_mean: metrics missing from trainer summary.")
     items_m = metrics.get("items", None)
-    if not (isinstance(items_m, dict) and "CAND" in items_m):
-        raise ValueError("obj_cl_phase_mean: metrics.items['CAND'] missing.")
+    if not (isinstance(items_m, dict) and str(item_label) in items_m):
+        raise ValueError(f"obj_cl_phase_mean: metrics.items['{item_label}'] missing.")
 
-    cand = items_m["CAND"]
-    if scope_key not in cand:
-        raise ValueError(f"obj_cl_phase_mean: items['CAND']['{scope_key}'] missing.")
-    scope_block = cand[scope_key]
+    item_metrics = items_m[str(item_label)]
+    if scope_key not in item_metrics:
+        raise ValueError(f"obj_cl_phase_mean: items['{item_label}']['{scope_key}'] missing.")
+    scope_block = item_metrics[scope_key]
     if curve_key not in scope_block:
         raise ValueError(
-            f"obj_cl_phase_mean: items['CAND']['{scope_key}']['{curve_key}'] missing."
+            f"obj_cl_phase_mean: items['{item_label}']['{scope_key}']['{curve_key}'] missing."
         )
     ch = scope_block[curve_key]
 
-    # ---- primary metrics (p1/p2 means & AUCs, totals, last-k, TTT) ----
+    # ---- pack outputs ----
     out: Dict[str, Optional[float]] = {
         "mean_p1": ch.get("mean_p1"),
         "mean_p2": ch.get("mean_p2"),
@@ -356,20 +357,18 @@ def obj_cl_phase_mean(
         "auc_p1_source": ch.get("auc_p1_source"),
     }
 
-    # ---- jumpstart (absolute levels) from trainer (may be None if undefined) ----
-    js_block = (cand.get("jumpstart", {}) or {}).get(curve_key, {}) or {}
+    js_block = (item_metrics.get("jumpstart", {}) or {}).get(curve_key, {}) or {}
     out["js_target_start"] = js_block.get("target_start")
     out["js_p2_head"] = js_block.get("p2_head")
     out["js_baseline_B"] = js_block.get("baseline_B")
 
-    # ---- optional console dump (compact) ----
     if wandb_actor is not None:
         try:
             wandb_actor.write_console.remote(
                 "[obj_cl_phase_mean] "
-                f"scope={scope_key} curve={curve_key} "
-                f"mean_p1={out['mean_p1']} mean_p1_source={out['mean_p1_source']} mean_p2={out['mean_p2']} "
-                f"auc_total={out['auc_total']}"
+                f"item_label={item_label} scope={scope_key} curve={curve_key} "
+                f"mean_p1={out['mean_p1']} mean_p1_source={out['mean_p1_source']} "
+                f"mean_p2={out['mean_p2']} auc_total={out['auc_total']}"
             )
         except Exception:
             pass
