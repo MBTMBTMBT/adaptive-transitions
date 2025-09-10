@@ -730,7 +730,7 @@ def main():
                         "kl_theta": 1e-3,
                         "kl_max_iterations": 1000,
                     },
-                )
+                ),
             ]
             objective_keys: List[str] = [
                 "p1_mean",

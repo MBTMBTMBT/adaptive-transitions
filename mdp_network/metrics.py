@@ -96,8 +96,10 @@ def kl_policies(
             new_v = kl_reward[s] + gamma * exp_next
             V[s] = new_v
             # Track largest absolute change; handles inf naturally
-            delta = abs(new_v - old_v) if np.isfinite(new_v) and np.isfinite(old_v) else (
-                0.0 if (np.isinf(new_v) and np.isinf(old_v)) else float("inf")
+            delta = (
+                abs(new_v - old_v)
+                if np.isfinite(new_v) and np.isfinite(old_v)
+                else (0.0 if (np.isinf(new_v) and np.isinf(old_v)) else float("inf"))
             )
             max_delta = max(max_delta, delta)
 

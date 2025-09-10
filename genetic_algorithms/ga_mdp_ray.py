@@ -35,7 +35,8 @@ from genetic_algorithms.mdp_ops import (
 from genetic_algorithms.score_fns import _normalize_score_spec, SCORE_FNS
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
-    q_table_to_policy, create_random_policy,
+    q_table_to_policy,
+    create_random_policy,
 )
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 
@@ -144,10 +145,22 @@ class GAWorker:
         self.whitelist: Set[EdgeTriple] = set(tuple(x) for x in whitelist)
         self.ops = dict(ops or {})
         self.distance = {
-            "max_hops": distance_cfg.get("dist_max_hops", distance_cfg.get("max_hops", None)),
-            "node_cap": distance_cfg.get("dist_node_cap", distance_cfg.get("node_cap", None)),
-            "weight_eps": float(distance_cfg.get("dist_weight_eps", distance_cfg.get("weight_eps", 1e-9))),
-            "unreachable": float(distance_cfg.get("dist_unreachable", distance_cfg.get("unreachable", 1e6))),
+            "max_hops": distance_cfg.get(
+                "dist_max_hops", distance_cfg.get("max_hops", None)
+            ),
+            "node_cap": distance_cfg.get(
+                "dist_node_cap", distance_cfg.get("node_cap", None)
+            ),
+            "weight_eps": float(
+                distance_cfg.get(
+                    "dist_weight_eps", distance_cfg.get("weight_eps", 1e-9)
+                )
+            ),
+            "unreachable": float(
+                distance_cfg.get(
+                    "dist_unreachable", distance_cfg.get("unreachable", 1e6)
+                )
+            ),
         }
         self.solver = dict(solver or {})
         self.precomputed = dict(precomputed or {})
@@ -458,9 +471,18 @@ def ga_export_metric_curves(
     for key, series in metrics_history.items():
         gens = list(range(len(series["min"])))
         fig, axes = plt.subplots(3, 1, figsize=(8, 9), constrained_layout=True)
-        axes[0].plot(gens, series["min"]);  axes[0].set_title(f"{key} - min");  axes[0].set_xlabel("gen");  axes[0].set_ylabel("min")
-        axes[1].plot(gens, series["mean"]); axes[1].set_title(f"{key} - mean"); axes[1].set_xlabel("gen");  axes[1].set_ylabel("mean")
-        axes[2].plot(gens, series["max"]);  axes[2].set_title(f"{key} - max");  axes[2].set_xlabel("gen");  axes[2].set_ylabel("max")
+        axes[0].plot(gens, series["min"])
+        axes[0].set_title(f"{key} - min")
+        axes[0].set_xlabel("gen")
+        axes[0].set_ylabel("min")
+        axes[1].plot(gens, series["mean"])
+        axes[1].set_title(f"{key} - mean")
+        axes[1].set_xlabel("gen")
+        axes[1].set_ylabel("mean")
+        axes[2].plot(gens, series["max"])
+        axes[2].set_title(f"{key} - max")
+        axes[2].set_xlabel("gen")
+        axes[2].set_ylabel("max")
         png_path = plots_dir / f"{_safe_name(key)}.png"
         fig.savefig(png_path, dpi=150)
         plt.close(fig)

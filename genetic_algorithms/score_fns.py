@@ -67,9 +67,7 @@ def obj_multi_kl(
     pgamma = float(vi_gamma) if kl_gamma is None else float(kl_gamma)
     ptheta = float(vi_theta) if kl_theta is None else float(kl_theta)
     pmax_iter = (
-        int(vi_max_iterations)
-        if kl_max_iterations is None
-        else int(kl_max_iterations)
+        int(vi_max_iterations) if kl_max_iterations is None else int(kl_max_iterations)
     )
 
     pre = shared["precomputed"]
