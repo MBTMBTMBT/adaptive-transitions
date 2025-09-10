@@ -127,7 +127,6 @@ def obj_multi_perf(
     perf_gamma: float | None = None,
     perf_theta: float | None = None,
     perf_max_iterations: int | None = None,
-    blend_weight: float = 0.8,
 ) -> Dict[str, Optional[float]]:
     """
     Outputs:
@@ -142,28 +141,6 @@ def obj_multi_perf(
     policy_mix = tuple(solver.get("policy_mix", (0.0, 1.0, 0.0)))
     policy_tie_tol = float(solver.get("policy_tie_tol", 1e-6))
 
-    pre = shared["precomputed"]
-    base_policy = PolicyTable.from_portable(pre["base_policy"])
-    base_mdp = MDPNetwork.from_portable(pre["base_mdp"])
-
-    _, Q2 = optimal_value_iteration(
-        mdp,
-        gamma=float(vi_gamma),
-        theta=float(vi_theta),
-        max_iterations=int(vi_max_iterations),
-    )
-    policy2: PolicyTable = q_table_to_policy(
-        Q2,
-        states=list(mdp.states),
-        num_actions=mdp.num_actions,
-        mixing=tuple(policy_mix),
-        temperature=float(policy_temperature),
-        tie_tol=float(policy_tie_tol),
-    )
-
-    prior_rand = create_random_policy(mdp)
-    blended = blend_policies(policy2, prior_rand, weight=float(blend_weight))
-
     pgamma = float(vi_gamma) if perf_gamma is None else float(perf_gamma)
     ptheta = float(vi_theta) if perf_theta is None else float(perf_theta)
     pmax_iter = (
@@ -173,18 +150,47 @@ def obj_multi_perf(
     )
     N = int(perf_numpoints)
 
-    _c0, integral0 = performance_curve_and_integral(
-        prior_policy=prior_rand,
-        target_policy=blended,
+    pre = shared["precomputed"]
+    target_policy = PolicyTable.from_portable(pre["base_policy"])
+    base_mdp = MDPNetwork.from_portable(pre["base_mdp"])
+    rand_policy = PolicyTable.from_portable(pre["rand_policy"])
+
+    _, Q2 = optimal_value_iteration(
+        mdp,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
+    )
+    prior_policy: PolicyTable = q_table_to_policy(
+        Q2,
+        states=list(mdp.states),
+        num_actions=mdp.num_actions,
+        mixing=tuple(policy_mix),
+        temperature=float(policy_temperature),
+        tie_tol=float(policy_tie_tol),
+    )
+
+    _c0, int_rand_to_source_on_source = performance_curve_and_integral(
+        prior_policy=rand_policy,
+        target_policy=prior_policy,
         mdp_network=mdp,
         numpoints=N,
         gamma=pgamma,
         theta=ptheta,
         max_iterations=pmax_iter,
     )
-    _c1, integral1 = performance_curve_and_integral(
-        prior_policy=blended,
-        target_policy=base_policy,
+    _c01, int_rand_to_source = performance_curve_and_integral(
+        prior_policy=rand_policy,
+        target_policy=prior_policy,
+        mdp_network=base_mdp,
+        numpoints=N,
+        gamma=pgamma,
+        theta=ptheta,
+        max_iterations=pmax_iter,
+    )
+    _c1, int_source_to_target = performance_curve_and_integral(
+        prior_policy=prior_policy,
+        target_policy=target_policy,
         mdp_network=base_mdp,
         numpoints=N,
         gamma=pgamma,
@@ -193,8 +199,9 @@ def obj_multi_perf(
     )
 
     return {
-        "int_rand_to_blend": float(integral0),
-        "int_blend_to_base": float(integral1),
+        "int_rand_to_source_on_source": float(int_rand_to_source_on_source),
+        "int_rand_to_source": float(int_rand_to_source),
+        "int_source_to_target": float(int_source_to_target),
     }
 
 
