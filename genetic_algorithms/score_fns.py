@@ -42,14 +42,6 @@ def _normalize_score_spec(spec: Any) -> List[Tuple[str, Dict[str, Any]]]:
         raise KeyError(f"Unknown score function(s): {unknown}. Available: {valid}")
     return items
 
-    # Validate names early for better error messages
-    unknown = [n for (n, _) in items if n not in SCORE_FNS]
-    if unknown:
-        valid = ", ".join(sorted(SCORE_FNS.keys()))
-        raise KeyError(f"Unknown score function(s): {unknown}. Available: {valid}")
-
-    return items
-
 
 def obj_multi_kl_and_perf(
     mdp: MDPNetwork,
@@ -73,18 +65,13 @@ def obj_multi_kl_and_perf(
       - 'perf_integral' (maximize): integral(random -> cand_opt) on candidate MDP.
     """
     pre = shared.get("precomputed", None)
-    if not (
-        isinstance(pre, list)
-        and len(pre) >= 2
-        and pre[0] is not None
-        and pre[1] is not None
-    ):
+    if not (isinstance(pre, dict) and "base_policy" in pre and "base_occupancy" in pre):
         raise ValueError(
-            "obj_multi_kl_and_perf requires precomputed[0]=base_policy, [1]=base_occupancy."
+            "obj_multi_kl_and_perf requires precomputed['base_policy'] and ['base_occupancy']."
         )
 
-    base_policy = PolicyTable.from_portable(pre[0])
-    base_occupancy = ValueTable.from_portable(pre[1])
+    base_policy = PolicyTable.from_portable(pre["base_policy"])
+    base_occupancy = ValueTable.from_portable(pre["base_occupancy"])
 
     _, Q2 = optimal_value_iteration(
         mdp,
@@ -161,17 +148,12 @@ def obj_multi_perf(
       - 'int_blend_to_base' (maximize): integral(blended -> base_opt) on ORIGINAL base MDP.
     """
     pre = shared.get("precomputed", None)
-    if not (
-        isinstance(pre, list)
-        and len(pre) >= 3
-        and pre[0] is not None
-        and pre[2] is not None
-    ):
+    if not (isinstance(pre, dict) and "base_policy" in pre and "base_mdp" in pre):
         raise ValueError(
-            "obj_multi_perf requires precomputed[0]=base_policy, [2]=base_mdp."
+            "obj_multi_perf requires precomputed['base_policy'] and ['base_mdp']."
         )
-    base_policy = PolicyTable.from_portable(pre[0])
-    base_mdp = MDPNetwork.from_portable(pre[2])
+    base_policy = PolicyTable.from_portable(pre["base_policy"])
+    base_mdp = MDPNetwork.from_portable(pre["base_mdp"])
 
     _, Q2 = optimal_value_iteration(
         mdp,

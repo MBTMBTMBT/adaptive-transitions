@@ -138,31 +138,19 @@ class GAWorker:
         ops: Dict[str, Any],
         distance_cfg: Dict[str, Any],
         solver: Dict[str, Any],
-        precomputed_portables: Optional[List[Dict[str, Any]]] = None,
+        precomputed: Optional[Dict[str, Any]] = None,
     ):
         self.base_ref = MDPNetwork.from_portable(base_portable)
         self.whitelist: Set[EdgeTriple] = set(tuple(x) for x in whitelist)
         self.ops = dict(ops or {})
         self.distance = {
-            "max_hops": distance_cfg.get(
-                "dist_max_hops", distance_cfg.get("max_hops", None)
-            ),
-            "node_cap": distance_cfg.get(
-                "dist_node_cap", distance_cfg.get("node_cap", None)
-            ),
-            "weight_eps": float(
-                distance_cfg.get(
-                    "dist_weight_eps", distance_cfg.get("weight_eps", 1e-9)
-                )
-            ),
-            "unreachable": float(
-                distance_cfg.get(
-                    "dist_unreachable", distance_cfg.get("unreachable", 1e6)
-                )
-            ),
+            "max_hops": distance_cfg.get("dist_max_hops", distance_cfg.get("max_hops", None)),
+            "node_cap": distance_cfg.get("dist_node_cap", distance_cfg.get("node_cap", None)),
+            "weight_eps": float(distance_cfg.get("dist_weight_eps", distance_cfg.get("weight_eps", 1e-9))),
+            "unreachable": float(distance_cfg.get("dist_unreachable", distance_cfg.get("unreachable", 1e6))),
         }
         self.solver = dict(solver or {})
-        self.precomputed_portables = precomputed_portables
+        self.precomputed = dict(precomputed or {})
 
     def mutate(
         self,
@@ -228,7 +216,7 @@ class GAWorker:
         """
         try:
             fns_spec = _normalize_score_spec(score_spec)
-            shared = {"solver": self.solver, "precomputed": self.precomputed_portables}
+            shared = {"solver": self.solver, "precomputed": self.precomputed}
             results: List[Dict[str, Optional[float]]] = []
             for p in portables:
                 mdp = MDPNetwork.from_portable(p)
@@ -309,7 +297,7 @@ def ga_make_worker(
     ops: Dict[str, Any],
     distance_cfg: Dict[str, Any],
     solver: Dict[str, Any],
-    precomputed: Optional[List[Dict[str, Any]]],
+    precomputed: Optional[Dict[str, Any]],
 ):
     """Create a short-lived GAWorker actor."""
     return GAWorker.options(num_cpus=1).remote(
@@ -318,7 +306,7 @@ def ga_make_worker(
         ops=ops,
         distance_cfg=distance_cfg,
         solver=solver,
-        precomputed_portables=precomputed,
+        precomputed=precomputed,
     )
 
 
@@ -334,7 +322,7 @@ def ga_score_portables_with_metrics(
     ops: Dict[str, Any],
     distance_cfg: Dict[str, Any],
     solver: Dict[str, Any],
-    precomputed: Optional[List[Dict[str, Any]]],
+    precomputed: Optional[Dict[str, Any]],
     wandb_writer: Optional[ActorHandle],
     jsonl_path: Optional[str],
     uid_counter: int,
@@ -595,11 +583,11 @@ def run_ga(
     base_occupancy = compute_occupancy_measure(
         base_mdp, base_policy, gamma=gamma, theta=theta, max_iterations=max_iters
     )
-    precomputed = [
-        base_policy.to_portable(),
-        base_occupancy.to_portable(),
-        base_mdp.to_portable(),
-    ]
+    precomputed = {
+        "base_policy": base_policy.to_portable(),
+        "base_occupancy": base_occupancy.to_portable(),
+        "base_mdp": base_mdp.to_portable(),
+    }
     t1 = time.perf_counter()
 
     if wandb_writer is not None:
