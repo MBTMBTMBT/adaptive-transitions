@@ -474,8 +474,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=50)
-    p.add_argument("--ga-generations", type=int, default=250)
+    p.add_argument("--ga-pop-size", type=int, default=100)
+    p.add_argument("--ga-generations", type=int, default=200)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -721,7 +721,6 @@ def main():
                         "perf_gamma": 0.99,
                         "perf_theta": 1e-3,
                         "perf_max_iterations": 1000,
-                        "blend_weight": 0.8,
                     },
                 ),
                 (
