@@ -243,7 +243,7 @@ CMD_ARR=()
 build_cmd_for_map() {
   local map="$1"
   local obj_group="$2"
-  local run_name="${EXP_NAME}_${map}__${obj_group}"
+  local run_name="${EXP_NAME}_${map}_${obj_group}"
   local outdir="${EXP_OUTROOT%/}/${EXP_NAME}/${map}"
 
   mkdir -p "${outdir}"
