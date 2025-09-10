@@ -46,6 +46,14 @@ from two_stage_cl.tabular_curriculum_trainer_ray import run_curriculum
 TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
 SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
 
+# Objective groups registry
+OBJECTIVE_GROUPS: Dict[str, List[str]] = {
+    "auc_source_target": ["auc_p1_source", "auc_p2"],
+    "perf_source_target": ["int_rand_to_source_on_source", "int_source_to_target"],
+    "perf_kl_source_target": ["int_rand_to_source_on_source", "minus_target_kl"],
+    "kl": ["minus_control_kl", "minus_target_kl"],
+}
+
 
 def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
     """Build the native FrozenLake MDP from the environment."""
@@ -510,6 +518,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-policy-temperature", type=float, default=0.01)
     p.add_argument("--ga-tie-tol", type=float, default=1e-2)
 
+    # Objective group (name → list of metric keys)
+    p.add_argument(
+        "--obj-group",
+        type=str,
+        default="auc_source_target",
+        help="Objective group name to select metric keys for GA.",
+    )
+
     # Training (flattened agent kwargs; fed to CL API)
     p.add_argument(
         "--agent-ctor-path",
@@ -583,12 +599,28 @@ def main():
     parser = build_arg_parser()
     args = resolve_args(parser)
 
-    # Wrap outdir with a timestamped run folder: <outdir>/ga-frozenlake/<ts>
+    # Select objective group
+    if args.obj_group not in OBJECTIVE_GROUPS:
+        raise ValueError(
+            f"Unknown --obj-group '{args.obj_group}'. "
+            f"Available: {', '.join(sorted(OBJECTIVE_GROUPS))}"
+        )
+    selected_objective_keys: List[str] = OBJECTIVE_GROUPS[args.obj_group]
+
+    # Make run name obj_group-aware
+    base_name = args.run_name or f"flk_{args.map}"
+    if args.obj_group not in base_name:
+        args.run_name = f"{base_name}__{args.obj_group}"
+    else:
+        args.run_name = base_name
+
+    # Timestamped outdir: <outdir>/ga-frozenlake/<ts>
     run_dir = _timestamped_outdir(args.outdir, leaf="ga-frozenlake")
     ensure_dir(run_dir)
     args.outdir = str(run_dir)
 
     print(f"[SETUP] Results outdir: {args.outdir}")
+    print(f"[SETUP] Obj-group: {args.obj_group} -> {selected_objective_keys}")
 
     # Save full config
     meta_dir = Path(args.outdir) / "meta"
@@ -606,6 +638,8 @@ def main():
         "mode": args.wandb_mode,
         "config": {k: getattr(args, k) for k in vars(args)},
     }
+    init_kwargs["config"]["obj_group"] = args.obj_group
+    init_kwargs["config"]["objective_keys"] = selected_objective_keys
     if args.wandb_entity:
         init_kwargs["entity"] = args.wandb_entity
     env_overrides = {"WANDB_MODE": args.wandb_mode, "WANDB_START_METHOD": "thread"}
@@ -664,8 +698,8 @@ def main():
             # ===================== All available objective (metric) keys =====================
             # 1) obj_cl_phase_mean  (two-phase CL on candidate -> target; single (scope, curve) slice)
             #    Keys (always present; may be None when undefined):
-            #      - "p1_mean", "p2_mean"               # phase-1/2 means
-            #      - "p1_auc", "p2_auc"                 # phase-1/2 trapezoid areas
+            #      - "mean_p1", "mean_p1_source", "mean_p2"               # phase-1/2 means
+            #      - "auc_p1", "auc_p1_source", "auc_p2"                 # phase-1/2 trapezoid areas
             #      - "mean_total", "auc_total"          # whole-interval average / area
             #      - "ap_last_k"                        # last-K mean (per trainer cfg)
             #      - "ttt_frac"                         # time-to-threshold fraction index
@@ -675,13 +709,16 @@ def main():
             #
             # 2) obj_multi_perf
             #    Keys (maximize both):
-            #      - "perf_cand_blended"    # integral(random -> blended(policy_opt_cand, random, w)) on CAND MDP
-            #      - "perf_blended_to_base" # integral(blended -> base_optimal) on BASE MDP
+            #      - "int_rand_to_source_on_source"
+            #      - "int_rand_to_source"
+            #      - "int_source_to_target"
             #
             # 3) obj_multi_kl
             #    Keys (maximize both):
-            #      - "obj_control_kl"
-            #      - "obj_target_kl"
+            #      - "control_kl"
+            #      - "target_kl"
+            #      - "minus_control_kl"
+            #      - "minus_target_kl"
             # =================================================================================
 
             # =========================== Recommended setups ===========================
@@ -732,10 +769,7 @@ def main():
                     },
                 ),
             ]
-            objective_keys: List[str] = [
-                "p1_mean",
-                "p2_mean",
-            ]
+            objective_keys: List[str] = selected_objective_keys
 
             # Run GA (new API will log: ga/metrics/* and ga/objs/*; export CSV/PNG)
             _ = run_ga(

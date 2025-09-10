@@ -2,15 +2,10 @@ from __future__ import annotations
 
 from typing import Any, List, Tuple, Dict, Sequence, Callable, Union, Optional
 
-import numpy as np
-
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
     PolicyTable,
-    ValueTable,
     q_table_to_policy,
-    create_random_policy,
-    blend_policies,
 )
 from mdp_network.metrics import kl_policies, performance_curve_and_integral
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
@@ -349,14 +344,16 @@ def obj_cl_phase_mean(
 
     # ---- primary metrics (p1/p2 means & AUCs, totals, last-k, TTT) ----
     out: Dict[str, Optional[float]] = {
-        "p1_mean": ch.get("mean_p1"),
-        "p2_mean": ch.get("mean_p2"),
-        "p1_auc": ch.get("auc_p1"),
-        "p2_auc": ch.get("auc_p2"),
+        "mean_p1": ch.get("mean_p1"),
+        "mean_p2": ch.get("mean_p2"),
+        "auc_p1": ch.get("auc_p1"),
+        "auc_p2": ch.get("auc_p2"),
         "mean_total": ch.get("mean_total"),
         "auc_total": ch.get("auc_total"),
         "ap_last_k": ch.get("ap_last_k"),
         "ttt_frac": ch.get("ttt_fraction"),
+        "mean_p1_source": ch.get("mean_p1_source"),
+        "auc_p1_source": ch.get("auc_p1_source"),
     }
 
     # ---- jumpstart (absolute levels) from trainer (may be None if undefined) ----
@@ -371,7 +368,7 @@ def obj_cl_phase_mean(
             wandb_actor.write_console.remote(
                 "[obj_cl_phase_mean] "
                 f"scope={scope_key} curve={curve_key} "
-                f"p1_mean={out['p1_mean']} p2_mean={out['p2_mean']} "
+                f"mean_p1={out['mean_p1']} mean_p1_source={out['mean_p1_source']} mean_p2={out['mean_p2']} "
                 f"auc_total={out['auc_total']}"
             )
         except Exception:

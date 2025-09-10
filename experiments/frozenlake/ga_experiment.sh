@@ -44,9 +44,16 @@
 # 8) Pass extra args through to ga_experiment.py (after “--”):
 #      experiments/frozenlake/ga_experiment.sh --exp my_flk -- --wandb-mode offline --skip-train
 #
+# 9) Select objective groups (Cartesian with maps):
+#      # default uses all groups: auc_source_target,perf_source_target,perf_kl_source_target,kl
+#      experiments/frozenlake/ga_experiment.sh --exp my_flk --groups kl,perf_source_target
+#      # from file:
+#      printf "kl\nauc_source_target\n" > groups.txt
+#      experiments/frozenlake/ga_experiment.sh --exp my_flk --groups-file groups.txt
+#
 # Output structure:
-#   LOCAL  -> <LOCAL_EXP_OUTROOT>/<exp>/<map>/ (default: ./experiment_output/<exp>/<map>/)
-#   SLURM  -> <SLURM_EXP_OUTROOT>/<exp>/<map>/ (default: /scratch/users/$USER/experiment_output/<exp>/<map>/)
+#   LOCAL  -> <LOCAL_EXP_OUTROOT>/<exp>/<map>/<group>/  (default: ./experiment_output/<exp>/<map>/<group>/)
+#   SLURM  -> <SLURM_EXP_OUTROOT>/<exp>/<map>/<group>/
 #   W&B    -> <...>/wandb_runs/  (kept away from top-level to avoid import shadowing)
 #   SLURM stdout/err -> /scratch/users/$USER/slurm_out/  (customizable)
 # ---------------------------------------------------------------------------
@@ -93,6 +100,7 @@ SLUR_CACHE_DEFAULT="/scratch/users/${USER}/singularity/cache"
 # -----------------------------
 EXP_NAME=""
 MAPS_INPUT="8x8,env1,env2,env3,env4"  # env0,
+GROUPS_INPUT="auc_source_target,perf_source_target,perf_kl_source_target,kl"
 EXTRA_ARGS=()
 LOCAL_EXP_OUTROOT="${LOCAL_EXP_OUTROOT_DEFAULT}"
 SLURM_EXP_OUTROOT="${SLURM_EXP_OUTROOT_DEFAULT}"
@@ -101,7 +109,7 @@ LOGDIR_CLI=""  # Optional override for driver logs.
 
 usage() {
   cat <<EOF
-Usage: $0 --exp <name> [--maps <csv>|--maps-file <path>] [options]
+Usage: $0 --exp <name> [--maps <csv>|--maps-file <path>] [--groups <csv>|--groups-file <path>] [options]
 Options:
   --days <float>     Walltime in DAYS (supports decimals, e.g., 0.5 -> 12h).
 EOF
@@ -113,6 +121,8 @@ while [[ $# -gt 0 ]]; do
     --exp)                 EXP_NAME="${2:-}"; shift ;;
     --maps)                MAPS_INPUT="${2:-}"; shift ;;
     --maps-file)           MAPS_INPUT="FILE:${2:-}"; shift ;;
+    --groups)              GROUPS_INPUT="${2:-}"; shift ;;
+    --groups-file)         GROUPS_INPUT="FILE:${2:-}"; shift ;;
     --use-slurm)           USE_SLURM=true ;;
     --no-container)        CONTAINER="" ;;
     --container)           CONTAINER="${2:-}"; shift ;;
@@ -154,6 +164,22 @@ else
   IFS=',' read -r -a MAPS <<< "${MAPS_INPUT}"
 fi
 [[ "${#MAPS[@]}" -gt 0 ]] || { echo "No maps parsed."; exit 2; }
+
+# -----------------------------
+# Build group list
+# -----------------------------
+declare -a GROUPS=()
+if [[ "${GROUPS_INPUT}" == FILE:* ]]; then
+  GROUP_FILE="${GROUPS_INPUT#FILE:}"
+  [[ -f "${GROUP_FILE}" ]] || { echo "Group file not found: ${GROUP_FILE}"; exit 2; }
+  while IFS= read -r line; do
+    g="$(echo "$line" | tr -d '[:space:]')"
+    [[ -n "${g}" ]] && GROUPS+=("${g}")
+  done < "${GROUP_FILE}"
+else
+  IFS=',' read -r -a GROUPS <<< "${GROUPS_INPUT}"
+fi
+[[ "${#GROUPS[@]}" -gt 0 ]] || { echo "No groups parsed."; exit 2; }
 
 # -----------------------------
 # Derived paths
@@ -219,8 +245,9 @@ fi
 CMD_ARR=()
 build_cmd_for_map() {
   local map="$1"
-  local run_name="${EXP_NAME}_${map}"
-  local outdir="${EXP_OUTROOT%/}/${EXP_NAME}/${map}"
+  local group="$2"
+  local run_name="${EXP_NAME}_${map}__${group}"
+  local outdir="${EXP_OUTROOT%/}/${EXP_NAME}/${map}/${group}"
 
   mkdir -p "${outdir}"
 
@@ -232,7 +259,7 @@ build_cmd_for_map() {
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
                "${CONTAINER}" "${PYTHON}" "${SCRIPT_PATH}"
-               --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
+               --run-name "${run_name}" --map "${map}" --obj-group "${group}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
     else
       # SLURM: Singularity
       CMD_ARR=(singularity exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}"
@@ -240,14 +267,14 @@ build_cmd_for_map() {
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
                "${CONTAINER}" "${PYTHON}" "${SCRIPT_PATH}"
-               --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
+               --run-name "${run_name}" --map "${map}" --obj-group "${group}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
     fi
   else
     # Host venv
     export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
     export WANDB_DIR="${WB_DIR}"
     CMD_ARR=("${PYTHON}" "${SCRIPT_PATH}"
-             --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
+             --run-name "${run_name}" --map "${map}" --obj-group "${group}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}")
   fi
 
   if ((${#EXTRA_ARGS[@]})); then
@@ -262,34 +289,39 @@ print_cmd_line() { printf "%q " "$@"; }
 # -----------------------------
 if ! ${USE_SLURM}; then
   echo "[Local/${ENGINE:-host}] Running ${#MAPS[@]} map(s): ${MAPS[*]}"
-  echo "[Local] EXP_OUTROOT = ${EXP_OUTROOT}"
-  echo "[Local] WANDB_DIR   = ${WB_DIR}"
-  echo "[Local] LOGDIR      = ${LOGDIR}"
+  echo "[Local] Groups       = ${GROUPS[*]}"
+  echo "[Local] EXP_OUTROOT  = ${EXP_OUTROOT}"
+  echo "[Local] WANDB_DIR    = ${WB_DIR}"
+  echo "[Local] LOGDIR       = ${LOGDIR}"
   for map in "${MAPS[@]}"; do
-    echo "==> MAP=${map}"
-    build_cmd_for_map "${map}"
-    echo "[CMD] $(print_cmd_line "${CMD_ARR[@]}")"
-    "${CMD_ARR[@]}" 2>&1 | tee "${LOGDIR}/ga_${EXP_NAME}_${map}.log"
+    for group in "${GROUPS[@]}"; do
+      echo "==> MAP=${map}  GROUP=${group}"
+      build_cmd_for_map "${map}" "${group}"
+      echo "[CMD] $(print_cmd_line "${CMD_ARR[@]}")"
+      "${CMD_ARR[@]}" 2>&1 | tee "${LOGDIR}/ga_${EXP_NAME}_${map}__${group}.log"
+    done
   done
-  echo "[Local] All maps finished."
+  echo "[Local] All maps × groups finished."
   exit 0
 fi
 
-# -------- SLURM submission path (one job per map) --------
+# -------- SLURM submission path (one job per (map, group)) --------
 mkdir -p "${SLURM_STDOUT_DIR}"
 echo "[SLURM] Submitting ${#MAPS[@]} map(s): ${MAPS[*]}"
-echo "[SLURM] EXP_OUTROOT = ${EXP_OUTROOT}"
-echo "[SLURM] STDOUT_DIR  = ${SLURM_STDOUT_DIR}"
-echo "[SLURM] DRIVER LOGS = ${LOGDIR}"
+echo "[SLURM] Groups       = ${GROUPS[*]}"
+echo "[SLURM] EXP_OUTROOT  = ${EXP_OUTROOT}"
+echo "[SLURM] STDOUT_DIR   = ${SLURM_STDOUT_DIR}"
+echo "[SLURM] DRIVER LOGS  = ${LOGDIR}"
 
 for map in "${MAPS[@]}"; do
-  job_script="$(mktemp)"
-  job_name="ga_${EXP_NAME}_${map}"
-  out_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.out"
-  err_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.err"
+  for group in "${GROUPS[@]}"; do
+    job_script="$(mktemp)"
+    job_name="ga_${EXP_NAME}_${map}__${group}"
+    out_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.out"
+    err_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.err"
 
-  # NB: bash -l as per site docs (to enable Environment Modules)
-  cat > "${job_script}" <<EOF
+    # NB: bash -l as per site docs (to enable Environment Modules)
+    cat > "${job_script}" <<EOF
 #!/bin/bash -l
 #SBATCH --job-name=${job_name}
 #SBATCH --partition=${SLURM_PARTITION}
@@ -301,41 +333,42 @@ for map in "${MAPS[@]}"; do
 #SBATCH --nodes=1
 #SBATCH --chdir=${SCRIPT_DIR}
 EOF
-  # Optional SBATCH lines
-  [[ -n "${SLURM_GRES}" ]]    && echo "#SBATCH --gres=${SLURM_GRES}"     >> "${job_script}"
-  [[ -n "${SLURM_EXCLUDE}" ]] && echo "#SBATCH --exclude=${SLURM_EXCLUDE}" >> "${job_script}"
+    # Optional SBATCH lines
+    [[ -n "${SLURM_GRES}" ]]    && echo "#SBATCH --gres=${SLURM_GRES}"     >> "${job_script}"
+    [[ -n "${SLURM_EXCLUDE}" ]] && echo "#SBATCH --exclude=${SLURM_EXCLUDE}" >> "${job_script}"
 
-  # job body
-  cat >> "${job_script}" <<'EOF'
+    # job body
+    cat >> "${job_script}" <<'EOF'
 set -euo pipefail
 module purge >/dev/null 2>&1 || true
 EOF
 
-  # per-site recommended Singularity cache/tmp on scratch
-  cat >> "${job_script}" <<EOF
+    # per-site recommended Singularity cache/tmp on scratch
+    cat >> "${job_script}" <<EOF
 export SINGULARITY_CACHEDIR="${SLUR_CACHE_DEFAULT}"
 export SINGULARITY_TMPDIR="/scratch/users/${USER}/\${SLURM_JOB_ID}/tmp"
 mkdir -p "\${SINGULARITY_CACHEDIR}" "\${SINGULARITY_TMPDIR}"
 EOF
 
-  # expose PYTHONPATH / WANDB_DIR to the job (singularity will also get them via --env)
-  cat >> "${job_script}" <<EOF
+    # expose PYTHONPATH / WANDB_DIR to the job (singularity will also get them via --env)
+    cat >> "${job_script}" <<EOF
 export PYTHONPATH="${PYTHONPATH_EXTRA}:\${PYTHONPATH:-}"
 export WANDB_DIR="${WB_DIR}"
 EOF
 
-  # actual command
-  build_cmd_for_map "${map}"
-  echo "$(print_cmd_line "${CMD_ARR[@]}")" >> "${job_script}"
+    # actual command
+    build_cmd_for_map "${map}" "${group}"
+    echo "$(print_cmd_line "${CMD_ARR[@]}")" >> "${job_script}"
 
-  # submit
-  if sb_out=$(sbatch "${job_script}"); then
-    echo "Submitted: ${sb_out}"
-  else
-    echo "Failed to submit ${job_name}" >&2
-  fi
-  rm -f "${job_script}"
-  sleep 0.3
+    # submit
+    if sb_out=$(sbatch "${job_script}"); then
+      echo "Submitted: ${sb_out}"
+    else
+      echo "Failed to submit ${job_name}" >&2
+    fi
+    rm -f "${job_script}"
+    sleep 0.3
+  done
 done
 
 echo "[SLURM] All jobs submitted."
