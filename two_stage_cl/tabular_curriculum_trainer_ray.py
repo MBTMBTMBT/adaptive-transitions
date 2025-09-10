@@ -780,6 +780,8 @@ class RayCurriculumTrainer:
                         "auc_p2": None,
                         "ap_last_k": None,
                         "ttt_fraction": None,
+                        "mean_p1_source": None,
+                        "auc_p1_source": None,
                     },
                     "train": {
                         "mean_total": None,
@@ -790,6 +792,8 @@ class RayCurriculumTrainer:
                         "auc_p2": None,
                         "ap_last_k": None,
                         "ttt_fraction": None,
+                        "mean_p1_source": None,
+                        "auc_p1_source": None,
                     },
                 },
                 "item": {
@@ -859,7 +863,7 @@ class RayCurriculumTrainer:
             else:
                 B = None
 
-            # --- pack one env/channel ---
+            # --- pack one env/channel (target/item) ---
             def _pack_env(block, chan: str, scope: str):
                 """
                 scope: 'target' or 'item' -> choose its own cap for *_total & last-k/ttt.
@@ -929,6 +933,34 @@ class RayCurriculumTrainer:
                     tgt_block, "train", scope="target"
                 )
                 item_out["item"]["train"] = _pack_env(self_block, "train", scope="item")
+
+            # ---- P1 on source curve (self-eval) but stored under target/* ----
+            # Keep evaluation conditions (chan, boundary B) identical; switch curve to self_block.
+            if B is not None and self_block is not None:
+                if cfg["compute_greedy"]:
+                    xs_s, ys_s = _ensure_curve(self_block, "greedy_mean")
+                    if xs_s.size:
+                        start_s = float(xs_s[0])
+                        end_s = float(xs_s[-1])
+                        if start_s <= B <= end_s:
+                            item_out["target"]["greedy"]["mean_p1_source"] = _mean_over(
+                                xs_s, ys_s, lo=start_s, hi=float(B), clamp_hi=None
+                            )
+                            item_out["target"]["greedy"]["auc_p1_source"] = _auc_over(
+                                xs_s, ys_s, lo=start_s, hi=float(B), clamp_hi=None
+                            )
+                if cfg["compute_train"]:
+                    xs_s, ys_s = _ensure_curve(self_block, "train_mean")
+                    if xs_s.size:
+                        start_s = float(xs_s[0])
+                        end_s = float(xs_s[-1])
+                        if start_s <= B <= end_s:
+                            item_out["target"]["train"]["mean_p1_source"] = _mean_over(
+                                xs_s, ys_s, lo=start_s, hi=float(B), clamp_hi=None
+                            )
+                            item_out["target"]["train"]["auc_p1_source"] = _auc_over(
+                                xs_s, ys_s, lo=start_s, hi=float(B), clamp_hi=None
+                            )
 
             # ---- jumpstart: absolute levels (target_start, p2_head, baseline_B) ----
             if B is not None and tgt_block is not None:
