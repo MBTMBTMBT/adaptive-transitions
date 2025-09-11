@@ -82,7 +82,8 @@ SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 SLURM_PARTITION="cpu,gpu,nmes_gpu"
 SLURM_GRES=""
 SLURM_MEM="31G"
-SLURM_CPUS="63"
+SLURM_CPUS="19"
+SLURM_NODES="8"
 SLURM_TIME_DAYS="2.0"   # supports decimal now, e.g., 1.5
 SLURM_EXCLUDE=""
 
@@ -109,6 +110,8 @@ usage() {
 Usage: $0 --exp <name> [--maps <csv>|--maps-file <path>] [--obj-groups <csv>|--obj-groups-file <path>] [options]
 Options:
   --days <float>     Walltime in DAYS (supports decimals, e.g., 0.5 -> 12h).
+  --nodes <int>      Total nodes (default: 5).
+  --cpus <int>       CPUs per node (default: 21).
 EOF
   exit 1
 }
@@ -132,6 +135,7 @@ while [[ $# -gt 0 ]]; do
     --gres)                SLURM_GRES="${2:-}"; shift ;;
     --mem)                 SLURM_MEM="${2:-}"; shift ;;
     --cpus)                SLURM_CPUS="${2:-}"; shift ;;
+    --nodes)               SLURM_NODES="${2:-}"; shift ;;
     --days)                SLURM_TIME_DAYS="${2:-}"; shift ;;
     --exclude)             SLURM_EXCLUDE="${2:-}"; shift ;;
     --script)              SCRIPT_PATH="$(cd "$(dirname "${2:-}")" && pwd)/$(basename "${2:-}")"; shift ;;
@@ -212,14 +216,11 @@ fi
 days_str="${SLURM_TIME_DAYS}"
 # compute total minutes with rounding using awk (avoids bash float)
 total_min=$(awk -v d="$days_str" 'BEGIN{printf("%d", d*24*60 + 0.5)}')
-
 d=$(( total_min / (24*60) ))
 rem=$(( total_min % (24*60) ))
 h=$(( rem / 60 ))
 m=$(( rem % 60 ))
-
 SLURM_TIME=$(printf "%d-%02d:%02d:00" "$d" "$h" "$m")
-
 echo "[SLURM] Requested days=${SLURM_TIME_DAYS} -> --time=${SLURM_TIME}"
 
 # -----------------------------
@@ -245,7 +246,6 @@ build_cmd_for_map() {
   local obj_group="$2"
   local run_name="${EXP_NAME}_${map}_${obj_group}"
   local outdir="${EXP_OUTROOT%/}/${EXP_NAME}/${map}"
-
   mkdir -p "${outdir}"
 
   if [[ -n "${CONTAINER}" ]]; then
@@ -317,45 +317,112 @@ for map in "${MAPS[@]}"; do
     out_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.out"
     err_file="${SLURM_STDOUT_DIR%/}/${job_name}_%j.err"
 
+    # Build the Python command now (stringified) for later srun on head node.
+    build_cmd_for_map "${map}" "${g}"
+    CMD_STR="$(print_cmd_line "${CMD_ARR[@]}")"
+
     # NB: bash -l as per site docs (to enable Environment Modules)
     cat > "${job_script}" <<EOF
 #!/bin/bash -l
 #SBATCH --job-name=${job_name}
 #SBATCH --partition=${SLURM_PARTITION}
 #SBATCH --cpus-per-task=${SLURM_CPUS}
+#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=${SLURM_NODES}
 #SBATCH --mem=${SLURM_MEM}
 #SBATCH --time=${SLURM_TIME}
 #SBATCH --output=${out_file}
 #SBATCH --error=${err_file}
-#SBATCH --nodes=1
 #SBATCH --chdir=${SCRIPT_DIR}
 EOF
-    # Optional SBATCH lines
     [[ -n "${SLURM_GRES}" ]]    && echo "#SBATCH --gres=${SLURM_GRES}"     >> "${job_script}"
     [[ -n "${SLURM_EXCLUDE}" ]] && echo "#SBATCH --exclude=${SLURM_EXCLUDE}" >> "${job_script}"
 
-    # job body
+    # job body: start Ray (head+workers) inside the container (or host), then run the Python command on head node.
     cat >> "${job_script}" <<'EOF'
 set -euo pipefail
 module purge >/dev/null 2>&1 || true
-EOF
 
-    # per-site recommended Singularity cache/tmp on scratch
-    cat >> "${job_script}" <<EOF
+# Basic threading hygiene
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+ulimit -n 65536 || true
+
+# Derive node list and choose head
+mapfile -t NODE_ARR < <(scontrol show hostnames "$SLURM_NODELIST")
+HEAD_NODE="${NODE_ARR[0]}"
+echo "[RAY] Nodes: ${NODE_ARR[*]}"
+echo "[RAY] Head:  ${HEAD_NODE}"
+
+# Ray ports (override with env if needed)
+RAY_PORT="${RAY_PORT:-6379}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
+
+# Helper to run inside container (or host)
+run_in_env() {
+  if [[ -n "${CONTAINER}" ]]; then
+    if [[ "${ENGINE}" == "singularity" ]]; then
+      singularity exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}" \
+        --bind "${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER}" \
+        --env PYTHONPATH="${PYTHONPATH_EXTRA}" \
+        --env WANDB_DIR="${WB_DIR}" \
+        "$CONTAINER" "$@"
+    else
+      apptainer exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}" \
+        --bind "${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT}" \
+        --env PYTHONPATH="${PYTHONPATH_EXTRA}" \
+        --env WANDB_DIR="${WB_DIR}" \
+        "$CONTAINER" "$@"
+    fi
+  else
+    "$@"
+  fi
+}
+
+echo "[RAY] Starting head on ${HEAD_NODE} ..."
+srun -N1 -n1 -w "${HEAD_NODE}" bash -lc \
+  'run_in_env ray start --head --port='"${RAY_PORT}"' --dashboard-port='"${RAY_DASHBOARD_PORT}"' --num-cpus='"${SLURM_CPUS}"' --disable-usage-stats' &
+wait
+
+# Start workers on remaining nodes
+if (( ${#NODE_ARR[@]} > 1 )); then
+  echo "[RAY] Starting workers ..."
+  for w in "${NODE_ARR[@]:1}"; do
+    srun -N1 -n1 -w "$w" bash -lc \
+      'run_in_env ray start --address '"${HEAD_NODE}:${RAY_PORT}"' --num-cpus='"${SLURM_CPUS}"' --disable-usage-stats' &
+  done
+  wait
+fi
+
+# Let Python connect to the cluster
+export RAY_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
+
+# Persist caches on scratch
 export SINGULARITY_CACHEDIR="${SLUR_CACHE_DEFAULT}"
-export SINGULARITY_TMPDIR="/scratch/users/${USER}/\${SLURM_JOB_ID}/tmp"
-mkdir -p "\${SINGULARITY_CACHEDIR}" "\${SINGULARITY_TMPDIR}"
-EOF
+export SINGULARITY_TMPDIR="/scratch/users/${USER}/${SLURM_JOB_ID}/tmp"
+mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
 
-    # expose PYTHONPATH / WANDB_DIR to the job (singularity will also get them via --env)
-    cat >> "${job_script}" <<EOF
-export PYTHONPATH="${PYTHONPATH_EXTRA}:\${PYTHONPATH:-}"
+# Expose PYTHONPATH / WANDB_DIR (also passed in container env)
+export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
 export WANDB_DIR="${WB_DIR}"
+
 EOF
 
-    # actual command
-    build_cmd_for_map "${map}" "${g}"
-    echo "$(print_cmd_line "${CMD_ARR[@]}")" >> "${job_script}"
+    # Inject the resolved Python command as RUN_CMD and run it on head node
+    printf "RUN_CMD='%s'\n" "${CMD_STR//\'/\'\"\'\"\'}" >> "${job_script}"
+    cat >> "${job_script}" <<'EOF'
+
+echo "[CMD] ${RUN_CMD}"
+srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RUN_CMD}"
+
+# Graceful Ray shutdown (best-effort)
+echo "[RAY] Stopping cluster ..."
+for n in "${NODE_ARR[@]}"; do
+  srun -N1 -n1 -w "$n" bash -lc 'ray stop >/dev/null 2>&1 || true' || true
+done
+
+EOF
 
     # submit
     if sb_out=$(sbatch "${job_script}"); then
