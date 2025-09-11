@@ -52,6 +52,9 @@ OBJECTIVE_GROUPS: Dict[str, List[str]] = {
     "perf_source_target": ["int_rand_to_source_on_source", "int_source_to_target"],
     "perf_kl_source_target": ["int_rand_to_source_on_source", "minus_target_kl"],
     "kl": ["minus_control_kl", "minus_target_kl"],
+    "auc_source_value_diff": ["auc_p1_source", "minus_value_diff"],
+    "auc_source_target_kl": ["auc_p1_source", "auc_p2", "minus_target_kl"],
+    "auc_source_target_value_diff": ["auc_p1_source", "auc_p2", "minus_value_diff"],
 }
 
 
@@ -719,6 +722,10 @@ def main():
             #      - "target_kl"
             #      - "minus_control_kl"
             #      - "minus_target_kl"
+            # 4) obj_val_diff
+            #   Keys:
+            #     - "value_diff"
+            #     - "minus_value_diff"
             # =================================================================================
 
             # =========================== Recommended setups ===========================
@@ -766,6 +773,14 @@ def main():
                         "kl_gamma": 0.99,
                         "kl_theta": 1e-3,
                         "kl_max_iterations": 1000,
+                    },
+                ),
+                (
+                    "obj_val_diff",
+                    {
+                        "diff_gamma": 0.99,
+                        "diff_theta": 1e-3,
+                        "diff_max_iterations": 1000,
                     },
                 ),
             ]

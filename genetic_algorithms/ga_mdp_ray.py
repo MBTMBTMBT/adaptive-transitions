@@ -610,6 +610,7 @@ def run_ga(
         "base_policy": base_policy.to_portable(),
         "base_occupancy": base_occupancy.to_portable(),
         "base_mdp": base_mdp.to_portable(),
+        "base_q": Q.to_portable(),
         "rand_policy": rand_policy.to_portable(),
     }
     t1 = time.perf_counter()

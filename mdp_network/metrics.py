@@ -1,22 +1,20 @@
-import math
-from collections.abc import Set
 from typing import Dict, Tuple, List
 
 import numpy as np
 
 from mdp_network import MDPNetwork
 from mdp_network.solvers import policy_evaluation
-from mdp_network.mdp_tables import PolicyTable, ValueTable, blend_policies
+from mdp_network.mdp_tables import PolicyTable, ValueTable, blend_policies, QTable
 
 
 def kl_policies(
-    prior_policy: PolicyTable,
-    target_policy: PolicyTable,
-    mdp_network: MDPNetwork,
-    gamma: float = 0.99,
-    theta: float = 1e-6,
-    max_iterations: int = 1000,
-) -> float:
+        prior_policy: PolicyTable,
+        target_policy: PolicyTable,
+        mdp_network: MDPNetwork,
+        gamma: float = 0.99,
+        theta: float = 1e-6,
+        max_iterations: int = 1000,
+    ) -> float:
     """
     Compute discounted expected sum of per-state KL(target || prior) under the target policy.
     Returns the uniform average of V(s) over mdp_network.start_states.
@@ -112,15 +110,99 @@ def kl_policies(
     return float(np.mean(start_vals))
 
 
-def performance_curve_and_integral(
-    prior_policy: PolicyTable,
+def value_diff(
     target_policy: PolicyTable,
+    prior_q: QTable,
+    target_q: QTable,
     mdp_network: MDPNetwork,
-    numpoints: int = 100,
     gamma: float = 0.99,
     theta: float = 1e-6,
     max_iterations: int = 1000,
-) -> Tuple[List[float], float]:
+) -> float:
+    """
+    Compute discounted expected sum of per-state absolute value-difference under target policy.
+    Per-state immediate reward:
+        r(s) = | E_{a~pi_t}[ Q_target(s,a) ] - E_{a~pi_t}[ Q_prior(s,a) ] |
+    Then evaluate V(s) under target_policy and MDP dynamics:
+        V(s) = r(s) + gamma * E_{a~pi_t, s'~P(·|s,a)}[ V(s') ]
+    Return the uniform average of V(s) over start states.
+    """
+    states = mdp_network.states
+    A = mdp_network.num_actions
+    start_states = list(mdp_network.start_states)
+
+    if not states or not start_states:
+        return 0.0
+
+    # -------- Per-state immediate reward from Q expectations --------
+    abs_diff_reward: Dict[int, float] = {}
+    for s in states:
+        if mdp_network.is_terminal_state(s):
+            abs_diff_reward[s] = 0.0
+            continue
+
+        action_probs = target_policy.get_action_probabilities(s)
+        # Expected Q under target policy for both prior and target Q-tables
+        exp_q_target = 0.0
+        exp_q_prior = 0.0
+        for a in range(A):
+            pi_sa = float(action_probs.get(a, 0.0))
+            if pi_sa <= 0.0:
+                continue
+            exp_q_target += pi_sa * float(target_q.get_q_value(s, a))
+            exp_q_prior  += pi_sa * float(prior_q.get_q_value(s, a))
+
+        abs_diff_reward[s] = abs(exp_q_target - exp_q_prior)
+
+    # -------- Policy evaluation under target policy with state-only rewards --------
+    V: Dict[int, float] = {s: 0.0 for s in states}
+
+    for _ in range(max_iterations):
+        max_delta = 0.0
+        for s in states:
+            if mdp_network.is_terminal_state(s):
+                V[s] = 0.0
+                continue
+
+            old_v = V[s]
+
+            # Expected next value under target policy and MDP dynamics
+            exp_next = 0.0
+            action_probs = target_policy.get_action_probabilities(s)
+            for a, pi_sa in action_probs.items():
+                if pi_sa <= 0.0:
+                    continue
+                trans = mdp_network.get_transition_probabilities(s, a)
+                if not trans:
+                    # Fallback: stay in s if no explicit transitions
+                    exp_next += pi_sa * V[s]
+                else:
+                    for sp, p in trans.items():
+                        exp_next += pi_sa * p * V[sp]
+
+            new_v = abs_diff_reward[s] + gamma * exp_next
+            V[s] = new_v
+
+            delta = abs(new_v - old_v)
+            max_delta = max(max_delta, delta)
+
+        if max_delta < theta:
+            break
+
+    # -------- Average over start states --------
+    start_vals = [V[s] for s in start_states]
+    return float(np.mean(start_vals))
+
+
+def performance_curve_and_integral(
+        prior_policy: PolicyTable,
+        target_policy: PolicyTable,
+        mdp_network: MDPNetwork,
+        numpoints: int = 100,
+        gamma: float = 0.99,
+        theta: float = 1e-6,
+        max_iterations: int = 1000,
+    ) -> Tuple[List[float], float]:
     """
     Evaluate avg start-state value while blending from prior(0) -> target(1).
 

@@ -5,9 +5,9 @@ from typing import Any, List, Tuple, Dict, Sequence, Callable, Union, Optional
 from mdp_network import MDPNetwork
 from mdp_network.mdp_tables import (
     PolicyTable,
-    q_table_to_policy,
+    q_table_to_policy, QTable,
 )
-from mdp_network.metrics import kl_policies, performance_curve_and_integral
+from mdp_network.metrics import kl_policies, performance_curve_and_integral, value_diff
 from mdp_network.solvers import optimal_value_iteration, compute_occupancy_measure
 from two_stage_cl.tabular_curriculum_trainer_ray import run_curriculum
 
@@ -109,6 +109,57 @@ def obj_multi_kl(
         "target_kl": target_kl,
         "minus_control_kl": obj_control_kl,
         "minus_target_kl": obj_target_kl,
+    }
+
+
+def obj_val_diff(
+    mdp: MDPNetwork,
+    shared: Dict[str, Any],
+    *,
+    diff_gamma: float | None = None,
+    diff_theta: float | None = None,
+    diff_max_iterations: int | None = None,
+) -> Dict[str, Optional[float]]:
+    """
+    Outputs:
+      - 'kl_neg' (maximize): -KL(base||cand_opt) with occupancy weighting.
+      - 'perf_integral' (maximize): integral(random -> cand_opt) on candidate MDP.
+    """
+    solver = shared["solver"]
+    vi_gamma = float(solver.get("vi_gamma", 0.99))
+    vi_theta = float(solver.get("vi_theta", 1e-6))
+    vi_max_iterations = int(solver.get("vi_max_iterations", 1000))
+
+    pgamma = float(vi_gamma) if diff_gamma is None else float(diff_gamma)
+    ptheta = float(vi_theta) if diff_theta is None else float(diff_theta)
+    pmax_iter = (
+        int(vi_max_iterations) if diff_max_iterations is None else int(diff_max_iterations)
+    )
+
+    pre = shared["precomputed"]
+    target_policy = PolicyTable.from_portable(pre["base_policy"])
+    target_q = QTable.from_portable(pre["base_q"])
+
+    _, source_q = optimal_value_iteration(
+        mdp,
+        gamma=float(vi_gamma),
+        theta=float(vi_theta),
+        max_iterations=int(vi_max_iterations),
+    )
+
+    val_diff = value_diff(
+        target_policy=target_policy,
+        prior_q=source_q,
+        target_q=target_q,
+        mdp_network=mdp,
+        gamma=float(pgamma),
+        theta=float(ptheta),
+        max_iterations=int(pmax_iter),
+    )
+
+    return {
+        "value_diff": val_diff,
+        "minus_value_diff": -float(val_diff),
     }
 
 
@@ -380,4 +431,5 @@ SCORE_FNS: Dict[str, Callable[..., Dict[str, Optional[float]]]] = {
     "obj_multi_kl": obj_multi_kl,
     "obj_multi_perf": obj_multi_perf,
     "obj_cl_phase_mean": obj_cl_phase_mean,
+    "obj_val_diff": obj_val_diff,
 }

@@ -82,7 +82,7 @@ SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 SLURM_PARTITION="cpu"
 SLURM_GRES=""
 SLURM_MEM="31G"
-SLURM_CPUS="52"
+SLURM_CPUS="63"
 SLURM_TIME_DAYS="2.0"   # supports decimal now, e.g., 1.5
 SLURM_EXCLUDE=""
 
@@ -96,8 +96,8 @@ SLUR_CACHE_DEFAULT="/scratch/users/${USER}/singularity/cache"
 # CLI
 # -----------------------------
 EXP_NAME=""
-MAPS_INPUT="8x8,env2,env3,env4"  # env0,env1
-OBJ_GROUPS_INPUT="auc_source_target,perf_source_target,perf_kl_source_target,kl"
+MAPS_INPUT="8x8,env3,env4"  # env0,env1,env2
+OBJ_GROUPS_INPUT="auc_source_target,perf_source_target,perf_kl_source_target,kl,auc_source_value_diff,auc_source_target_kl,auc_source_target_value_diff"
 EXTRA_ARGS=()
 LOCAL_EXP_OUTROOT="${LOCAL_EXP_OUTROOT_DEFAULT}"
 SLURM_EXP_OUTROOT="${SLURM_EXP_OUTROOT_DEFAULT}"
