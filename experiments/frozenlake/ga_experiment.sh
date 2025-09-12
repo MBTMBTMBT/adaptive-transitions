@@ -406,12 +406,11 @@ else
   BASE_CMD=""
 fi
 
-# Ray CLI (module form) inside container/host
-PY_EXE="${PYTHON:-python3}"
-RAY_CLI="${PY_EXE} -m ray"
+# We call the ray CLI directly inside the container.
+RAY_CLI="ray"
 
-# Resolve head IP (prefer DNS for the hostname)
-HEAD_IP="$(srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "getent ahostsv4 ${HEAD_NODE} | awk '{print \$1; exit}' || hostname -I | awk '{print \$1}'" | tr -d '\r')"
+# Resolve head IP (pick a routable IPv4, not 127/169.254)
+HEAD_IP="$(srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | grep -v -E '^127\\.|^169\\.254\\.' | head -n1 || hostname -I | tr ' ' '\\n' | grep -v -E '^127\\.|^169\\.254\\.' | head -n1" | tr -d '\r')"
 echo "[RAY] Head IP: ${HEAD_IP}"
 
 # Pre-stop any leftover Ray
@@ -475,7 +474,7 @@ fi
 if (( ${#NODE_ARR[@]} > 1 )); then
   echo "[RAY] Starting workers ..."
   for w in "${NODE_ARR[@]:1}"; do
-    WIP="$(srun -N1 -n1 -w "$w" bash -lc "getent ahostsv4 ${w} | awk '{print \$1; exit}' || hostname -I | awk '{print \$1}'" | tr -d '\r')"
+    WIP="$(srun -N1 -n1 -w "$w" bash -lc "ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | grep -v -E '^127\\.|^169\\.254\\.' | head -n1 || hostname -I | tr ' ' '\\n' | grep -v -E '^127\\.|^169\\.254\\.' | head -n1" | tr -d '\r')"
     srun -N1 -n1 -w "$w" bash -lc "${WORKER_BASE} --node-ip-address=${WIP}" &
   done
   wait
@@ -483,17 +482,9 @@ fi
 
 # Quick sanity check
 if [[ -n "${BASE_CMD}" ]]; then
-  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${BASE_CMD} ${PY_EXE} - <<'PY'
-import ray, json, os
-ray.init(address=os.environ.get('RAY_ADDRESS', 'auto'))
-print('[SANITY] Resources:', json.dumps(ray.cluster_resources(), sort_keys=True))
-PY"
+  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${BASE_CMD} ${RAY_CLI} status --address ${HEAD_IP}:${RAY_PORT}"
 else
-  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${PY_EXE} - <<'PY'
-import ray, json, os
-ray.init(address=os.environ.get('RAY_ADDRESS', 'auto'))
-print('[SANITY] Resources:', json.dumps(ray.cluster_resources(), sort_keys=True))
-PY"
+  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RAY_CLI} status --address ${HEAD_IP}:${RAY_PORT}"
 fi
 
 # Export ray address for the experiment run
