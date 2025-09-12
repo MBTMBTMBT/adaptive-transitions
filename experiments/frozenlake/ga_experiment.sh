@@ -355,13 +355,12 @@ PYTHONPATH_EXTRA="${PYTHONPATH_EXTRA}"
 WB_DIR="${WB_DIR}"
 export SINGULARITY_CACHEDIR="${SLUR_CACHE_DEFAULT}"
 export SINGULARITY_TMPDIR="/scratch/users/${USER}/\${SLURM_JOB_ID}/tmp"
+export RAY_TMPDIR="/scratch/users/${USER}/\${SLURM_JOB_ID}/ray"
 EOF
 
     # --- Job body: start Ray head+workers, then run Python on head ---
     cat >> "${job_script}" <<'EOF'
 set -euo pipefail
-set -x  # debug echo
-
 module purge >/dev/null 2>&1 || true
 
 # Basic threading hygiene
@@ -370,12 +369,13 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 ulimit -n 65536 || true
 
-# Prepare Singularity cache/tmp BEFORE any singularity/apptainer exec
+# IMPORTANT: prepare Singularity cache/tmp & Ray temp dirs on *this node* first
 : "${SINGULARITY_CACHEDIR:="/scratch/users/${USER}/singularity/cache"}"
 : "${SINGULARITY_TMPDIR:="/scratch/users/${USER}/${SLURM_JOB_ID}/tmp"}"
-mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+: "${RAY_TMPDIR:="/scratch/users/${USER}/${SLURM_JOB_ID}/ray"}"
+mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}" "${RAY_TMPDIR}"
 
-# Nodes
+# Derive node list and choose head
 mapfile -t NODE_ARR < <(scontrol show hostnames "$SLURM_NODELIST")
 HEAD_NODE="${NODE_ARR[0]}"
 echo "[RAY] Nodes: ${NODE_ARR[*]}"
@@ -385,115 +385,80 @@ echo "[RAY] Head:  ${HEAD_NODE}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 
-# Runtime NV flag only if GPU devices exist
+# Decide --nv at runtime only if GPU devices exist (avoid noisy warnings)
 RUNTIME_NV_FLAG=""
 if [[ -e /dev/nvidiactl || -e /dev/nvidia0 ]]; then
   RUNTIME_NV_FLAG="--nv"
 fi
 
-# Base container exec
-if [[ -n "${CONTAINER}" ]]; then
-  if [[ "${ENGINE}" == "singularity" ]]; then
-    BASE_CMD="singularity exec ${RUNTIME_NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
-      --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER}\" \
-      --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
-  else
-    BASE_CMD="apptainer exec ${RUNTIME_NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
-      --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT}\" \
-      --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
-  fi
-else
-  BASE_CMD=""
-fi
+# Build base singularity exec (all ray ops happen in the container)
+BASE_CMD="singularity exec ${RUNTIME_NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
+  --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER}\" \
+  --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
 
-# We call the ray CLI directly inside the container.
-RAY_CLI="ray"
-
-# Resolve head IP (pick a routable IPv4, not 127/169.254)
-HEAD_IP="$(srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | grep -v -E '^127\\.|^169\\.254\\.' | head -n1 || hostname -I | tr ' ' '\\n' | grep -v -E '^127\\.|^169\\.254\\.' | head -n1" | tr -d '\r')"
+# Resolve the real IP on head node (avoid binding to wrong iface)
+HEAD_IP="$(srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | grep -v -E '^127\\.|^169\\.254\\.' | head -n1 || hostname -I | tr ' ' '\n' | grep -v -E '^127\\.|^169\\.254\\.' | head -n1" | tr -d '\r')"
 echo "[RAY] Head IP: ${HEAD_IP}"
 
-# Pre-stop any leftover Ray
+# Best-effort cleanup: stop any leftover Ray on all allocated nodes (in container)
 for n in "${NODE_ARR[@]}"; do
-  if [[ -n "${BASE_CMD}" ]]; then
-    srun -N1 -n1 -w "$n" bash -lc "${BASE_CMD} ${RAY_CLI} stop >/dev/null 2>&1 || true" || true
-  else
-    srun -N1 -n1 -w "$n" bash -lc "${RAY_CLI} stop >/dev/null 2>&1 || true" || true
-  fi
+  srun -N1 -n1 -w "$n" bash -lc "mkdir -p \"${SINGULARITY_CACHEDIR}\" \"${SINGULARITY_TMPDIR}\"; ${BASE_CMD} ray stop >/dev/null 2>&1 || true" || true
 done
 
-# Start head in container/host
-if [[ -n "${BASE_CMD}" ]]; then
-  HEAD_CMD="${BASE_CMD} ${RAY_CLI} start --head \
-    --node-ip-address=${HEAD_IP} \
-    --port=${RAY_PORT} \
-    --dashboard-port=${RAY_DASHBOARD_PORT} \
-    --dashboard-host=0.0.0.0 \
-    --num-cpus=${SLURM_CPUS_PER_TASK:-1} \
-    --disable-usage-stats"
-else
-  HEAD_CMD="${RAY_CLI} start --head \
-    --node-ip-address=${HEAD_IP} \
-    --port=${RAY_PORT} \
-    --dashboard-port=${RAY_DASHBOARD_PORT} \
-    --dashboard-host=0.0.0.0 \
-    --num-cpus=${SLURM_CPUS_PER_TASK:-1} \
-    --disable-usage-stats"
-fi
-
+# Start head (daemonized by ray)
+HEAD_CMD="${BASE_CMD} ray start --head \
+  --node-ip-address=${HEAD_IP} \
+  --port=${RAY_PORT} \
+  --dashboard-port=${RAY_DASHBOARD_PORT} \
+  --dashboard-host=0.0.0.0 \
+  --num-cpus=${SLURM_CPUS_PER_TASK:-1} \
+  --disable-usage-stats \
+  --temp-dir=${RAY_TMPDIR}"
 echo "[RAY] Starting head on ${HEAD_NODE} ..."
 srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${HEAD_CMD}"
 
-# Wait for GCS to become ready
+# Health check via Python inside the container
 echo "[RAY] Waiting for GCS @ ${HEAD_IP}:${RAY_PORT} ..."
 READY=0
-for i in {1..90}; do
-  if [[ -n "${BASE_CMD}" ]]; then
-    srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${BASE_CMD} ${RAY_CLI} status --address ${HEAD_IP}:${RAY_PORT} >/dev/null 2>&1" \
-      && READY=1 && break || true
-  else
-    srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RAY_CLI} status --address ${HEAD_IP}:${RAY_PORT} >/dev/null 2>&1" \
-      && READY=1 && break || true
-  fi
+for i in {1..90}; do  # ~3 min
+  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${BASE_CMD} python3 - <<'PY'
+import sys
+try:
+    import ray
+    ray.init(address='"'"'${HEAD_IP}:${RAY_PORT}'"'"', namespace='"'"'health'"'"', ignore_reinit_error=True, log_to_driver=False)
+    print('HC_OK')
+    sys.exit(0)
+except Exception as e:
+    print('HC_ERR', e)
+    sys.exit(1)
+PY" && READY=1 && break || true
   sleep 2
 done
 if [[ "${READY}" != "1" ]]; then
-  echo "[RAY] GCS not ready in time; abort."
+  echo "[RAY] GCS not ready; dumping head logs ..."
+  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "tail -n 200 /tmp/ray/session_latest/logs/* 2>/dev/null || true"
   exit 1
 fi
 echo "[RAY] GCS is ready."
 
-# Worker base
-if [[ -n "${BASE_CMD}" ]]; then
-  WORKER_BASE="${BASE_CMD} ${RAY_CLI} start --address ${HEAD_IP}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
-else
-  WORKER_BASE="${RAY_CLI} start --address ${HEAD_IP}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
-fi
-
-# Start workers
+# Start workers on remaining nodes (each binds to自己的IP；先准备目录再起ray)
 if (( ${#NODE_ARR[@]} > 1 )); then
   echo "[RAY] Starting workers ..."
   for w in "${NODE_ARR[@]:1}"; do
-    WIP="$(srun -N1 -n1 -w "$w" bash -lc "ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | grep -v -E '^127\\.|^169\\.254\\.' | head -n1 || hostname -I | tr ' ' '\\n' | grep -v -E '^127\\.|^169\\.254\\.' | head -n1" | tr -d '\r')"
-    srun -N1 -n1 -w "$w" bash -lc "${WORKER_BASE} --node-ip-address=${WIP}" &
+    srun -N1 -n1 -w "$w" bash -lc "mkdir -p \"${SINGULARITY_CACHEDIR}\" \"${SINGULARITY_TMPDIR}\" \"${RAY_TMPDIR}\"; \
+      WIP=\$(ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | grep -v -E '^127\\.|^169\\.254\\.' | head -n1 || hostname -I | awk '{print \$1}'); \
+      ${BASE_CMD} ray start --address ${HEAD_IP}:${RAY_PORT} --node-ip-address=\${WIP} \
+      --num-cpus=\${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats --temp-dir=${RAY_TMPDIR}" &
   done
   wait
 fi
 
-# Quick sanity check
-if [[ -n "${BASE_CMD}" ]]; then
-  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${BASE_CMD} ${RAY_CLI} status --address ${HEAD_IP}:${RAY_PORT}"
-else
-  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RAY_CLI} status --address ${HEAD_IP}:${RAY_PORT}"
-fi
-
-# Export ray address for the experiment run
+# Tell the Python process where to connect
 export RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
 
-# Expose PYTHONPATH / WANDB_DIR
+# Expose PYTHONPATH / WANDB_DIR (also passed in container env)
 export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
 export WANDB_DIR="${WB_DIR}"
-
 EOF
 
     # Inject the resolved Python command and run on head
@@ -505,11 +470,7 @@ srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RUN_CMD}"
 # Graceful Ray shutdown (best-effort)
 echo "[RAY] Stopping cluster ..."
 for n in "${NODE_ARR[@]}"; do
-  if [[ -n "${BASE_CMD}" ]]; then
-    srun -N1 -n1 -w "$n" bash -lc "${BASE_CMD} ${RAY_CLI} stop >/dev/null 2>&1 || true" || true
-  else
-    srun -N1 -n1 -w "$n" bash -lc "${RAY_CLI} stop >/dev/null 2>&1 || true" || true
-  fi
+  srun -N1 -n1 -w "$n" bash -lc 'ray stop >/dev/null 2>&1 || true' || true
 done
 EOF
 
