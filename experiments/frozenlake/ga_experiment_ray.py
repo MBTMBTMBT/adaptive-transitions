@@ -485,10 +485,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=50)
+    p.add_argument("--ga-pop-size", type=int, default=150)
     p.add_argument("--ga-generations", type=int, default=250)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=5)
+    p.add_argument("--ga-elitism", type=int, default=15)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=str2bool, default=True)
@@ -632,7 +632,12 @@ def main():
 
     # Init Ray
     if not ray.is_initialized():
-        ray.init(ignore_reinit_error=True, log_to_driver=False)
+        # Connect to external cluster if RAY_ADDRESS is provided; otherwise start local.
+        addr = os.environ.get("RAY_ADDRESS")
+        if addr:
+            ray.init(address=addr, ignore_reinit_error=True, log_to_driver=False)
+        else:
+            ray.init(ignore_reinit_error=True, log_to_driver=False)
 
     # W&B actor
     init_kwargs: Dict[str, Any] = {
