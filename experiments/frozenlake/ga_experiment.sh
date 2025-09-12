@@ -419,13 +419,15 @@ srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${HEAD_CMD}"
 
 # Health check via Python inside the container
 echo "[RAY] Waiting for GCS @ ${HEAD_IP}:${RAY_PORT} ..."
+export RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
+
 READY=0
 for i in {1..90}; do  # ~3 min
-  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${BASE_CMD} python3 - <<'PY'
+  srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "export RAY_ADDRESS='${HEAD_IP}:${RAY_PORT}'; ${BASE_CMD:+${BASE_CMD} }python3 - <<'PY'
 import sys
 try:
     import ray
-    ray.init(address='"'"'${HEAD_IP}:${RAY_PORT}'"'"', namespace='"'"'health'"'"', ignore_reinit_error=True, log_to_driver=False)
+    ray.init(address='auto', namespace='health', log_to_driver=False)
     print('HC_OK')
     sys.exit(0)
 except Exception as e:
@@ -434,8 +436,9 @@ except Exception as e:
 PY" && READY=1 && break || true
   sleep 2
 done
+
 if [[ "${READY}" != "1" ]]; then
-  echo "[RAY] GCS not ready; dumping head logs ..."
+  echo "[RAY] GCS not ready; head logs tail:"
   srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "tail -n 200 /tmp/ray/session_latest/logs/* 2>/dev/null || true"
   exit 1
 fi
