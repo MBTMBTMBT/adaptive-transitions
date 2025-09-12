@@ -82,9 +82,9 @@ SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 SLURM_PARTITION="cpu,gpu,nmes_gpu"
 SLURM_GRES=""
 SLURM_MEM="31G"
-SLURM_CPUS="21"
-SLURM_NODES="5"
-SLURM_TIME_DAYS="2.0"   # supports decimal now, e.g., 1.5
+SLURM_CPUS="21"          # per-node CPUs (default 21)
+SLURM_NODES="5"          # total nodes (default 5)
+SLURM_TIME_DAYS="2.0"    # supports decimal now, e.g., 1.5
 SLURM_EXCLUDE=""
 
 # SLURM stdout/err directory (on scratch, recommended by site docs)
@@ -110,7 +110,7 @@ usage() {
 Usage: $0 --exp <name> [--maps <csv>|--maps-file <path>] [--obj-groups <csv>|--obj-groups-file <path>] [options]
 Options:
   --days <float>     Walltime in DAYS (supports decimals, e.g., 0.5 -> 12h).
-  --nodes <int>      Total nodes (default: 5).
+  --nodes <int>      Total nodes for a Ray-backed job (default: 5).
   --cpus <int>       CPUs per node (default: 21).
 EOF
   exit 1
@@ -216,11 +216,14 @@ fi
 days_str="${SLURM_TIME_DAYS}"
 # compute total minutes with rounding using awk (avoids bash float)
 total_min=$(awk -v d="$days_str" 'BEGIN{printf("%d", d*24*60 + 0.5)}')
+
 d=$(( total_min / (24*60) ))
 rem=$(( total_min % (24*60) ))
 h=$(( rem / 60 ))
 m=$(( rem % 60 ))
+
 SLURM_TIME=$(printf "%d-%02d:%02d:00" "$d" "$h" "$m")
+
 echo "[SLURM] Requested days=${SLURM_TIME_DAYS} -> --time=${SLURM_TIME}"
 
 # -----------------------------
@@ -246,6 +249,7 @@ build_cmd_for_map() {
   local obj_group="$2"
   local run_name="${EXP_NAME}_${map}_${obj_group}"
   local outdir="${EXP_OUTROOT%/}/${EXP_NAME}/${map}"
+
   mkdir -p "${outdir}"
 
   if [[ -n "${CONTAINER}" ]]; then
@@ -326,9 +330,9 @@ for map in "${MAPS[@]}"; do
 #!/bin/bash -l
 #SBATCH --job-name=${job_name}
 #SBATCH --partition=${SLURM_PARTITION}
-#SBATCH --cpus-per-task=${SLURM_CPUS}
-#SBATCH --ntasks-per-node=1
 #SBATCH --nodes=${SLURM_NODES}
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=${SLURM_CPUS}
 #SBATCH --mem=${SLURM_MEM}
 #SBATCH --time=${SLURM_TIME}
 #SBATCH --output=${out_file}
@@ -338,7 +342,21 @@ EOF
     [[ -n "${SLURM_GRES}" ]]    && echo "#SBATCH --gres=${SLURM_GRES}"     >> "${job_script}"
     [[ -n "${SLURM_EXCLUDE}" ]] && echo "#SBATCH --exclude=${SLURM_EXCLUDE}" >> "${job_script}"
 
-    # job body: start Ray (head+workers) inside the container (or host), then run the Python command on head node.
+    # --- Bake variables into the job script (avoid set -u issues) ---
+    cat >> "${job_script}" <<EOF
+CONTAINER="${CONTAINER}"
+ENGINE="${ENGINE}"
+NV_FLAG="${NV_FLAG}"
+SCRIPT_DIR="${SCRIPT_DIR}"
+PROJ_ROOT="${PROJ_ROOT}"
+EXP_OUTROOT="${EXP_OUTROOT}"
+PYTHONPATH_EXTRA="${PYTHONPATH_EXTRA}"
+WB_DIR="${WB_DIR}"
+export SINGULARITY_CACHEDIR="${SLUR_CACHE_DEFAULT}"
+export SINGULARITY_TMPDIR="/scratch/users/${USER}/\${SLURM_JOB_ID}/tmp"
+EOF
+
+    # --- Job body: start Ray head+workers, then run Python on head ---
     cat >> "${job_script}" <<'EOF'
 set -euo pipefail
 module purge >/dev/null 2>&1 || true
@@ -359,60 +377,46 @@ echo "[RAY] Head:  ${HEAD_NODE}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 
-# Helper to run inside container (or host)
-run_in_env() {
-  if [[ -n "${CONTAINER}" ]]; then
-    if [[ "${ENGINE}" == "singularity" ]]; then
-      singularity exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}" \
-        --bind "${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER}" \
-        --env PYTHONPATH="${PYTHONPATH_EXTRA}" \
-        --env WANDB_DIR="${WB_DIR}" \
-        "$CONTAINER" "$@"
-    else
-      apptainer exec ${NV_FLAG:+$NV_FLAG} --pwd "${SCRIPT_DIR}" \
-        --bind "${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT}" \
-        --env PYTHONPATH="${PYTHONPATH_EXTRA}" \
-        --env WANDB_DIR="${WB_DIR}" \
-        "$CONTAINER" "$@"
-    fi
+# Build container exec prefix once
+RAY_LAUNCH=""
+if [[ -n "${CONTAINER}" ]]; then
+  if [[ "${ENGINE}" == "singularity" ]]; then
+    RAY_LAUNCH="singularity exec ${NV_FLAG:+$NV_FLAG} --pwd ${SCRIPT_DIR} \
+      --bind ${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER} \
+      --env PYTHONPATH=${PYTHONPATH_EXTRA} --env WANDB_DIR=${WB_DIR}"
   else
-    "$@"
+    RAY_LAUNCH="apptainer exec ${NV_FLAG:+$NV_FLAG} --pwd ${SCRIPT_DIR} \
+      --bind ${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT} \
+      --env PYTHONPATH=${PYTHONPATH_EXTRA} --env WANDB_DIR=${WB_DIR}"
   fi
-}
+fi
 
 echo "[RAY] Starting head on ${HEAD_NODE} ..."
-srun -N1 -n1 -w "${HEAD_NODE}" bash -lc \
-  'run_in_env ray start --head --port='"${RAY_PORT}"' --dashboard-port='"${RAY_DASHBOARD_PORT}"' --num-cpus='"${SLURM_CPUS}"' --disable-usage-stats' &
+srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RAY_LAUNCH} ray start --head --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
 wait
 
 # Start workers on remaining nodes
 if (( ${#NODE_ARR[@]} > 1 )); then
   echo "[RAY] Starting workers ..."
   for w in "${NODE_ARR[@]:1}"; do
-    srun -N1 -n1 -w "$w" bash -lc \
-      'run_in_env ray start --address '"${HEAD_NODE}:${RAY_PORT}"' --num-cpus='"${SLURM_CPUS}"' --disable-usage-stats' &
+    srun -N1 -n1 -w "$w" bash -lc "${RAY_LAUNCH} ray start --address ${HEAD_NODE}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats" &
   done
   wait
 fi
 
-# Let Python connect to the cluster
 export RAY_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
 
-# Persist caches on scratch
-export SINGULARITY_CACHEDIR="${SLUR_CACHE_DEFAULT}"
-export SINGULARITY_TMPDIR="/scratch/users/${USER}/${SLURM_JOB_ID}/tmp"
+# Ensure cache/tmp dirs exist (were baked above)
 mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
 
 # Expose PYTHONPATH / WANDB_DIR (also passed in container env)
 export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
 export WANDB_DIR="${WB_DIR}"
-
 EOF
 
-    # Inject the resolved Python command as RUN_CMD and run it on head node
+    # Inject the resolved Python command and run on head
     printf "RUN_CMD='%s'\n" "${CMD_STR//\'/\'\"\'\"\'}" >> "${job_script}"
     cat >> "${job_script}" <<'EOF'
-
 echo "[CMD] ${RUN_CMD}"
 srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RUN_CMD}"
 
@@ -421,7 +425,6 @@ echo "[RAY] Stopping cluster ..."
 for n in "${NODE_ARR[@]}"; do
   srun -N1 -n1 -w "$n" bash -lc 'ray stop >/dev/null 2>&1 || true' || true
 done
-
 EOF
 
     # submit
