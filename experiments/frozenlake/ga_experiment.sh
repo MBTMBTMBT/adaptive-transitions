@@ -268,7 +268,7 @@ build_cmd_for_map() {
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
                "${CONTAINER}" "${PYTHON}" "${SCRIPT_PATH}"
-               --run-name "${run_name}" --map "${map}" --outdir="${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
+               --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
     fi
   else
     # Host venv
@@ -383,13 +383,18 @@ echo "[RAY] Head:  ${HEAD_NODE}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 
+# Best-effort cleanup: stop any leftover Ray on all allocated nodes
+for n in "${NODE_ARR[@]}"; do
+  srun -N1 -n1 -w "$n" bash -lc 'ray stop >/dev/null 2>&1 || true' || true
+done
+
 # Decide --nv at runtime only if GPU devices exist (avoid noisy warnings)
 RUNTIME_NV_FLAG=""
 if [[ -e /dev/nvidiactl || -e /dev/nvidia0 ]]; then
   RUNTIME_NV_FLAG="--nv"
 fi
 
-# Build concrete commands (with or without container)
+# Base exec (with or without container)
 if [[ -n "${CONTAINER}" ]]; then
   if [[ "${ENGINE}" == "singularity" ]]; then
     BASE_CMD="singularity exec ${RUNTIME_NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
@@ -400,27 +405,72 @@ if [[ -n "${CONTAINER}" ]]; then
       --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT}\" \
       --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
   fi
-  HEAD_CMD="${BASE_CMD} ray start --head --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
-  WORKER_CMD_TEMPLATE="${BASE_CMD} ray start --address ${HEAD_NODE}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
 else
-  HEAD_CMD="ray start --head --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
-  WORKER_CMD_TEMPLATE="ray start --address ${HEAD_NODE}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
+  BASE_CMD=""
+fi
+
+# Resolve the real IP on head node (avoid binding to wrong iface)
+HEAD_IP="$(srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "hostname -I | awk '{print \$1}'" | tr -d '\r')"
+echo "[RAY] Head IP: ${HEAD_IP}"
+
+# Start head with explicit node-ip-address; let it daemonize
+if [[ -n "${BASE_CMD}" ]]; then
+  HEAD_CMD="${BASE_CMD} ray start --head \
+    --node-ip-address=${HEAD_IP} \
+    --port=${RAY_PORT} \
+    --dashboard-port=${RAY_DASHBOARD_PORT} \
+    --dashboard-host=0.0.0.0 \
+    --num-cpus=\${SLURM_CPUS_PER_TASK:-1} \
+    --disable-usage-stats"
+else
+  HEAD_CMD="ray start --head \
+    --node-ip-address=${HEAD_IP} \
+    --port=${RAY_PORT} \
+    --dashboard-port=${RAY_DASHBOARD_PORT} \
+    --dashboard-host=0.0.0.0 \
+    --num-cpus=\${SLURM_CPUS_PER_TASK:-1} \
+    --disable-usage-stats"
 fi
 
 echo "[RAY] Starting head on ${HEAD_NODE} ..."
 srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${HEAD_CMD}"
-wait
+
+# Wait for GCS to become ready (poll with ray status)
+echo "[RAY] Waiting for GCS @ ${HEAD_IP}:${RAY_PORT} ..."
+READY=0
+for i in {1..90}; do  # ~3 min
+  if [[ -n "${BASE_CMD}" ]]; then
+    srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${BASE_CMD} ray status --address ${HEAD_IP}:${RAY_PORT} >/dev/null 2>&1" && READY=1 && break || true
+  else
+    srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "ray status --address ${HEAD_IP}:${RAY_PORT} >/dev/null 2>&1" && READY=1 && break || true
+  fi
+  sleep 2
+done
+if [[ "${READY}" != "1" ]]; then
+  echo "[RAY] GCS not ready in time; abort."
+  exit 1
+fi
+echo "[RAY] GCS is ready."
+
+# Worker template command (address to head is by IP), each worker binds to its own IP
+if [[ -n "${BASE_CMD}" ]]; then
+  WORKER_BASE="${BASE_CMD} ray start --address ${HEAD_IP}:${RAY_PORT} --num-cpus=\${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
+else
+  WORKER_BASE="ray start --address ${HEAD_IP}:${RAY_PORT} --num-cpus=\${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
+fi
 
 # Start workers on remaining nodes
 if (( ${#NODE_ARR[@]} > 1 )); then
   echo "[RAY] Starting workers ..."
   for w in "${NODE_ARR[@]:1}"; do
-    srun -N1 -n1 -w "$w" bash -lc "${WORKER_CMD_TEMPLATE}" &
+    WIP="$(srun -N1 -n1 -w "$w" bash -lc "hostname -I | awk '{print \$1}'" | tr -d '\r')"
+    srun -N1 -n1 -w "$w" bash -lc "${WORKER_BASE} --node-ip-address=${WIP}" &
   done
   wait
 fi
 
-export RAY_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
+# Tell the Python process where to connect
+export RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
 
 # Expose PYTHONPATH / WANDB_DIR (also passed in container env)
 export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
