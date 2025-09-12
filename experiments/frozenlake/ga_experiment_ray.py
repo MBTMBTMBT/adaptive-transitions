@@ -632,12 +632,7 @@ def main():
 
     # Init Ray
     if not ray.is_initialized():
-        # Connect to external cluster if RAY_ADDRESS is provided; otherwise start local.
-        addr = os.environ.get("RAY_ADDRESS")
-        if addr:
-            ray.init(address=addr, ignore_reinit_error=True, log_to_driver=False)
-        else:
-            ray.init(ignore_reinit_error=True, log_to_driver=False)
+        ray.init(ignore_reinit_error=True, log_to_driver=False)
 
     # W&B actor
     init_kwargs: Dict[str, Any] = {
