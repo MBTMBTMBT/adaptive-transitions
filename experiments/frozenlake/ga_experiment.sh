@@ -79,7 +79,7 @@ LOCAL_EXP_OUTROOT_DEFAULT="${PROJ_ROOT}/experiment_output"
 SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 
 # SLURM resources
-SLURM_PARTITION="cpu,nmes_cpu,gpu,nmes_gpu"
+SLURM_PARTITION="cpu,gpu,nmes_gpu"
 SLURM_GRES=""
 SLURM_MEM="47G"
 SLURM_CPUS="52"
