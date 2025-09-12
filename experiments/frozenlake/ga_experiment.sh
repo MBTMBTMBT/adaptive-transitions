@@ -377,36 +377,40 @@ echo "[RAY] Head:  ${HEAD_NODE}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 
-# Build container exec prefix once
-RAY_LAUNCH=""
+# Build concrete commands (with or without container)
 if [[ -n "${CONTAINER}" ]]; then
   if [[ "${ENGINE}" == "singularity" ]]; then
-    RAY_LAUNCH="singularity exec ${NV_FLAG:+$NV_FLAG} --pwd ${SCRIPT_DIR} \
-      --bind ${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER} \
-      --env PYTHONPATH=${PYTHONPATH_EXTRA} --env WANDB_DIR=${WB_DIR}"
+    BASE_CMD="singularity exec ${NV_FLAG:+$NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
+      --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER}\" \
+      --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
   else
-    RAY_LAUNCH="apptainer exec ${NV_FLAG:+$NV_FLAG} --pwd ${SCRIPT_DIR} \
-      --bind ${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT} \
-      --env PYTHONPATH=${PYTHONPATH_EXTRA} --env WANDB_DIR=${WB_DIR}"
+    BASE_CMD="apptainer exec ${NV_FLAG:+$NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
+      --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT}\" \
+      --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
   fi
+  HEAD_CMD="${BASE_CMD} ray start --head --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
+  WORKER_CMD_TEMPLATE="${BASE_CMD} ray start --address ${HEAD_NODE}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
+else
+  HEAD_CMD="ray start --head --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
+  WORKER_CMD_TEMPLATE="ray start --address ${HEAD_NODE}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
 fi
 
 echo "[RAY] Starting head on ${HEAD_NODE} ..."
-srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${RAY_LAUNCH} ray start --head --port=${RAY_PORT} --dashboard-port=${RAY_DASHBOARD_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats"
+srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${HEAD_CMD}"
 wait
 
 # Start workers on remaining nodes
 if (( ${#NODE_ARR[@]} > 1 )); then
   echo "[RAY] Starting workers ..."
   for w in "${NODE_ARR[@]:1}"; do
-    srun -N1 -n1 -w "$w" bash -lc "${RAY_LAUNCH} ray start --address ${HEAD_NODE}:${RAY_PORT} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats" &
+    srun -N1 -n1 -w "$w" bash -lc "${WORKER_CMD_TEMPLATE}" &
   done
   wait
 fi
 
 export RAY_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
 
-# Ensure cache/tmp dirs exist (were baked above)
+# Ensure cache/tmp dirs exist
 mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
 
 # Expose PYTHONPATH / WANDB_DIR (also passed in container env)
