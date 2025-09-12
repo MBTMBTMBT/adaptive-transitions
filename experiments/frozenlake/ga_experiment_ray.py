@@ -48,6 +48,8 @@ SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
 
 # Objective groups registry
 OBJECTIVE_GROUPS: Dict[str, List[str]] = {
+    "auc_target": ["auc_p2"],
+    "perf_target": ["int_source_to_target"],
     "auc_source_target": ["auc_p1_source", "auc_p2"],
     "perf_source_target": ["int_rand_to_source_on_source", "int_source_to_target"],
     "auc_kl_source_target": ["auc_p1_source", "minus_target_kl"],
