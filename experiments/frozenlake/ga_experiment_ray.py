@@ -485,7 +485,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=50)
+    p.add_argument("--ga-pop-size", type=int, default=25)
     p.add_argument("--ga-generations", type=int, default=250)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-elitism", type=int, default=5)
@@ -743,7 +743,7 @@ def main():
                         "item_factory_path": SOURCE_FACTORY_PATH,
                         "item_max_steps": int(args.max_steps),
                         "phase_steps": (20_000, 80_000),
-                        "seeds": 5,
+                        "seeds": 3,
                         "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                         "agent_kwargs": {
                             "learning_rate": 0.1,
@@ -754,8 +754,8 @@ def main():
                             "tie_tol": 1e-2,
                             "verbose": 0,
                         },
-                        "eval_every": 2000,
-                        "n_eval_episodes": 50,
+                        "eval_every": 2500,
+                        "n_eval_episodes": 100,
                     },
                 ),
                 (
