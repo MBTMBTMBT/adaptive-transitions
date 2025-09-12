@@ -339,7 +339,18 @@ echo "[RAY] Head:  ${HEAD_NODE}"
 HEAD_IP="$(srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "getent ahostsv4 ${HEAD_NODE} | awk '{print \$1; exit}' || hostname -I | tr ' ' '\n' | grep -E '^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.)' | grep -v '^172\\.17\\.' | head -n1" | tr -d '\r')"
 echo "[RAY] Head IP: ${HEAD_IP:-<none>}"
 
-RAY_PORT="${RAY_PORT:-6379}"
+# NEW: Per-job unique port block to avoid conflicts across jobs on same nodes.
+JOB_ID_NUM="${SLURM_JOB_ID:-$RANDOM}"
+JOB_HASH=$(( JOB_ID_NUM % 1000 ))
+PORT_BASE=$(( 30000 + JOB_HASH * 100 ))
+RAY_PORT=$(( PORT_BASE + 1 ))
+NODE_MANAGER_PORT=$(( PORT_BASE + 2 ))
+OBJECT_MANAGER_PORT=$(( PORT_BASE + 3 ))
+RAY_CLIENT_PORT=$(( PORT_BASE + 4 ))
+MIN_WORKER_PORT=$(( PORT_BASE + 10 ))
+MAX_WORKER_PORT=$(( PORT_BASE + 99 ))
+echo "[PORTS] base=${PORT_BASE} head=${RAY_PORT} nm=${NODE_MANAGER_PORT} om=${OBJECT_MANAGER_PORT} client=${RAY_CLIENT_PORT} workers=${MIN_WORKER_PORT}-${MAX_WORKER_PORT}"
+
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 
 # Stop any leftover Ray on allocated nodes
@@ -352,31 +363,31 @@ for n in "${NODE_ARR[@]}"; do
 done
 
 # Start head (bind to HEAD_IP); Ray temp-dir to scratch
+HEAD_OPTS="--head \
+  --node-ip-address=${HEAD_IP} \
+  --port=${RAY_PORT} \
+  --node-manager-port=${NODE_MANAGER_PORT} \
+  --object-manager-port=${OBJECT_MANAGER_PORT} \
+  --min-worker-port=${MIN_WORKER_PORT} \
+  --max-worker-port=${MAX_WORKER_PORT} \
+  --ray-client-server-port=${RAY_CLIENT_PORT} \
+  --dashboard-port=${RAY_DASHBOARD_PORT} \
+  --dashboard-host=0.0.0.0 \
+  --num-cpus=${SLURM_CPUS_PER_TASK:-1} \
+  --disable-usage-stats \
+  --temp-dir=${RAY_TMPDIR}"
+
 if [[ -n "${BASE_CMD}" ]]; then
-  HEAD_CMD="${BASE_CMD} ray start --head \
-    --node-ip-address=${HEAD_IP} \
-    --port=${RAY_PORT} \
-    --dashboard-port=${RAY_DASHBOARD_PORT} \
-    --dashboard-host=0.0.0.0 \
-    --num-cpus=${SLURM_CPUS_PER_TASK:-1} \
-    --disable-usage-stats \
-    --temp-dir=${RAY_TMPDIR}"
+  HEAD_CMD="${BASE_CMD} ray start ${HEAD_OPTS}"
 else
-  HEAD_CMD="ray start --head \
-    --node-ip-address=${HEAD_IP} \
-    --port=${RAY_PORT} \
-    --dashboard-port=${RAY_DASHBOARD_PORT} \
-    --dashboard-host=0.0.0.0 \
-    --num-cpus=${SLURM_CPUS_PER_TASK:-1} \
-    --disable-usage-stats \
-    --temp-dir=${RAY_TMPDIR}"
+  HEAD_CMD="ray start ${HEAD_OPTS}"
 fi
 
 echo "[RAY] Starting head on ${HEAD_NODE} ..."
 srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "${HEAD_CMD}"
 
-# Export RAY_ADDRESS as hostname:port for all subsequent steps
-export RAY_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
+# Export RAY_ADDRESS as IP:port for all subsequent steps (use IP, not hostname)
+export RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
 echo "[RAY] Waiting for GCS @ ${RAY_ADDRESS} ..."
 
 # Quiet, reliable health check (socket connect) to avoid srun error spam
@@ -384,16 +395,14 @@ READY=0
 for i in {1..90}; do
   HC_OUT="$(srun -N1 -n1 -w "${HEAD_NODE}" bash -lc "python3 - <<'PY'
 import socket, sys, os
-host, port = os.environ.get('RAY_ADDRESS','').split(':')
-ok = False
+addr=os.environ.get('RAY_ADDRESS','')
 try:
-    with socket.create_connection((host, int(port)), timeout=1):
-        ok = True
-except Exception:
-    pass
-print('OK' if ok else 'WAIT')
+    host, port = addr.split(':'); port=int(port)
+    with socket.create_connection((host, port), timeout=1): pass
+    print('OK')
+except Exception: print('WAIT')
 PY" 2>/dev/null || true)"
-  if echo "${HC_OUT}" | grep -q 'OK'; then READY=1; break; fi
+  if [[ "${HC_OUT}" == "OK" ]]; then READY=1; break; fi
   sleep 2
 done
 if [[ "${READY}" != "1" ]]; then
@@ -403,11 +412,20 @@ if [[ "${READY}" != "1" ]]; then
 fi
 echo "[RAY] GCS is ready."
 
-# Worker base; connect via hostname:port; bind each worker to its own IP
+# Worker base; connect via IP:PORT; bind each worker to its own IP and SAME ports.
+WORKER_COMMON="--address ${RAY_ADDRESS} \
+  --node-manager-port=${NODE_MANAGER_PORT} \
+  --object-manager-port=${OBJECT_MANAGER_PORT} \
+  --min-worker-port=${MIN_WORKER_PORT} \
+  --max-worker-port=${MAX_WORKER_PORT} \
+  --num-cpus=${SLURM_CPUS_PER_TASK:-1} \
+  --disable-usage-stats \
+  --temp-dir=${RAY_TMPDIR}"
+
 if [[ -n "${BASE_CMD}" ]]; then
-  WORKER_BASE="${BASE_CMD} ray start --address ${RAY_ADDRESS} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats --temp-dir=${RAY_TMPDIR}"
+  WORKER_BASE="${BASE_CMD} ray start ${WORKER_COMMON}"
 else
-  WORKER_BASE="ray start --address ${RAY_ADDRESS} --num-cpus=${SLURM_CPUS_PER_TASK:-1} --disable-usage-stats --temp-dir=${RAY_TMPDIR}"
+  WORKER_BASE="ray start ${WORKER_COMMON}"
 fi
 
 if (( ${#NODE_ARR[@]} > 1 )); then
