@@ -268,14 +268,14 @@ build_cmd_for_map() {
                --env PYTHONPATH="${PYTHONPATH_EXTRA}"
                --env WANDB_DIR="${WB_DIR}"
                "${CONTAINER}" "${PYTHON}" "${SCRIPT_PATH}"
-               --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
+               --run-name "${run_name}" --map "${map}" --outdir="${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
     fi
   else
     # Host venv
     export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
     export WANDB_DIR="${WB_DIR}"
     CMD_ARR=("${PYTHON}" "${SCRIPT_PATH}"
-             --run-name "${run_name}" --map "${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
+             --run-name "${run_name}" --map="${map}" --outdir "${outdir}" --wandb-mode "${WANDB_MODE}" --obj-group "${obj_group}")
   fi
 
   if ((${#EXTRA_ARGS[@]})); then
@@ -339,6 +339,7 @@ for map in "${MAPS[@]}"; do
 #SBATCH --error=${err_file}
 #SBATCH --chdir=${SCRIPT_DIR}
 EOF
+    # Optional SBATCH lines
     [[ -n "${SLURM_GRES}" ]]    && echo "#SBATCH --gres=${SLURM_GRES}"     >> "${job_script}"
     [[ -n "${SLURM_EXCLUDE}" ]] && echo "#SBATCH --exclude=${SLURM_EXCLUDE}" >> "${job_script}"
 
@@ -367,6 +368,11 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 ulimit -n 65536 || true
 
+# IMPORTANT: prepare Singularity cache/tmp BEFORE any singularity/apptainer exec
+: "${SINGULARITY_CACHEDIR:="/scratch/users/${USER}/singularity/cache"}"
+: "${SINGULARITY_TMPDIR:="/scratch/users/${USER}/${SLURM_JOB_ID}/tmp"}"
+mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+
 # Derive node list and choose head
 mapfile -t NODE_ARR < <(scontrol show hostnames "$SLURM_NODELIST")
 HEAD_NODE="${NODE_ARR[0]}"
@@ -377,14 +383,20 @@ echo "[RAY] Head:  ${HEAD_NODE}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 
+# Decide --nv at runtime only if GPU devices exist (avoid noisy warnings)
+RUNTIME_NV_FLAG=""
+if [[ -e /dev/nvidiactl || -e /dev/nvidia0 ]]; then
+  RUNTIME_NV_FLAG="--nv"
+fi
+
 # Build concrete commands (with or without container)
 if [[ -n "${CONTAINER}" ]]; then
   if [[ "${ENGINE}" == "singularity" ]]; then
-    BASE_CMD="singularity exec ${NV_FLAG:+$NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
+    BASE_CMD="singularity exec ${RUNTIME_NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
       --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT},/scratch/users/${USER}:/scratch/users/${USER}\" \
       --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
   else
-    BASE_CMD="apptainer exec ${NV_FLAG:+$NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
+    BASE_CMD="apptainer exec ${RUNTIME_NV_FLAG} --pwd \"${SCRIPT_DIR}\" \
       --bind \"${PROJ_ROOT}:${PROJ_ROOT},${EXP_OUTROOT}:${EXP_OUTROOT}\" \
       --env PYTHONPATH=\"${PYTHONPATH_EXTRA}\" --env WANDB_DIR=\"${WB_DIR}\" \"${CONTAINER}\""
   fi
@@ -410,12 +422,10 @@ fi
 
 export RAY_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
 
-# Ensure cache/tmp dirs exist
-mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
-
 # Expose PYTHONPATH / WANDB_DIR (also passed in container env)
 export PYTHONPATH="${PYTHONPATH_EXTRA}:${PYTHONPATH:-}"
 export WANDB_DIR="${WB_DIR}"
+
 EOF
 
     # Inject the resolved Python command and run on head
