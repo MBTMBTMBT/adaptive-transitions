@@ -65,6 +65,7 @@ labmaze==1.0.6
 opensimplex==0.4.5.1
 crafter==1.8.0
 networkx==3.1
+gym-simplegrid==1.0.6
 
 # ---------- ML / DL / NLP ----------
 torch==2.4.1
