@@ -9,6 +9,7 @@ from gymnasium.wrappers import TimeLimit
 from apis.customisable import CustomisableEnvAbs
 from customised_minigrid_env import CustomMiniGridEnv
 from customised_toy_text_envs.customised_frozenlake import CustomisedFrozenLakeEnv
+from customised_toy_text_envs.customised_simplegrid import CustomisedSimpleGridEnv
 from customised_toy_text_envs.customised_taxi import CustomisedTaxiEnv
 from experiment_utils.utils import _import
 from networkx_env.networkx_env import NetworkXMDPEnvironment
@@ -133,6 +134,37 @@ def make_frozenlake(seed: int, cfg: Dict[str, Any]):
         is_slippery=is_slippery,
         networkx_env=nx_env,
         render_mode="rgb_array",
+    )
+    env = TimeLimit(env, max_episode_steps=max_steps)
+    if seed is not None:
+        env.reset(seed=seed)
+    return env
+
+
+def make_simplegrid(seed: int, cfg: Dict[str, Any]):
+    """
+    Optional MDP/NetworkX overrides:
+      - networkx_env OR one mdp_* key (see _resolve_networkx_env_or_none).
+    If none provided, falls back to native SimpleGrid with map params.
+    """
+    max_steps = int(cfg.get("max_steps", 250))
+    nx_env = _resolve_networkx_env_or_none(seed, cfg)
+
+    # Accept either "obstacle_map" or "map_name" (string name into MAPS, or list[str])
+    obstacle_map = cfg.get("obstacle_map", cfg.get("map_name", "8x8"))
+
+    # Reward and start/goal candidates
+    use_original_rewards = bool(cfg.get("use_original_rewards", False))
+    start_candidates = cfg.get("start_candidates", None)
+    goal_candidates = cfg.get("goal_candidates", None)
+
+    env = CustomisedSimpleGridEnv(
+        obstacle_map=obstacle_map,
+        render_mode="rgb_array",
+        networkx_env=nx_env,
+        use_original_rewards=use_original_rewards,
+        start_candidates=start_candidates,
+        goal_candidates=goal_candidates,
     )
     env = TimeLimit(env, max_episode_steps=max_steps)
     if seed is not None:

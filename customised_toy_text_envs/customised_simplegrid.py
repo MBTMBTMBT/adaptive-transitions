@@ -20,6 +20,20 @@ from apis.customisable import CustomisableEnvAbs
 from mdp_network.mdp_network import MDPNetwork
 
 
+MAPS = {
+    "4x4": ["0000", "0101", "0001", "1000"],
+    "8x8": [
+        "00000000",
+        "00000000",
+        "00010000",
+        "00000100",
+        "00010000",
+        "01100010",
+        "01001010",
+        "00010000",
+    ],
+}
+
 # Global action names (match SimpleGridEnv.MOVES order 0..3)
 ACTION_NAMES: Tuple[str, str, str, str] = ("UP", "DOWN", "LEFT", "RIGHT")
 
@@ -41,13 +55,16 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
             start_candidates: Optional[list[int | tuple]] = None,
             goal_candidates: Optional[list[int | tuple]] = None,
     ):
-        super().__init__(obstacle_map=obstacle_map, render_mode=render_mode)
+        resolved_map = MAPS.get(obstacle_map, obstacle_map) if isinstance(obstacle_map, str) else obstacle_map
+
+        # Call base ctor with the resolved map
+        super().__init__(obstacle_map=resolved_map, render_mode=render_mode)
+
+        # Existing fields unchanged
         self.networkx_env = networkx_env
         self.use_original_rewards = bool(use_original_rewards)
-        # raw candidate specs (ints or (r,c)); normalized on reset/parse
         self.start_candidates_raw = list(start_candidates or [])
         self.goal_candidates_raw = list(goal_candidates or [])
-        # one-hot or uniform over starts depending on reset() logic
         self.initial_state_distrib: Optional[np.ndarray] = None
 
     def parse_state_option(self, state_name: str, options: dict) -> tuple:
