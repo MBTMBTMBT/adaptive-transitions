@@ -12,7 +12,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patheffects as pe
 from matplotlib.patches import FancyArrowPatch, Arc
 
-from PIL import Image  # optional upscale
+from PIL import Image
 _HAS_PIL = True
 
 from gym_simplegrid.envs import SimpleGridEnv
@@ -20,14 +20,13 @@ from apis.customisable import CustomisableEnvAbs
 from mdp_network.mdp_network import MDPNetwork
 
 
-# Keep numeric 0/1 maps; you may also embed s/S (start) and g/G (goal) in custom maps.
 MAPS = {
     "4x4": ["s000", "0101", "0001", "100g"],
     "8x8": [
         "s0010000",
         "00000000",
         "00010000",
-        "1100W0100",
+        "11000100",
         "00010110",
         "01100010",
         "01001010",
@@ -89,6 +88,37 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
         self.use_original_rewards = bool(use_original_rewards)
         self.initial_state_distrib: Optional[np.ndarray] = None
 
+    def parse_obstacle_map(self, obstacle_map) -> np.ndarray:
+        """
+        Convert map to 0/1 numpy array without using dtype='c'.
+        - If string: look up in our MAPS.
+        - If list[str]: convert directly.
+        - Treat '1' as wall; anything else as free ('0'), so 's/S' and 'g/G' are fine.
+        """
+
+        def to_grid(map_list: list[str]) -> np.ndarray:
+            rows = []
+            for line in map_list:
+                rows.append([1 if ch == '1' else 0 for ch in line])
+            return np.asarray(rows, dtype=np.int8)
+
+        if isinstance(obstacle_map, str):
+            if obstacle_map not in MAPS:
+                raise ValueError(
+                    f"Unknown map name '{obstacle_map}'. Available: {', '.join(MAPS.keys())} "
+                    "or pass a custom list[str] map."
+                )
+            return to_grid(MAPS[obstacle_map])
+
+        if isinstance(obstacle_map, list):
+            # Accept custom maps possibly containing 's/S' and 'g/G'
+            return to_grid(obstacle_map)
+
+        raise ValueError(
+            f"You must provide a map name (str) or a custom map (list[str]). "
+            f"Available names: {', '.join(MAPS.keys())}."
+        )
+
     def parse_state_option(self, state_name: str, options: dict) -> tuple:
         """
         Priority: explicit options[state_name] -> map markers -> default sampler.
@@ -138,22 +168,30 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
 
         # External backend path: unchanged
         if self.networkx_env is not None:
+            # External backend path
             sp, backend_info = self.networkx_env.reset(seed=seed)
             sp = int(sp)
             try:
                 self.networkx_env.current_state = sp
             except Exception:
                 pass
+
             obs, decode_info = self.decode_state(sp)
+
+            # one-hot initial distribution at backend start
             self.initial_state_distrib = np.zeros(self.nrow * self.ncol, dtype=float)
             self.initial_state_distrib[int(obs)] = 1.0
+
             info: Dict[str, Any] = {}
             if isinstance(backend_info, dict):
                 info.update(backend_info)
             if isinstance(decode_info, dict):
                 info.update(decode_info)
-            if self.render_mode == "human":
+
+            # Render only if we actually have start/goal (native drawing depends on them)
+            if self.render_mode == "human" and hasattr(self, "start_xy") and hasattr(self, "goal_xy"):
                 self.render()
+
             return obs, info
 
         # Seed RNG (via parent Env.reset); do not keep parent's start/goal.
@@ -193,13 +231,11 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
 
     def step(self, action: int):
         """
-        If networkx_env provided, use backend reward.
-        Else:
-          - use_original_rewards=True: call base step (original rewards).
-          - use_original_rewards=False: shaped rewards
-              * every step: -1
-              * invalid move: extra -1 (total -2)
-              * reaching goal: 0 and done
+        Backend provided -> use backend reward.
+        Else (custom shaping when use_original_rewards=False):
+          - every valid move: -1.0
+          - collision (wall/out-of-bounds): -1.1 (extra -0.1)
+          - reaching goal: 0.0 and done
         """
         action = int(action)
 
@@ -214,34 +250,36 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
             obs, decode_info = self.decode_state(int(sp))
             info = info.copy() if isinstance(info, dict) else {}
             info.update(decode_info)
-            if self.render_mode == "human":
+            if self.render_mode == "human" and hasattr(self, "start_xy") and hasattr(self, "goal_xy"):
                 self.render()
             return int(obs), float(r), bool(terminated), bool(truncated), info
 
-        # Original rewards
+        # Original rewards path
         if self.use_original_rewards:
             return super().step(action)
 
-        # Shaped rewards, original dynamics preserved
+        # Shaped rewards
         self.agent_action = action
         row, col = self.agent_xy
         dx, dy = self.MOVES[action]
         tr, tc = row + dx, col + dy
         base_step_cost = -1.0
+        collision_extra = -0.1
         truncated = False
 
-        # invalid move -> stay, -2
+        # Collision: stay put, total -1.1
         if (not self.is_in_bounds(tr, tc)) or (not self.is_free(tr, tc)):
-            self.reward = base_step_cost - 1.0
+            self.reward = base_step_cost + collision_extra  # -1.1
             self.done = False
+
         else:
-            # valid move
+            # Valid move
             self.agent_xy = (tr, tc)
             if (tr, tc) == getattr(self, "goal_xy", (-1, -1)):
                 self.reward = 0.0
                 self.done = True
             else:
-                self.reward = base_step_cost
+                self.reward = base_step_cost  # -1.0
                 self.done = False
 
         self.n_iter += 1
@@ -259,7 +297,7 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
     def decode_state(self, state: int) -> Tuple[int, Dict[str, Any]]:
         """
         Force the environment to the given integer state.
-        Update lightweight local fields for consistent rendering/info.
+        In backend mode, do not compute reward/done locally.
         """
         s = int(state)
         if not self.is_valid_state(s):
@@ -267,18 +305,28 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
         r, c = self._rc_from_state(s)
         self.agent_xy = (r, c)
         self.agent_action = None
-        self.reward = self.get_reward(*self.agent_xy)
-        self.done = self.on_goal()
+
+        # Safe reward/done: only use local semantics if goal_xy exists (native mode).
+        if hasattr(self, "goal_xy"):
+            self.reward = self.get_reward(*self.agent_xy)
+            self.done = self.on_goal()
+        else:
+            # Backend mode: reward/done come from backend .step(); keep neutral here.
+            self.reward = 0.0
+            self.done = False
 
         info = {
             "row": r,
             "col": c,
             "is_free": bool(self.is_free(r, c)),
-            "is_goal": bool((r, c) == getattr(self, "goal_xy", (-1, -1))),
+            "is_goal": bool(hasattr(self, "goal_xy") and (r, c) == self.goal_xy),
             "action_names": ACTION_NAMES,
         }
-        if self.render_mode == "human":
+
+        # Only render if start/goal exist; render() needs them to draw start/goal markers.
+        if self.render_mode == "human" and hasattr(self, "start_xy") and hasattr(self, "goal_xy"):
             self.render()
+
         return int(s), info
 
     # -------------------------
@@ -298,33 +346,27 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
     # -------------------------
     def get_mdp_network(self) -> MDPNetwork:
         """
-        Build an MDPNetwork reflecting SimpleGridEnv step semantics:
-          - Move into wall/out-of-bounds: stay (self-loop), reward -1, not terminal.
-          - Move into goal: reward +1, terminal.
-          - Move into free cell: reward 0, not terminal.
-        Terminal state(s): goal state only.
+        Export MDP matching the shaped rewards:
+          - collision (wall/OOB): self-loop, reward -1.1
+          - valid non-goal move: reward -1.0
+          - reaching goal: reward 0.0, terminal
         """
         nS = self.nrow * self.ncol
         nA = 4
 
-        def to_s(row: int, col: int) -> int:
-            return int(row) * self.ncol + int(col)
-
-        # Determine start/goal if present
         start_states = self.get_start_states()
         terminal_states: List[int] = []
         if hasattr(self, "goal_xy"):
-            terminal_states = [to_s(*self.goal_xy)]
+            terminal_states = [self.to_s(*self.goal_xy)]
 
-        # Build transition map
         transitions: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
         for s in range(nS):
             r, c = self._rc_from_state(s)
 
-            # If terminal (goal), add absorbing self-loops with r=0
+            # Absorbing goal with 0 reward
             if int(s) in terminal_states:
                 for a in range(nA):
-                    s_key = str(s)
+                    s_key = str(s);
                     a_key = str(a)
                     transitions.setdefault(s_key, {})
                     transitions[s_key].setdefault(a_key, {})
@@ -332,26 +374,22 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
                 continue
 
             for a in range(nA):
-                s_key = str(s)
+                s_key = str(s);
                 a_key = str(a)
                 transitions.setdefault(s_key, {})
                 a_bucket = transitions[s_key].setdefault(a_key, {})
 
-                # Compute intended move (dx,dy in SimpleGridEnv.MOVES)
                 dx, dy = self.MOVES[a]
                 tr, tc = r + dx, c + dy
 
-                # Out-of-bounds or wall: self-loop with -1
+                # Collision -> self-loop with -1.1
                 if (not self.is_in_bounds(tr, tc)) or (not self.is_free(tr, tc)):
-                    sp = s
-                    p, rr = 1.0, -1.0
-                    a_bucket[str(sp)] = {"p": float(p), "r": float(rr)}
+                    a_bucket[str(s)] = {"p": 1.0, "r": -1.1}
                     continue
 
-                # Free cell
-                sp = to_s(tr, tc)
+                sp = self.to_s(tr, tc)
                 is_goal = hasattr(self, "goal_xy") and (tr, tc) == self.goal_xy
-                rr = 1.0 if is_goal else 0.0
+                rr = 0.0 if is_goal else -1.0
                 a_bucket[str(sp)] = {"p": 1.0, "r": float(rr)}
 
         # Tags
@@ -364,10 +402,7 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
             r, c = self._rc_from_state(s)
             if hasattr(self, "goal_xy") and (r, c) == self.goal_xy:
                 continue
-            if self.is_free(r, c):
-                free_states.append(s)
-            else:
-                wall_states.append(s)
+            (free_states if self.is_free(r, c) else wall_states).append(s)
 
         tags = {
             "start": sorted(list(set(start_state_list))),
@@ -434,48 +469,52 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
 
 def _get_bg_image_via_render(env, target_cell_px: int, dpi: int) -> Tuple[np.ndarray, float, float]:
     """
-    Render env to RGB array and upscale if needed. Return (bg_img, cell_w, cell_h).
+    Render and crop to the Matplotlib Axes area so our overlay uses
+    the exact pixel geometry of the grid (no rescaling).
+    Returns: (cropped_bg_img, cell_w_px, cell_h_px).
     """
     prev_mode = getattr(env, "render_mode", None)
     env.render_mode = "rgb_array"
+
+    # Ensure a frame and a valid (fig, ax)
     try:
-        # Ensure a frame exists (SimpleGridEnv.reset() triggers a render)
         env.reset()
     except Exception:
-        # As a fallback, try calling render_frame directly
         try:
             env.render_frame()
         except Exception as e:
             raise RuntimeError("Failed to reset/render background.") from e
 
-    bg_img = env.render()
-    if bg_img is None:
-        raise RuntimeError("env.render('rgb_array') returned None.")
+    fig = getattr(env, "fig", None)
+    ax = getattr(env, "ax", None)
+    if fig is None or ax is None:
+        raise RuntimeError("Env figure/axes not available after render().")
 
+    # Draw and grab full canvas RGBA
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    full = np.asarray(fig.canvas.renderer.buffer_rgba())
+    Hc, Wc = full.shape[:2]
+
+    # Axes bbox in display pixels; convert to array indices (top-left origin)
+    bbox = ax.get_window_extent(renderer=renderer)
+    x0, y0, x1, y1 = bbox.x0, bbox.y0, bbox.x1, bbox.y1
+    left   = max(0, int(np.floor(x0)))
+    right  = min(Wc, int(np.ceil(x1)))
+    top    = max(0, int(np.floor(Hc - y1)))  # invert Y
+    bottom = min(Hc, int(np.ceil(Hc - y0)))
+
+    # Crop to Axes area (this is exactly where the grid is drawn)
+    bg_img = full[top:bottom, left:right, :]
+
+    # Drop alpha if present
     if bg_img.shape[-1] == 4:
-        # Convert RGBA -> RGB for safety
         bg_img = bg_img[..., :3]
 
+    # Cell size in *cropped* pixels
     nrow, ncol = int(env.nrow), int(env.ncol)
     H, W = bg_img.shape[:2]
     cell_w, cell_h = W / ncol, H / nrow
-
-    # Auto-upscale to improve readability
-    upscale = int(np.ceil(target_cell_px / min(cell_w, cell_h)))
-    upscale = max(1, min(upscale, 4))
-    if upscale > 1:
-        if _HAS_PIL:
-            bg_img = np.array(
-                Image.fromarray(bg_img).resize(
-                    (int(W * upscale), int(H * upscale)),
-                    resample=Image.BICUBIC,
-                )
-            )
-        else:
-            bg_img = np.kron(bg_img, np.ones((upscale, upscale, 1), dtype=bg_img.dtype))
-        H, W = bg_img.shape[:2]
-        cell_w *= upscale
-        cell_h *= upscale
 
     env.render_mode = prev_mode
     return bg_img, float(cell_w), float(cell_h)

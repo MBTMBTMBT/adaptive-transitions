@@ -155,16 +155,12 @@ def make_simplegrid(seed: int, cfg: Dict[str, Any]):
 
     # Reward and start/goal candidates
     use_original_rewards = bool(cfg.get("use_original_rewards", False))
-    start_candidates = cfg.get("start_candidates", None)
-    goal_candidates = cfg.get("goal_candidates", None)
 
     env = CustomisedSimpleGridEnv(
         obstacle_map=obstacle_map,
         render_mode="rgb_array",
         networkx_env=nx_env,
         use_original_rewards=use_original_rewards,
-        start_candidates=start_candidates,
-        goal_candidates=goal_candidates,
     )
     env = TimeLimit(env, max_episode_steps=max_steps)
     if seed is not None:
