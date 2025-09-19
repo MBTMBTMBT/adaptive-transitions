@@ -557,7 +557,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="2500,12500",
+        default="2500,17500",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
     p.add_argument("--eval-every", type=int, default=100)
