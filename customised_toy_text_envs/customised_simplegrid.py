@@ -20,21 +20,22 @@ from apis.customisable import CustomisableEnvAbs
 from mdp_network.mdp_network import MDPNetwork
 
 
+# Keep numeric 0/1 maps; you may also embed s/S (start) and g/G (goal) in custom maps.
 MAPS = {
-    "4x4": ["0000", "0101", "0001", "1000"],
+    "4x4": ["s000", "0101", "0001", "100g"],
     "8x8": [
-        "00000000",
+        "s0010000",
         "00000000",
         "00010000",
-        "00000100",
-        "00010000",
+        "1100W0100",
+        "00010110",
         "01100010",
         "01001010",
-        "00010000",
+        "0001g000",
     ],
 }
 
-# Global action names (match SimpleGridEnv.MOVES order 0..3)
+# Match SimpleGridEnv.MOVES order (0:UP,1:DOWN,2:LEFT,3:RIGHT)
 ACTION_NAMES: Tuple[str, str, str, str] = ("UP", "DOWN", "LEFT", "RIGHT")
 
 
@@ -43,36 +44,57 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
     SimpleGridEnv with:
       - Optional delegation to an external NetworkX/MDP backend.
       - Encode/decode integer state: s = row * ncol + col.
-      - MDP export to MDPNetwork.
+      - Start/goal can be marked in map via s/S and g/G (case-insensitive).
+      - MDP export to MDPNetwork (not shown here).
     """
 
     def __init__(
-            self,
-            obstacle_map: str | list[str],
-            render_mode: str | None = None,
-            networkx_env: Any = None,
-            use_original_rewards: bool = False,
-            start_candidates: Optional[list[int | tuple]] = None,
-            goal_candidates: Optional[list[int | tuple]] = None,
+        self,
+        obstacle_map: str | list[str],
+        render_mode: str | None = None,
+        networkx_env: Any = None,
+        use_original_rewards: bool = False,
     ):
-        resolved_map = MAPS.get(obstacle_map, obstacle_map) if isinstance(obstacle_map, str) else obstacle_map
+        # Resolve named map; allow custom list[str] with s/S/g/G markers.
+        raw_map = MAPS.get(obstacle_map, obstacle_map) if isinstance(obstacle_map, str) else obstacle_map
 
-        # Call base ctor with the resolved map
+        # Extract markers (uniform later) and build a clean 0/1 map for the base env.
+        self._start_markers_xy: list[tuple[int, int]] = []
+        self._goal_markers_xy: list[tuple[int, int]] = []
+        if isinstance(raw_map, list):
+            cleaned: list[str] = []
+            for r, line in enumerate(raw_map):
+                row_chars = []
+                for c, ch in enumerate(line):
+                    if ch in ("s", "S"):
+                        self._start_markers_xy.append((r, c))
+                        row_chars.append("0")
+                    elif ch in ("g", "G"):
+                        self._goal_markers_xy.append((r, c))
+                        row_chars.append("0")
+                    elif ch == "1":
+                        row_chars.append("1")
+                    else:
+                        # treat any non-'1' as free ('0')
+                        row_chars.append("0")
+                cleaned.append("".join(row_chars))
+            resolved_map = cleaned
+        else:
+            # String name not in our MAPS: let base class handle it.
+            resolved_map = raw_map
+
         super().__init__(obstacle_map=resolved_map, render_mode=render_mode)
 
-        # Existing fields unchanged
         self.networkx_env = networkx_env
         self.use_original_rewards = bool(use_original_rewards)
-        self.start_candidates_raw = list(start_candidates or [])
-        self.goal_candidates_raw = list(goal_candidates or [])
         self.initial_state_distrib: Optional[np.ndarray] = None
 
     def parse_state_option(self, state_name: str, options: dict) -> tuple:
         """
-        Priority: explicit options[state_name] -> candidate list -> default sampler.
-        Accept int (state index) or (row,col) tuples.
+        Priority: explicit options[state_name] -> map markers -> default sampler.
+        Accept int (state index) or (row,col) tuples in options.
         """
-        # 1) explicit option
+        # 1) explicit override
         if isinstance(options, dict) and state_name in options:
             v = options[state_name]
             if isinstance(v, int):
@@ -81,49 +103,40 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
                 return (int(v[0]), int(v[1]))
             raise TypeError(f"Allowed types for `{state_name}` are int or tuple.")
 
-        # 2) candidate lists (uniform over valid)
-        raw = self.start_candidates_raw if state_name == "start_loc" else (
-            self.goal_candidates_raw if state_name == "goal_loc" else []
-        )
-        if raw:
-            valids: list[tuple[int, int]] = []
-            for v in raw:
-                if isinstance(v, int):
-                    r, c = self.to_xy(int(v))
-                elif isinstance(v, tuple) and len(v) == 2:
-                    r, c = int(v[0]), int(v[1])
-                else:
-                    continue
-                if self.is_in_bounds(r, c) and self.is_free(r, c):
-                    valids.append((r, c))
-            if valids:
-                idx = int(self.np_random.integers(0, len(valids)))
-                return valids[idx]
+        # 2) markers (uniform)
+        if state_name == "start_loc" and self._start_markers_xy:
+            i = int(self.np_random.integers(0, len(self._start_markers_xy)))
+            return self._start_markers_xy[i]
+        if state_name == "goal_loc" and self._goal_markers_xy:
+            i = int(self.np_random.integers(0, len(self._goal_markers_xy)))
+            return self._goal_markers_xy[i]
 
-        # 3) fallback: original sampler
+        # 3) fallback
         state = self.sample_valid_state_xy()
-        print(f"Key `{state_name}` not provided; sampled: {state}")
         return state
 
     # -------------------------
     # Core overrides
     # -------------------------
     def reset(
-            self,
-            *,
-            seed: int | None = None,
-            options: dict | None = None,
+        self,
+        *,
+        seed: int | None = None,
+        options: dict | None = None,
     ):
         """
-        Support options['start_loc'/'goal_loc'] and candidate lists.
+        Start/goal selection:
+          - options['start_loc'/'goal_loc'] if provided;
+          - else uniform over s/S and g/G markers (if any);
+          - else sample valid states (default method).
         initial_state_distrib:
-          - If options has start_loc: one-hot at that start.
-          - Else if start_candidates provided: uniform over valid candidates.
-          - Else: one-hot at sampled start.
+          - one-hot at options start;
+          - else uniform over all start markers;
+          - else one-hot at sampled start.
         """
         options = options or {}
 
-        # Backend path (unchanged): one-hot at backend start.
+        # External backend path: unchanged
         if self.networkx_env is not None:
             sp, backend_info = self.networkx_env.reset(seed=seed)
             sp = int(sp)
@@ -143,53 +156,38 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
                 self.render()
             return obs, info
 
-        # Native path (keep original flow)
-        super().reset(seed=seed)  # seeds self.np_random
+        # Seed RNG (via parent Env.reset); do not keep parent's start/goal.
+        super().reset(seed=seed)
 
-        # pick start/goal using: options -> candidates -> default
+        # Choose start/goal using our policy
         self.start_xy = self.parse_state_option("start_loc", options)
         self.goal_xy = self.parse_state_option("goal_loc", options)
 
-        # init internals
+        # Init internals
         self.agent_xy = self.start_xy
         self.reward = self.get_reward(*self.agent_xy)
         self.done = self.on_goal()
         self.agent_action = None
         self.n_iter = 0
 
-        # integrity
+        # Sanity checks
         self.integrity_checks()
 
-        # build initial_state_distrib
+        # Build initial_state_distrib (over starts)
         nS = self.nrow * self.ncol
         self.initial_state_distrib = np.zeros(nS, dtype=float)
         if "start_loc" in options:
             s = self.to_s(*self.start_xy)
             self.initial_state_distrib[int(s)] = 1.0
-        elif self.start_candidates_raw:
-            # uniform over valid candidate start states
-            valids_idx: list[int] = []
-            for v in self.start_candidates_raw:
-                if isinstance(v, int):
-                    r, c = self.to_xy(int(v))
-                elif isinstance(v, tuple) and len(v) == 2:
-                    r, c = int(v[0]), int(v[1])
-                else:
-                    continue
-                if self.is_in_bounds(r, c) and self.is_free(r, c):
-                    valids_idx.append(self.to_s(r, c))
-            if valids_idx:
-                for s in valids_idx:
-                    self.initial_state_distrib[int(s)] = 1.0
-                self.initial_state_distrib /= float(self.initial_state_distrib.sum())
-            else:
-                s = self.to_s(*self.start_xy)
-                self.initial_state_distrib[int(s)] = 1.0
+        elif self._start_markers_xy:
+            for (r, c) in self._start_markers_xy:
+                self.initial_state_distrib[self.to_s(r, c)] = 1.0
+            self.initial_state_distrib /= float(self.initial_state_distrib.sum())
         else:
             s = self.to_s(*self.start_xy)
             self.initial_state_distrib[int(s)] = 1.0
 
-        # optional render
+        # Optional render
         self.render()
         return self.get_obs(), self.get_info()
 
@@ -205,7 +203,7 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
         """
         action = int(action)
 
-        # External backend (unchanged)
+        # External backend
         if self.networkx_env is not None:
             s = int(self.encode_state())
             try:
