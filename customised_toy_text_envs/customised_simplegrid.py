@@ -585,30 +585,31 @@ def plot_simplegrid_transition_overlays(
     show_self_loops: bool = False,
     dpi: int = 200,
     target_cell_px: int = 240,
-    arrow_scale: float = 0.04,
-    font_scale: float = 0.16,
+    arrow_scale: float = 0.04,  # arrow LW ~ arrow_scale * cell_min (in px)
+    font_scale: float = 0.16,   # text size ~ font_scale * cell_min (in px)
     cmap_name: str = "viridis",
     gamma: float = 1.0,
 ):
     """
-    Draw per-action overlays of MDP transition probabilities on a SimpleGrid board.
+    Per-action transition overlays on top of env.render() background.
+    Font/arrow sizes scale purely with `font_scale`, `arrow_scale`, and `dpi`.
     """
     assert hasattr(env, "nrow") and hasattr(env, "ncol"), "Env must have nrow/ncol."
     nrow, ncol = int(env.nrow), int(env.ncol)
     nS = nrow * ncol
     os.makedirs(output_dir, exist_ok=True)
 
-    # Background via render (Scheme B)
+    # Background via render (exact axes crop)
     bg_img, cell_w, cell_h = _get_bg_image_via_render(env, target_cell_px, dpi)
     H, W = bg_img.shape[:2]
     cell_min = min(cell_w, cell_h)
 
-    # Sizes
-    ARROW_LW_PT = _px_to_pt(max(1.0, arrow_scale * cell_min), dpi)
-    mutation_scale = _px_to_pt(0.45 * cell_min, dpi)
-    shrink_pt = _px_to_pt(0.18 * cell_min, dpi)
-    font_pt = max(6.0, min(12.0, _px_to_pt(font_scale * cell_min, dpi)))
-    title_pt = max(9.0, min(14.0, _px_to_pt(0.18 * cell_min, dpi)))
+    # Sizes (no hard clamps; tiny safety floors only)
+    ARROW_LW_PT   = max(0.25, _px_to_pt(arrow_scale * cell_min, dpi))   # line width
+    mutation_scale = _px_to_pt(0.45 * cell_min, dpi)                    # arrow head size
+    shrink_pt     = _px_to_pt(0.18 * cell_min, dpi)                     # arrow shrink
+    font_pt       = max(0.5, _px_to_pt(font_scale * cell_min, dpi))     # label font
+    title_pt      = max(0.5, _px_to_pt(0.18 * cell_min, dpi))           # title font
 
     # Text styles
     text_bbox = dict(facecolor="white", alpha=0.50, edgecolor="none", boxstyle="round,pad=0.15")
@@ -618,6 +619,7 @@ def plot_simplegrid_transition_overlays(
     prob_to_color, cmap, norm = _prob_to_color_fn(cmap_name, gamma)
 
     def draw_self_loop(ax, x, y, p):
+        """Small arc + arrow for s->s."""
         color = prob_to_color(p)
         radius = 0.28 * cell_min
         arc = Arc(
@@ -664,8 +666,8 @@ def plot_simplegrid_transition_overlays(
         sm = cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
-        cbar.set_label("Transition probability", fontsize=max(8, int(title_pt * 0.7)))
-        cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
+        cbar.set_label("Transition probability", fontsize=max(1, int(title_pt * 0.7)))
+        cbar.ax.tick_params(labelsize=max(1, int(font_pt * 0.9)))
 
         for s in range(nS):
             probs = _fetch_probs(mdp, s, a)
@@ -753,13 +755,15 @@ def plot_simplegrid_scalar_overlay(
     value_format: str | None = None,
 ) -> str:
     """
-    Overlay a per-state scalar (e.g., V(s)) as a semi-transparent heat layer.
+    Heat overlay on top of env.render() background.
+    Scales fonts purely by `font_scale` and `dpi` (no hard clamps).
     """
     assert hasattr(env, "nrow") and hasattr(env, "ncol"), "Env must have nrow/ncol."
     nrow, ncol = int(env.nrow), int(env.ncol)
     nS = nrow * ncol
     os.makedirs(output_dir, exist_ok=True)
 
+    # Background is the exact rendered grid area
     bg_img, cell_w, cell_h = _get_bg_image_via_render(env, target_cell_px, dpi)
     H, W = bg_img.shape[:2]
     cell_min = min(cell_w, cell_h)
@@ -772,12 +776,14 @@ def plot_simplegrid_scalar_overlay(
             return format(v, value_format)
         return f"{v:.2e}" if (v != 0.0 and abs(v) < 0.01) else f"{v:.2f}"
 
-    font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
-    title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
+    # Font sizes: no upper clamps; tiny lower safety only
+    font_pt  = max(0.5, px_to_pt(font_scale * cell_min))
+    title_pt = max(0.5, px_to_pt(0.20 * cell_min))
 
     text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
     text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
 
+    # Build value grid
     def val_get(s: int) -> float:
         if hasattr(value_map, "get_value"):
             return float(value_map.get_value(int(s)))
@@ -825,8 +831,8 @@ def plot_simplegrid_scalar_overlay(
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
-    cbar.set_label(cbar_label, fontsize=max(8, int(title_pt * 0.7)))
-    cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
+    cbar.set_label(cbar_label, fontsize=max(1, int(title_pt * 0.7)))
+    cbar.ax.tick_params(labelsize=max(1, int(font_pt * 0.9)))
 
     if annotate:
         for s in range(nS):
@@ -875,7 +881,7 @@ def plot_simplegrid_scalar_diff_overlay(
     value_format: str | None = "+.2f",
 ) -> str:
     """
-    Overlay the difference between two per-state scalars (A − B) with a diverging colormap.
+    Diverging heat overlay for A−B. Fonts scale by `font_scale` and `dpi` only.
     """
     assert hasattr(env, "nrow") and hasattr(env, "ncol"), "Env must have nrow/ncol."
     nrow, ncol = int(env.nrow), int(env.ncol)
@@ -894,12 +900,14 @@ def plot_simplegrid_scalar_diff_overlay(
             return format(v, value_format)
         return f"{v:+.2e}" if (v != 0.0 and abs(v) < 0.01) else f"{v:+.2f}"
 
-    font_pt = max(6.0, min(14.0, px_to_pt(font_scale * cell_min)))
-    title_pt = max(10.0, min(16.0, px_to_pt(0.20 * cell_min)))
+    # Font sizes: no hard clamps
+    font_pt  = max(0.5, px_to_pt(font_scale * cell_min))
+    title_pt = max(0.5, px_to_pt(0.20 * cell_min))
 
     text_bbox = dict(facecolor="white", alpha=0.55, edgecolor="none", boxstyle="round,pad=0.15")
     text_effects = [pe.withStroke(linewidth=px_to_pt(1.0), foreground="black", alpha=0.35)]
 
+    # Build diff grid
     def val_get(tbl, s: int) -> float:
         if hasattr(tbl, "get_value"):
             return float(tbl.get_value(int(s)))
@@ -958,8 +966,8 @@ def plot_simplegrid_scalar_diff_overlay(
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
-    cbar.set_label(cbar_label, fontsize=max(8, int(title_pt * 0.7)))
-    cbar.ax.tick_params(labelsize=max(6, int(font_pt * 0.9)))
+    cbar.set_label(cbar_label, fontsize=max(1, int(title_pt * 0.7)))
+    cbar.ax.tick_params(labelsize=max(1, int(font_pt * 0.9)))
 
     if annotate:
         for s in range(nS):
