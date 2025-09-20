@@ -511,6 +511,50 @@ def ga_export_metric_curves(
             pass
 
 
+def _log_best_by_keys_for_batch(
+    gen_to_log: int,
+    metrics_list: List[Dict[str, Optional[float]]],
+    keys: List[str],
+    wandb_writer: Optional[ActorHandle],
+) -> None:
+    """
+    For each key, pick the single best individual in this batch and log all its finite metrics
+    under the namespace 'ga_metrics_max_{key}/*' at step 'ga/gen' == gen_to_log.
+    Strict behavior: if no finite value exists for a key in this batch -> raise ValueError.
+    """
+    if wandb_writer is None or not keys:
+        return
+    for key in keys:
+        best_idx: Optional[int] = None
+        best_val: Optional[float] = None
+        for i, md in enumerate(metrics_list):
+            if key not in md:
+                continue
+            v = md[key]
+            if v is None:
+                continue
+            fv = float(v)
+            if not math.isfinite(fv):
+                continue
+            if (best_val is None) or (fv > best_val):
+                best_val = fv
+                best_idx = i
+        if best_idx is None:
+            raise ValueError(f"No finite values for key '{key}' at gen={gen_to_log}.")
+        best_md = metrics_list[best_idx]
+        payload: Dict[str, Any] = {"ga/gen": int(gen_to_log)}
+        for mk, mv in best_md.items():
+            if mv is None:
+                continue
+            fv = float(mv)
+            if math.isfinite(fv):
+                payload[f"ga_metrics_max_{key}/{mk}"] = fv
+        try:
+            wandb_writer.log.remote(payload)
+        except Exception:
+            pass
+
+
 def run_ga(
     *,
     base_mdp: MDPNetwork,
@@ -527,6 +571,7 @@ def run_ga(
     solver: Optional[Dict[str, Any]] = None,
     score: List[Tuple[str, Dict[str, Any]]] = None,  # strict format
     objective_keys: List[str] = None,  # required: keys used as GA objectives
+    max_metric_keys=None,  # None | str | Sequence[str]; extra logging of per-batch maxima
 ) -> Tuple[List[MDPNetwork], List[List[float]], List[MDPNetwork], List[List[float]]]:
     """
     GA driver (NSGA-II, maximize objectives).
@@ -549,9 +594,18 @@ def run_ga(
         raise ValueError("objective_keys must be a non-empty list of metric keys.")
     score = score or [("obj_multi_perf", {})]
 
+    # Normalize optional args
     ops = dict(ops or {})
     distance = dict(distance or {})
     solver = dict(solver or {})
+
+    # Normalize max_metric_keys into a list of strings (or empty list)
+    if isinstance(max_metric_keys, str):
+        mmk_list: List[str] = [max_metric_keys]
+    elif max_metric_keys is None:
+        mmk_list = []
+    else:
+        mmk_list = list(max_metric_keys)
 
     logger = logging.getLogger("ga")
     if not logger.handlers:
@@ -567,18 +621,20 @@ def run_ga(
 
     if wandb_writer is not None:
         try:
-            # bind curves to x-axis "ga/gen"
+            # Bind existing metric families
             wandb_writer.define_metric.remote("ga_metrics/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga_object/*", step_metric="ga/gen")
-            # optional meta streams (ids, flags, etc.)
             wandb_writer.define_metric.remote("ga_meta/*", step_metric="ga/gen")
-            # keep existing families if you still log them
             wandb_writer.define_metric.remote("ga/pop/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga/time/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga/init/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga/final/*", step_metric="ga/gen")
-            # images (media) do not need step binding, but this is harmless
             wandb_writer.define_metric.remote("ga_metric_plots/*", step_metric="ga/gen")
+            # New families for per-batch maxima
+            for k in mmk_list:
+                wandb_writer.define_metric.remote(
+                    f"ga_metrics_max_{k}/*", step_metric="ga/gen"
+                )
         except Exception:
             pass
 
@@ -671,6 +727,17 @@ def run_ga(
         jsonl_path=jsonl_path,
         uid_counter=uid_counter,
     )
+
+    # ===== Strict validation for max_metric_keys (once, after first batch) =====
+    if mmk_list:
+        available_keys = set().union(*(md.keys() for md in pop_metrics)) if pop_metrics else set()
+        for k in mmk_list:
+            if k not in available_keys:
+                raise ValueError(
+                    f"Unknown key '{k}' in max_metric_keys. Available: {sorted(available_keys)}"
+                )
+        # Log per-batch maxima for gen=0 (init batch)
+        _log_best_by_keys_for_batch(0, pop_metrics, mmk_list, wandb_writer)
 
     # ===== Metric curves state =====
     all_metric_keys: Set[str] = (
@@ -783,6 +850,10 @@ def run_ga(
             jsonl_path=jsonl_path,
             uid_counter=uid_counter,
         )
+
+        # Per-batch maxima for children batch
+        if mmk_list:
+            _log_best_by_keys_for_batch(gen + 1, child_metrics, mmk_list, wandb_writer)
 
         # environmental selection with locked elites
         union_pop = pop + children
