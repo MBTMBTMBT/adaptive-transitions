@@ -59,6 +59,7 @@ OBJECTIVE_GROUPS: Dict[str, List[str]] = {
     "auc_auc_kl": ["auc_p1_source", "auc_p2", "minus_target_kl"],
     "auc_auc_value_diff": ["auc_p1_source", "auc_p2", "minus_value_diff"],
 }
+SELECTED_MAX_METRIC_KEYS = ["auc_p2", "minus_target_kl", "minus_value_diff",]
 
 
 def _build_native_mdp(map_name: str,) -> MDPNetwork:
@@ -557,7 +558,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="2500,17500",
+        default="5000,15000",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
     p.add_argument("--eval-every", type=int, default=100)
@@ -610,6 +611,7 @@ def main():
             f"Available: {', '.join(sorted(OBJECTIVE_GROUPS))}"
         )
     selected_objective_keys: List[str] = OBJECTIVE_GROUPS[args.obj_group]
+    selected_max_metric_keys: List[str] = SELECTED_MAX_METRIC_KEYS
 
     # Make run name obj_group-aware
     base_name = args.run_name or f"flk_{args.map}"
@@ -742,7 +744,7 @@ def main():
                         },
                         "item_factory_path": SOURCE_FACTORY_PATH,
                         "item_max_steps": int(args.max_steps),
-                        "phase_steps": (2500, 12500),
+                        "phase_steps": (5000, 10000),
                         "seeds": 5,
                         "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                         "agent_kwargs": {
@@ -785,6 +787,7 @@ def main():
                 ),
             ]
             objective_keys: List[str] = selected_objective_keys
+            max_metric_keys: List[str] = selected_max_metric_keys
 
             # Run GA (new API will log: ga/metrics/* and ga/objs/*; export CSV/PNG)
             _ = run_ga(
@@ -802,6 +805,7 @@ def main():
                 solver=solver,
                 score=score,  # strict: list of (name, params)
                 objective_keys=objective_keys,  # strict: list of metric keys to optimize
+                max_metric_keys=max_metric_keys,
             )
 
             # Collect saved JSONs from GA

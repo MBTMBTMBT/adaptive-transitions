@@ -59,6 +59,7 @@ OBJECTIVE_GROUPS: Dict[str, List[str]] = {
     "auc_source_target_kl": ["auc_p1_source", "auc_p2", "minus_target_kl"],
     "auc_source_target_value_diff": ["auc_p1_source", "auc_p2", "minus_value_diff"],
 }
+SELECTED_MAX_METRIC_KEYS = ["auc_p2", "minus_target_kl", "minus_value_diff",]
 
 
 def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
@@ -488,10 +489,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=50)
-    p.add_argument("--ga-generations", type=int, default=250)
+    p.add_argument("--ga-pop-size", type=int, default=100)
+    p.add_argument("--ga-generations", type=int, default=100)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=2)
+    p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=str2bool, default=True)
@@ -612,6 +613,7 @@ def main():
             f"Available: {', '.join(sorted(OBJECTIVE_GROUPS))}"
         )
     selected_objective_keys: List[str] = OBJECTIVE_GROUPS[args.obj_group]
+    selected_max_metric_keys: List[str] = SELECTED_MAX_METRIC_KEYS
 
     # Make run name obj_group-aware
     base_name = args.run_name or f"flk_{args.map}"
@@ -788,6 +790,7 @@ def main():
                 ),
             ]
             objective_keys: List[str] = selected_objective_keys
+            max_metric_keys: List[str] = selected_max_metric_keys
 
             # Run GA (new API will log: ga/metrics/* and ga/objs/*; export CSV/PNG)
             _ = run_ga(
@@ -805,6 +808,7 @@ def main():
                 solver=solver,
                 score=score,  # strict: list of (name, params)
                 objective_keys=objective_keys,  # strict: list of metric keys to optimize
+                max_metric_keys=max_metric_keys,
             )
 
             # Collect saved JSONs from GA

@@ -342,11 +342,7 @@ def ga_score_portables_with_metrics(
 ) -> Tuple[List[List[float]], List[Dict[str, Optional[float]]], int]:
     """
     Fan-out evaluate -> (objs_list, metrics_list, new_uid_counter).
-    Also logs to W&B and JSONL.
-    W&B policy:
-      - All finite metrics (non-None) -> ga_metrics/<key>
-      - Objective keys                -> ga_object/<key>
-      - Meta info (ids/flags/indices) -> ga_meta/*
+    JSONL is written here; W&B logging is deferred to post-selection in run_ga().
     """
     if not portables:
         return [], [], uid_counter
@@ -372,37 +368,9 @@ def ga_score_portables_with_metrics(
             obj_vals.append(float(md[k]))
         objs_list.append(obj_vals)
 
-        # per-evaluation id
+        # per-evaluation id (not logged to W&B here)
         uid = uid_counter
         uid_counter += 1
-
-        # W&B payload (groups renamed; booleans cast to int under ga_meta/*)
-        if wandb_writer is not None:
-            payload: Dict[str, Any] = {
-                "ga/gen": int(gen),
-                "ga_meta/uid": int(uid),
-                "ga_meta/ind_in_gen": int(ind_in_gen),
-                "ga_meta/is_child": int(bool(is_child)),  # avoid media warning
-            }
-            # full metrics (finite only) -> ga_metrics/*
-            for mk, mv in md.items():
-                if mv is None:
-                    continue
-                fv = float(mv)
-                if math.isfinite(fv):
-                    payload[f"ga_metrics/{mk}"] = fv
-            # objectives (subset) -> ga_object/*
-            for ok in objective_keys:
-                v = md.get(ok, None)
-                if v is None:
-                    continue
-                fv = float(v)
-                if math.isfinite(fv):
-                    payload[f"ga_object/{ok}"] = fv
-            try:
-                wandb_writer.log.remote(payload)
-            except Exception:
-                pass
 
         # JSONL append
         if jsonl_path:
@@ -571,20 +539,13 @@ def run_ga(
     solver: Optional[Dict[str, Any]] = None,
     score: List[Tuple[str, Dict[str, Any]]] = None,  # strict format
     objective_keys: List[str] = None,  # required: keys used as GA objectives
-    max_metric_keys=None,  # None | str | Sequence[str]; extra logging of per-batch maxima
+    max_metric_keys=None,  # None | str | Sequence[str]; extra logging of per-gen maxima (post-selection)
 ) -> Tuple[List[MDPNetwork], List[List[float]], List[MDPNetwork], List[List[float]]]:
     """
     GA driver (NSGA-II, maximize objectives).
-    - score: list of ('name', {params}); each function returns a flat metrics dict with simple keys.
-    - objective_keys: the exact metric keys to optimize; must exist & be finite per individual.
-    W&B:
-      * Full metrics -> ga_metrics/<key>   (only values that are not None and finite)
-      * Objectives   -> ga_object/<key>    (subset of metrics, optimized by GA)
-    All bound to step 'ga/gen'.
-    - Logging:
-        * Append per-evaluation records to <output_dir>/ga/metrics.jsonl.
-    - End of run:
-        * For each metric key, save CSV(gen,min,mean,max) and a PNG with 3 subplots (min/mean/max).
+    W&B policy (post-selection only):
+      - For survivors only: ga_metrics/<key>, ga_object/<key>
+      - If max_metric_keys provided: log survivor with max <key> to ga_metrics_max_{key}/*
     """
     if (
         objective_keys is None
@@ -621,7 +582,7 @@ def run_ga(
 
     if wandb_writer is not None:
         try:
-            # Bind existing metric families
+            # Families
             wandb_writer.define_metric.remote("ga_metrics/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga_object/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga_meta/*", step_metric="ga/gen")
@@ -630,7 +591,6 @@ def run_ga(
             wandb_writer.define_metric.remote("ga/init/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga/final/*", step_metric="ga/gen")
             wandb_writer.define_metric.remote("ga_metric_plots/*", step_metric="ga/gen")
-            # New families for per-batch maxima
             for k in mmk_list:
                 wandb_writer.define_metric.remote(
                     f"ga_metrics_max_{k}/*", step_metric="ga/gen"
@@ -638,7 +598,7 @@ def run_ga(
         except Exception:
             pass
 
-    # ===== Precompute baseline stuff (independent of W&B) =====
+    # ===== Precompute (unchanged) =====
     gamma = float(solver.get("vi_gamma", 0.99))
     theta = float(solver.get("vi_theta", 1e-6))
     max_iters = int(solver.get("vi_max_iterations", 1000))
@@ -723,7 +683,7 @@ def run_ga(
         distance_cfg=distance,
         solver=solver,
         precomputed=precomputed,
-        wandb_writer=wandb_writer,
+        wandb_writer=wandb_writer,  # unused inside, kept for signature stability
         jsonl_path=jsonl_path,
         uid_counter=uid_counter,
     )
@@ -736,8 +696,35 @@ def run_ga(
                 raise ValueError(
                     f"Unknown key '{k}' in max_metric_keys. Available: {sorted(available_keys)}"
                 )
-        # Log per-batch maxima for gen=0 (init batch)
-        _log_best_by_keys_for_batch(0, pop_metrics, mmk_list, wandb_writer)
+
+    # ===== Post-selection logging for gen=0 (survivors == pop) =====
+    if wandb_writer is not None:
+        try:
+            for ind_in_gen, md in enumerate(pop_metrics):
+                payload: Dict[str, Any] = {
+                    "ga/gen": 0,
+                    "ga_meta/ind_in_gen": int(ind_in_gen),
+                    "ga_meta/is_child": 0,
+                }
+                for mk, mv in md.items():
+                    if mv is None:
+                        continue
+                    fv = float(mv)
+                    if math.isfinite(fv):
+                        payload[f"ga_metrics/{mk}"] = fv
+                for ok in objective_keys:
+                    v = md.get(ok, None)
+                    if v is None:
+                        continue
+                    fv = float(v)
+                    if math.isfinite(fv):
+                        payload[f"ga_object/{ok}"] = fv
+                wandb_writer.log.remote(payload)
+            # per-gen maxima over survivors
+            if mmk_list:
+                _log_best_by_keys_for_batch(0, pop_metrics, mmk_list, wandb_writer)
+        except Exception:
+            pass
 
     # ===== Metric curves state =====
     all_metric_keys: Set[str] = (
@@ -833,7 +820,7 @@ def run_ga(
         child_portables = ray.get(futs)
         children = [MDPNetwork.from_portable(p) for p in child_portables]
 
-        # evaluate children at gen+1
+        # evaluate children at gen+1 (no W&B logging here)
         child_objs, child_metrics, uid_counter = ga_score_portables_with_metrics(
             gen=gen + 1,
             is_child=True,
@@ -846,14 +833,10 @@ def run_ga(
             distance_cfg=distance,
             solver=solver,
             precomputed=precomputed,
-            wandb_writer=wandb_writer,
+            wandb_writer=wandb_writer,  # unused inside
             jsonl_path=jsonl_path,
             uid_counter=uid_counter,
         )
-
-        # Per-batch maxima for children batch
-        if mmk_list:
-            _log_best_by_keys_for_batch(gen + 1, child_metrics, mmk_list, wandb_writer)
 
         # environmental selection with locked elites
         union_pop = pop + children
@@ -886,6 +869,36 @@ def run_ga(
                 new_objs.extend([union_objs[i] for i in chosen])
                 new_metrics.extend([union_metrics[i] for i in chosen])
                 break
+
+        # ----- Post-selection logging for gen+1 (survivors) -----
+        if wandb_writer is not None:
+            try:
+                for ind_in_gen, md in enumerate(new_metrics):
+                    payload: Dict[str, Any] = {
+                        "ga/gen": int(gen + 1),
+                        "ga_meta/ind_in_gen": int(ind_in_gen),
+                        "ga_meta/is_child": 0,
+                    }
+                    for mk, mv in md.items():
+                        if mv is None:
+                            continue
+                        fv = float(mv)
+                        if math.isfinite(fv):
+                            payload[f"ga_metrics/{mk}"] = fv
+                    for ok in objective_keys:
+                        v = md.get(ok, None)
+                        if v is None:
+                            continue
+                        fv = float(v)
+                        if math.isfinite(fv):
+                            payload[f"ga_object/{ok}"] = fv
+                    wandb_writer.log.remote(payload)
+                # per-gen maxima over survivors
+                if mmk_list:
+                    _log_best_by_keys_for_batch(gen + 1, new_metrics, mmk_list, wandb_writer)
+            except Exception:
+                pass
+        # ---------------------------------------
 
         pop, objs, pop_metrics = new_pop, new_objs, new_metrics
 
