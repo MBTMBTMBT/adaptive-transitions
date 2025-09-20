@@ -97,7 +97,7 @@ SLUR_CACHE_DEFAULT="/scratch/users/${USER}/singularity/cache"
 # -----------------------------
 EXP_NAME=""
 MAPS_INPUT="8x8,env3,env4"  # env0,env1,env2
-OBJ_GROUPS_INPUT="auc_source_target,perf_source_target,perf_kl_source_target,kl,auc_source_value_diff,auc_source_target_kl,auc_source_target_value_diff"
+OBJ_GROUPS_INPUT="auc,int,auc_auc,int_int,auc_kl,int_kl,kl_kl,auc_value_diff,auc_auc_kl,auc_auc_value_diff"
 EXTRA_ARGS=()
 LOCAL_EXP_OUTROOT="${LOCAL_EXP_OUTROOT_DEFAULT}"
 SLURM_EXP_OUTROOT="${SLURM_EXP_OUTROOT_DEFAULT}"
