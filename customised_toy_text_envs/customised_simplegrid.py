@@ -346,76 +346,88 @@ class CustomisedSimpleGridEnv(SimpleGridEnv, CustomisableEnvAbs):
     # -------------------------
     def get_mdp_network(self) -> MDPNetwork:
         """
-        Export MDP matching the shaped rewards:
-          - collision (wall/OOB): self-loop, reward -1.1
-          - valid non-goal move: reward -1.0
-          - reaching goal: reward 0.0, terminal
+        Build an MDP without wall states:
+          - States = all free cells (incl. goal if set).
+          - From a free non-goal state:
+              * into wall/OOB -> self-loop, r = -1.1
+              * into free non-goal -> r = -1.0
+              * into goal -> r = 0.0 (terminal, absorbing)
+          - Goal state(s) are absorbing with r = 0.0.
         """
-        nS = self.nrow * self.ncol
         nA = 4
+        nS_full = self.nrow * self.ncol
 
-        start_states = self.get_start_states()
+        # --- collect free cells (exclude walls completely) ---
+        free_states: List[int] = []
+        for s in range(nS_full):
+            r, c = self._rc_from_state(s)
+            if self.is_free(r, c):
+                free_states.append(s)
+        state_set = set(free_states)
+
+        # --- start states (map to free domain) ---
+        start_states: List[int] = []
+        if hasattr(self, "start_xy"):
+            s0 = self.to_s(*self.start_xy)
+            if s0 in state_set:
+                start_states = [s0]
+            elif free_states:
+                start_states = [free_states[0]]  # minimal guard
+        elif free_states:
+            start_states = [free_states[0]]
+
+        # --- terminal states (goal ∩ free) ---
         terminal_states: List[int] = []
         if hasattr(self, "goal_xy"):
-            terminal_states = [self.to_s(*self.goal_xy)]
+            g = self.to_s(*self.goal_xy)
+            if g in state_set:
+                terminal_states = [g]
 
+        # --- transitions only for FREE origins ---
         transitions: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
-        for s in range(nS):
+        for s in free_states:
             r, c = self._rc_from_state(s)
 
-            # Absorbing goal with 0 reward
-            if int(s) in terminal_states:
+            # absorbing goal
+            if s in terminal_states:
+                s_key = str(s)
                 for a in range(nA):
-                    s_key = str(s);
                     a_key = str(a)
-                    transitions.setdefault(s_key, {})
-                    transitions[s_key].setdefault(a_key, {})
-                    transitions[s_key][a_key][str(s)] = {"p": 1.0, "r": 0.0}
+                    transitions.setdefault(s_key, {}).setdefault(a_key, {})
+                    transitions[s_key][a_key][s_key] = {"p": 1.0, "r": 0.0}
                 continue
 
+            # normal free cell
             for a in range(nA):
-                s_key = str(s);
-                a_key = str(a)
-                transitions.setdefault(s_key, {})
-                a_bucket = transitions[s_key].setdefault(a_key, {})
-
                 dx, dy = self.MOVES[a]
                 tr, tc = r + dx, c + dy
+                s_key, a_key = str(s), str(a)
+                transitions.setdefault(s_key, {}).setdefault(a_key, {})
+                a_bucket = transitions[s_key][a_key]
 
-                # Collision -> self-loop with -1.1
+                # collision -> stay with -1.1
                 if (not self.is_in_bounds(tr, tc)) or (not self.is_free(tr, tc)):
-                    a_bucket[str(s)] = {"p": 1.0, "r": -1.1}
+                    a_bucket[s_key] = {"p": 1.0, "r": -1.1}
                     continue
 
                 sp = self.to_s(tr, tc)
-                is_goal = hasattr(self, "goal_xy") and (tr, tc) == self.goal_xy
-                rr = 0.0 if is_goal else -1.0
-                a_bucket[str(sp)] = {"p": 1.0, "r": float(rr)}
+                if sp in terminal_states:
+                    a_bucket[str(sp)] = {"p": 1.0, "r": 0.0}
+                else:
+                    a_bucket[str(sp)] = {"p": 1.0, "r": -1.0}
 
-        # Tags
-        free_states: List[int] = []
-        wall_states: List[int] = []
-        goal_state_list: List[int] = terminal_states.copy()
-        start_state_list: List[int] = start_states.copy()
-
-        for s in range(nS):
-            r, c = self._rc_from_state(s)
-            if hasattr(self, "goal_xy") and (r, c) == self.goal_xy:
-                continue
-            (free_states if self.is_free(r, c) else wall_states).append(s)
-
+        # --- tags (no 'wall' at all) ---
         tags = {
-            "start": sorted(list(set(start_state_list))),
-            "goal": sorted(list(set(goal_state_list))),
+            "start": sorted(start_states),
+            "goal": sorted(terminal_states),
             "free": sorted(free_states),
-            "wall": sorted(wall_states),
         }
 
         config = {
             "num_actions": int(nA),
-            "states": list(range(nS)),
-            "start_states": start_states if start_states else [0],
-            "terminal_states": sorted(list(set(terminal_states))),
+            "states": sorted(free_states),  # walls are excluded
+            "start_states": start_states or (sorted(free_states[:1]) if free_states else [0]),
+            "terminal_states": sorted(terminal_states),
             "default_reward": 0.0,
             "transitions": transitions,
             "tags": tags,
