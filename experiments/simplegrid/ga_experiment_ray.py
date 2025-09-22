@@ -484,7 +484,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Env
     p.add_argument("--map", type=str, default="8x8")
-    p.add_argument("--max-steps", type=int, default=250)
+    p.add_argument("--max-steps", type=int, default=50)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=100)
