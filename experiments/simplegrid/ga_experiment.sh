@@ -71,7 +71,7 @@ PYTHONPATH_EXTRA="${PROJ_ROOT}"
 USE_SLURM=false
 CONTAINER="${DEFAULT_SIF}"          # --no-container to force host venv
 PYTHON="python3"
-SCRIPT_PATH="${SCRIPT_DIR}/ga_experiment_ray.py"
+SCRIPT_PATH="${SCRIPT_DIR}/ga_experiment_deap.py"
 WANDB_MODE="online"
 
 # experiment outputs (NEW: fully separated)
@@ -81,7 +81,7 @@ SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 # SLURM resources
 SLURM_PARTITION="cpu,gpu,nmes_gpu"
 SLURM_GRES=""
-SLURM_MEM="47G"
+SLURM_MEM="115G"
 SLURM_CPUS="52"
 SLURM_TIME_DAYS="2.0"   # supports decimal now, e.g., 1.5
 SLURM_EXCLUDE=""

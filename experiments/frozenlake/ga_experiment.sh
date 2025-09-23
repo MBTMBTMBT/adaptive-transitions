@@ -81,7 +81,7 @@ SLURM_EXP_OUTROOT_DEFAULT="/scratch/users/${USER}/experiment_output"
 # SLURM resources
 SLURM_PARTITION="cpu,gpu,nmes_gpu"
 SLURM_GRES=""
-SLURM_MEM="47G"
+SLURM_MEM="115G"
 SLURM_CPUS="52"
 SLURM_TIME_DAYS="2.0"   # supports decimal now, e.g., 1.5
 SLURM_EXCLUDE=""

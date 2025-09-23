@@ -13,13 +13,12 @@ from typing import Dict, Any, List, Optional, Tuple
 import ray
 from ray.actor import ActorHandle
 
-from customised_toy_text_envs.customised_simplegrid import (
-    CustomisedSimpleGridEnv,
-    plot_simplegrid_transition_overlays,
-    plot_simplegrid_scalar_overlay,
-    plot_simplegrid_scalar_diff_overlay,
+from customised_toy_text_envs.customised_frozenlake import (
+    CustomisedFrozenLakeEnv,
+    plot_frozenlake_transition_overlays,
+    plot_frozenlake_scalar_overlay,
+    plot_frozenlake_scalar_diff_overlay,
 )
-from customised_toy_text_envs.customised_simplegrid import CustomisedSimpleGridEnv
 
 from experiment_utils.utils import (
     ensure_dir,
@@ -43,8 +42,9 @@ from mdp_network.solvers import (
 )
 from two_stage_cl.tabular_curriculum_trainer_ray import run_curriculum
 
-TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_simplegrid"
-SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_simplegrid"
+# -------- FrozenLake-specific factories stay here (kept as constants) --------
+TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
+SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
 
 # Objective groups registry
 OBJECTIVE_GROUPS: Dict[str, List[str]] = {
@@ -62,9 +62,10 @@ OBJECTIVE_GROUPS: Dict[str, List[str]] = {
 SELECTED_MAX_METRIC_KEYS = ["auc_p2", "minus_target_kl", "minus_value_diff",]
 
 
-def _build_native_mdp(map_name: str,) -> MDPNetwork:
-    env = CustomisedSimpleGridEnv(
-        render_mode=None, obstacle_map=map_name,
+def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
+    """Build the native FrozenLake MDP from the environment."""
+    env = CustomisedFrozenLakeEnv(
+        render_mode=None, map_name=map_name, is_slippery=slippery
     )
     env.reset(seed=0)
     return env.get_mdp_network()
@@ -79,8 +80,8 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
     vis_out = Path(args.outdir) / "vis"
     ensure_dir(vis_out)
 
-    env = CustomisedSimpleGridEnv(
-        render_mode="rgb_array", obstacle_map=args.map,
+    env = CustomisedFrozenLakeEnv(
+        render_mode="rgb_array", map_name=args.map, is_slippery=bool(args.slippery)
     )
     env.reset()
 
@@ -125,14 +126,14 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             verbose=False,
         )
 
-        native_out = vis_out / "__native_simplegrid__"
+        native_out = vis_out / "__native_frozenlake__"
         ensure_dir(native_out)
 
-        plot_simplegrid_transition_overlays(
+        plot_frozenlake_transition_overlays(
             env=env,
             mdp=native_mdp,
             output_dir=str(native_out),
-            filename_prefix="native_simplegrid",
+            filename_prefix="native_frozenlake",
             min_prob=args.vis_min_prob,
             alpha=args.vis_alpha,
             annotate=True,
@@ -140,11 +141,11 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             dpi=args.vis_dpi,
         )
 
-        plot_simplegrid_scalar_overlay(
+        plot_frozenlake_scalar_overlay(
             env=env,
             value_map=native_occ_random,
             output_dir=str(native_out),
-            filename_prefix="native_simplegrid_occupancy_random",
+            filename_prefix="native_frozenlake_occupancy_random",
             alpha=args.vis_occ_alpha,
             annotate=True,
             dpi=args.vis_dpi,
@@ -168,11 +169,11 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             max_iterations=args.vis_max_iters,
             verbose=False,
         )
-        plot_simplegrid_scalar_overlay(
+        plot_frozenlake_scalar_overlay(
             env=env,
             value_map=V_rand,
             output_dir=str(native_out),
-            filename_prefix="native_simplegrid_VALUE_random",
+            filename_prefix="native_frozenlake_VALUE_random",
             alpha=args.vis_val_alpha,
             annotate=True,
             dpi=args.vis_dpi,
@@ -187,11 +188,11 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             cbar_label="V(s)",
             value_format=None,
         )
-        plot_simplegrid_scalar_overlay(
+        plot_frozenlake_scalar_overlay(
             env=env,
             value_map=native_V_opt_greedy,
             output_dir=str(native_out),
-            filename_prefix="native_simplegrid_VALUE_optimal_greedy",
+            filename_prefix="native_frozenlake_VALUE_optimal_greedy",
             alpha=args.vis_val_alpha,
             annotate=True,
             dpi=args.vis_dpi,
@@ -224,7 +225,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
         out_dir = vis_out / stem
         ensure_dir(out_dir)
 
-        plot_simplegrid_transition_overlays(
+        plot_frozenlake_transition_overlays(
             env=env,
             mdp=mdp,
             output_dir=str(out_dir),
@@ -290,7 +291,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             verbose=False,
         )
 
-        plot_simplegrid_scalar_overlay(
+        plot_frozenlake_scalar_overlay(
             env=env,
             value_map=occ_rand,
             output_dir=str(out_dir),
@@ -314,7 +315,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             f"mix_g{args.vis_mix_loop[0]:.2f}_s{args.vis_mix_loop[1]:.2f}_u{args.vis_mix_loop[2]:.2f}"
             + (f"_T{args.vis_temperature:g}" if args.vis_mix_loop[1] > 0.0 else "")
         )
-        plot_simplegrid_scalar_overlay(
+        plot_frozenlake_scalar_overlay(
             env=env,
             value_map=occ_opt_mixed,
             output_dir=str(out_dir),
@@ -342,7 +343,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             max_iterations=args.vis_max_iters,
             verbose=False,
         )
-        plot_simplegrid_scalar_overlay(
+        plot_frozenlake_scalar_overlay(
             env=env,
             value_map=V_rand,
             output_dir=str(out_dir),
@@ -361,7 +362,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
             cbar_label="V(s)",
             value_format=None,
         )
-        plot_simplegrid_scalar_overlay(
+        plot_frozenlake_scalar_overlay(
             env=env,
             value_map=V_opt_greedy,
             output_dir=str(out_dir),
@@ -391,7 +392,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
                 max_iterations=args.vis_max_iters,
                 verbose=False,
             )
-            plot_simplegrid_scalar_overlay(
+            plot_frozenlake_scalar_overlay(
                 env=env,
                 value_map=occ_cross_native,
                 output_dir=str(out_dir),
@@ -411,7 +412,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
                 value_format=None,
             )
             if native_occ_random is not None:
-                plot_simplegrid_scalar_diff_overlay(
+                plot_frozenlake_scalar_diff_overlay(
                     env=env,
                     values_a=occ_cross_native,
                     values_b=native_occ_random,
@@ -432,7 +433,7 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
                 )
 
         if native_V_opt_greedy is not None:
-            plot_simplegrid_scalar_diff_overlay(
+            plot_frozenlake_scalar_diff_overlay(
                 env=env,
                 values_a=V_opt_greedy,
                 values_b=native_V_opt_greedy,
@@ -471,7 +472,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # W&B
     p.add_argument("--outdir", type=str, default="./outputs")
     p.add_argument("--run-name", type=str, default=None)
-    p.add_argument("--wandb-project", type=str, default="full-simplegrid")
+    p.add_argument("--wandb-project", type=str, default="full-frozenlake")
     p.add_argument("--wandb-entity", type=str, default=None)
     p.add_argument(
         "--wandb-mode", type=str, choices=["online", "offline"], default="online"
@@ -484,13 +485,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Env
     p.add_argument("--map", type=str, default="8x8")
-    p.add_argument("--max-steps", type=int, default=100)
+    p.add_argument("--slippery", type=str2bool, default=True)
+    p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
     p.add_argument("--ga-pop-size", type=int, default=100)
-    p.add_argument("--ga-generations", type=int, default=250)
+    p.add_argument("--ga-generations", type=int, default=100)
     p.add_argument("--ga-tournament-k", type=int, default=2)
-    p.add_argument("--ga-elitism", type=int, default=5)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
     p.add_argument("--ga-allow-self-loops", type=str2bool, default=True)
@@ -543,7 +544,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--agent-policy-mix",
         type=parse_tuple3,
-        default=(0.8, 0.0, 0.2),
+        default=(0.9, 0.0, 0.1),
         help="Tuple 'g,s,u' for (greedy, softmax, uniform).",
     )
     p.add_argument(
@@ -558,11 +559,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="5000,15000",
+        default="20000,180000",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
-    p.add_argument("--eval-every", type=int, default=100)
-    p.add_argument("--n-eval-episodes", type=int, default=1)
+    p.add_argument("--eval-every", type=int, default=1000)
+    p.add_argument("--n-eval-episodes", type=int, default=100)
 
     # Seeds and parallelism for training
     p.add_argument(
@@ -585,16 +586,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--vis-max-iters", type=int, default=1000)
     p.add_argument("--vis-temperature", type=float, default=1.0)
     p.add_argument("--vis-mix-native", type=parse_tuple3, default=(1.0, 0.0, 0.0))
-    p.add_argument("--vis-mix-loop", type=parse_tuple3, default=(0.8, 0.0, 0.2))
+    p.add_argument("--vis-mix-loop", type=parse_tuple3, default=(0.9, 0.0, 0.1))
     p.add_argument("--vis-tie-tol", type=float, default=1e-2)
     p.add_argument("--vis-occ-alpha", type=float, default=0.65)
     p.add_argument("--vis-occ-cell-px", type=int, default=240)
-    p.add_argument("--vis-occ-font-scale", type=float, default=0.08)
+    p.add_argument("--vis-occ-font-scale", type=float, default=0.16)
     p.add_argument("--vis-occ-cmap", type=str, default="magma")
     p.add_argument("--vis-occ-gamma", type=float, default=1.0)
     p.add_argument("--vis-val-alpha", type=float, default=0.65)
     p.add_argument("--vis-val-cell-px", type=int, default=240)
-    p.add_argument("--vis-val-font-scale", type=float, default=0.08)
+    p.add_argument("--vis-val-font-scale", type=float, default=0.16)
     p.add_argument("--vis-val-cmap", type=str, default="viridis")
     p.add_argument("--vis-val-gamma", type=float, default=1.0)
     return p
@@ -620,8 +621,8 @@ def main():
     else:
         args.run_name = base_name
 
-    # Timestamped outdir: <outdir>/ga-simplegrid/<ts>
-    run_dir = _timestamped_outdir(args.outdir, leaf="ga-simplegrid")
+    # Timestamped outdir: <outdir>/ga-frozenlake/<ts>
+    run_dir = _timestamped_outdir(args.outdir, leaf="ga-frozenlake")
     ensure_dir(run_dir)
     args.outdir = str(run_dir)
 
@@ -662,9 +663,8 @@ def main():
     else:
         if not args.skip_ga:
             print("[GA] Building native MDP…")
-            base_mdp = _build_native_mdp(args.map)
+            base_mdp = _build_native_mdp(args.map, args.slippery)
 
-            # Grouped dicts for the new GA API
             ops = {
                 "allow_self_loops": args.ga_allow_self_loops,
                 "max_out_degree": args.ga_max_out_degree,
@@ -696,134 +696,96 @@ def main():
                 "policy_tie_tol": args.ga_tie_tol,
             }
 
-            # ---------------------------------------------------------------------------------
-            # Score & objectives (STRICT):
-            # - score: List[("name", {params})]
-            # - objective_keys: List[str]  (must exist & be finite for every individual)
-            #
-            # ===================== All available objective (metric) keys =====================
-            # 1) obj_cl_phase_mean  (two-phase CL on candidate -> target; single (scope, curve) slice)
-            #    Keys (always present; may be None when undefined):
-            #      - "mean_p1", "mean_p1_source", "mean_p2"               # phase-1/2 means
-            #      - "auc_p1", "auc_p1_source", "auc_p2"                 # phase-1/2 trapezoid areas
-            #      - "mean_total", "auc_total"          # whole-interval average / area
-            #      - "ap_last_k"                        # last-K mean (per trainer cfg)
-            #      - "ttt_frac"                         # time-to-threshold fraction index
-            #      - "js_target_start"                  # target curve start value
-            #      - "js_p2_head"                       # first-N of phase-2 (incl. boundary)
-            #      - "js_baseline_B"                    # baseline target at boundary (if baseline available)
-            #
-            # 2) obj_multi_perf
-            #    Keys (maximize both):
-            #      - "int_rand_to_source_on_source"
-            #      - "int_rand_to_source"
-            #      - "int_source_to_target"
-            #
-            # 3) obj_multi_kl
-            #    Keys (maximize both):
-            #      - "control_kl"
-            #      - "target_kl"
-            #      - "minus_control_kl"
-            #      - "minus_target_kl"
-            # 4) obj_val_diff
-            #   Keys:
-            #     - "value_diff"
-            #     - "minus_value_diff"
-            # =================================================================================
-
-            # =========================== Recommended setups ===========================
-            # Example A (default here): maximize CL phase means on greedy/target slice
-            score: List[Tuple[str, Dict[str, Any]]] = [
-                (
-                    "obj_cl_phase_mean",
-                    {
+            # score_spec with per-score resources
+            score_spec = [
+                {
+                    "name": "obj_cl_phase_mean",
+                    "params": {
                         "target_factory_path": TARGET_FACTORY_PATH,
                         "target_cfg": {
                             "map_name": args.map,
+                            "is_slippery": bool(args.slippery),
                             "max_steps": int(args.max_steps),
                         },
                         "item_factory_path": SOURCE_FACTORY_PATH,
                         "item_max_steps": int(args.max_steps),
-                        "phase_steps": (5000, 10000),
-                        "seeds": 5,
+                        "phase_steps": (20_000, 80_000),
+                        "seeds": 3,
                         "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                         "agent_kwargs": {
-                            "learning_rate": 0.1,
-                            "gamma": 0.99,
-                            "policy_mix": (0.8, 0.0, 0.2),
-                            "temperature": 0.01,
-                            "default_q_value": 0.05,
-                            "tie_tol": 1e-2,
-                            "verbose": 0,
+                            "learning_rate": 0.1, "gamma": 0.99,
+                            "policy_mix": (0.9, 0.0, 0.1),
+                            "temperature": 0.01, "default_q_value": 0.05,
+                            "tie_tol": 1e-2, "verbose": 0,
                         },
-                        "eval_every": 250,
-                        "n_eval_episodes": 1,
+                        "eval_every": 2500, "n_eval_episodes": 100,
                     },
-                ),
-                (
-                    "obj_multi_perf",
-                    {
-                        "perf_numpoints": 16,
-                        "perf_gamma": 0.99,
-                        "perf_theta": 1e-3,
-                        "perf_max_iterations": 1000,
-                    },
-                ),
-                (
-                    "obj_multi_kl",
-                    {
-                        "kl_gamma": 0.99,
-                        "kl_theta": 1e-3,
-                        "kl_max_iterations": 1000,
-                    },
-                ),
-                (
-                    "obj_val_diff",
-                    {
-                        "diff_gamma": 0.99,
-                        "diff_theta": 1e-3,
-                        "diff_max_iterations": 1000,
-                    },
-                ),
+                    "resources": {"cpus": 1, "gpus": 0},
+                },
+                {
+                    "name": "obj_multi_perf",
+                    "params": {"perf_numpoints": 16, "perf_gamma": 0.99, "perf_theta": 1e-3,
+                               "perf_max_iterations": 1000},
+                    "resources": {"cpus": 1, "gpus": 0},
+                },
+                {
+                    "name": "obj_multi_kl",
+                    "params": {"kl_gamma": 0.99, "kl_theta": 1e-3, "kl_max_iterations": 1000},
+                    "resources": {"cpus": 1, "gpus": 0},
+                },
+                {
+                    "name": "obj_val_diff",
+                    "params": {"diff_gamma": 0.99, "diff_theta": 1e-3, "diff_max_iterations": 1000},
+                    "resources": {"cpus": 1, "gpus": 0},
+                },
             ]
+
+            # Auto-pick outer concurrency (max_in_flight)
+            avail = ray.available_resources()
+            tot_cpu = int(avail.get("CPU", os.cpu_count() or 1))
+            tot_gpu = float(avail.get("GPU", 0.0))
+            cpu_per_ind = sum(float(s["resources"].get("cpus", 1)) for s in score_spec)
+            gpu_per_ind = sum(float(s["resources"].get("gpus", 0.0)) for s in score_spec)
+            cpu_bound = max(1, int(tot_cpu // max(1, math.ceil(cpu_per_ind))))
+            if gpu_per_ind > 0.0:
+                gpu_bound = max(1, int(tot_gpu // max(0.0001, gpu_per_ind)))
+                max_in_flight = max(1, min(args.ga_pop_size, cpu_bound, gpu_bound))
+            else:
+                max_in_flight = max(1, min(args.ga_pop_size, cpu_bound))
+
             objective_keys: List[str] = selected_objective_keys
             max_metric_keys: List[str] = selected_max_metric_keys
 
-            # Run GA (new API will log: ga/metrics/* and ga/objs/*; export CSV/PNG)
-            _ = run_ga(
+            _ = run_ga_deap_ray(
                 base_mdp=base_mdp,
                 population_size=args.ga_pop_size,
                 generations=args.ga_generations,
-                seed=args.ga_seed,
-                tournament_k=args.ga_tournament_k,
-                elitism=args.ga_elitism,
-                crossover_rate=args.ga_crossover,
+                master_seed=args.ga_seed,
+                algo_type="mu_plus_lambda",
+                mu=args.ga_pop_size, lambd=args.ga_pop_size, cxpb=args.ga_crossover,
+                survivor="nsga2",
+                parents="tournament_dcd", parent_k=args.ga_tournament_k,
+                score_spec=score_spec,
+                objective_keys=objective_keys,
+                max_metric_keys=max_metric_keys,
+                max_in_flight=max_in_flight,
+                ray_init={},  # cluster: {"address": "auto"}
+                ops=ops, distance=distance, solver=solver,
                 output_dir=args.outdir,
                 wandb_writer=wandb_actor,
-                ops=ops,
-                distance=distance,
-                solver=solver,
-                score=score,  # strict: list of (name, params)
-                objective_keys=objective_keys,  # strict: list of metric keys to optimize
-                max_metric_keys=max_metric_keys,
             )
 
-            # Collect saved JSONs from GA
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
                 json_files = json_files[: args.json_max]
-            print(
-                f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}."
-            )
+            print(f"[MAIN] GA done; using {len(json_files)} JSON files from {mdp_out_dir}.")
         else:
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
             json_files = sorted(mdp_out_dir.glob("*.json"))
             if args.json_max > 0:
                 json_files = json_files[: args.json_max]
-            print(
-                f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}."
-            )
+            print(f"[MAIN] GA skipped; using {len(json_files)} JSON from {mdp_out_dir}.")
 
     # ----------------------------- Curriculum Training -----------------------------
     if not args.skip_train and json_files:
@@ -838,6 +800,7 @@ def main():
                 "factory_path": TARGET_FACTORY_PATH,
                 "cfg": {
                     "map_name": args.map,
+                    "is_slippery": bool(args.slippery),
                     "max_steps": int(args.max_steps),
                 },
             },
