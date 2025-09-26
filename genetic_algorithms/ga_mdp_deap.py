@@ -560,6 +560,8 @@ class Trainer:
         if begin_keys:
             _, begin_metrics = self._eval_on_metrics(pop, gen=0, metric_keys=begin_keys)
             pop_metrics = begin_metrics  # log curves/jsonl using the explicit begin-eval set
+        if self.wandb_writer is not None:
+            self.wb_log_survivors(0, pop, pop_metrics)
 
         # Log gen=0 (uses begin overlay if present)
         self.log_batch(0, pop_metrics, is_child=False)
@@ -726,6 +728,8 @@ class Trainer:
             ek_end_str = "ALL" if end_keys == "*" else ", ".join(end_keys)
             print(f"[Plan] gen={self.generations} (end) | eval keys=[{ek_end_str}]")
             _, end_metrics = self._eval_on_metrics(pop, gen=self.generations, metric_keys=end_keys)
+            if self.wandb_writer is not None:
+                self.wb_log_survivors(self.generations, pop, end_metrics)
             # Record an extra monitoring row at the last gen
             self.log_batch(self.generations, end_metrics, is_child=False)
 
