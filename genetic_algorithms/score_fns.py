@@ -433,3 +433,29 @@ SCORE_FNS: Dict[str, Callable[..., Dict[str, Optional[float]]]] = {
     "obj_cl_phase_mean": obj_cl_phase_mean,
     "obj_val_diff": obj_val_diff,
 }
+
+SCORE_FN_OUTPUTS: Dict[str, List[str]] = {
+    "obj_cl_phase_mean": [
+        "mean_p1","mean_p2","auc_p1","auc_p2","mean_total","auc_total",
+        "ap_last_k","ttt_frac","mean_p1_source","auc_p1_source",
+        "js_target_start","js_p2_head","js_baseline_B",
+    ],
+    "obj_multi_perf": [
+        "int_rand_to_source_on_source","int_rand_to_source","int_source_to_target",
+    ],
+    "obj_multi_kl": [
+        "control_kl","target_kl","minus_control_kl","minus_target_kl",
+    ],
+    "obj_val_diff": [
+        "value_diff","minus_value_diff",
+    ],
+}
+
+METRIC_TO_FN: Dict[str, str] = {}
+for _fn, _keys in SCORE_FN_OUTPUTS.items():
+    for _k in _keys:
+        METRIC_TO_FN[_k] = _fn
+
+def needed_score_fns_for_metrics(metrics: Sequence[str]) -> List[str]:
+    """Return minimal set of score fn names to produce given metrics."""
+    return sorted({METRIC_TO_FN[m] for m in metrics if m in METRIC_TO_FN})

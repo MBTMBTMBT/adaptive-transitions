@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # run_full_experiment.py
-# English comments only.
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -30,9 +30,10 @@ from experiment_utils.utils import (
     _timestamped_outdir,
 )
 
-# New W&B writer actor and new GA entrypoint
 from experiment_utils.wandb_utils import WandbActor, capture_prints_to_wandb
-from genetic_algorithms.ga_mdp_ray import run_ga
+# New GA entry with schedules (DEAP + Ray)
+from genetic_algorithms.ga_mdp_deap import run_ga_deap_ray
+
 from mdp_network.mdp_network import MDPNetwork
 from mdp_network.mdp_tables import q_table_to_policy, create_random_policy
 from mdp_network.solvers import (
@@ -42,24 +43,249 @@ from mdp_network.solvers import (
 )
 from two_stage_cl.tabular_curriculum_trainer_ray import run_curriculum
 
-# -------- FrozenLake-specific factories stay here (kept as constants) --------
+# -------- FrozenLake-specific factories --------
 TARGET_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
 SOURCE_FACTORY_PATH = "experiment_utils.env_factories:make_frozenlake"
 
-# Objective groups registry
-OBJECTIVE_GROUPS: Dict[str, List[str]] = {
-    "auc": ["auc_p2"],
-    "int": ["int_source_to_target"],
-    "auc_auc": ["auc_p1_source", "auc_p2"],
-    "int_int": ["int_rand_to_source_on_source", "int_source_to_target"],
-    "auc_kl": ["auc_p1_source", "minus_target_kl"],
-    "int_kl": ["int_rand_to_source_on_source", "minus_target_kl"],
-    "kl_kl": ["minus_control_kl", "minus_target_kl"],
-    "auc_value_diff": ["auc_p1_source", "minus_value_diff"],
-    "auc_auc_kl": ["auc_p1_source", "auc_p2", "minus_target_kl"],
-    "auc_auc_value_diff": ["auc_p1_source", "auc_p2", "minus_value_diff"],
+# ---- Group-level config (objectives + schedules) ----
+# Keep behavior equivalent to old pipeline:
+# - fitness: every generation optimize the group's objective_keys (gens=1)
+# - eval: every generation monitor all metrics ("*"), and also at begin/end
+OBJECTIVE_GROUPS: Dict[str, Dict[str, Any]] = {
+    "auc": {
+        "objective_keys": ["auc_p2"],
+        "fitness_schedule": [{"gens": 1, "keys": ["auc_p2"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "int": {
+        "objective_keys": ["int_source_to_target"],
+        "fitness_schedule": [{"gens": 1, "keys": ["int_source_to_target"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "auc_auc": {
+        "objective_keys": ["auc_p1_source", "auc_p2"],
+        "fitness_schedule": [{"gens": 1, "keys": ["auc_p1_source", "auc_p2"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "int_int": {
+        "objective_keys": ["int_rand_to_source_on_source", "int_source_to_target"],
+        "fitness_schedule": [{"gens": 1, "keys": ["int_rand_to_source_on_source", "int_source_to_target"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "auc_kl": {
+        "objective_keys": ["auc_p1_source", "minus_target_kl"],
+        "fitness_schedule": [{"gens": 1, "keys": ["auc_p1_source", "minus_target_kl"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "int_kl": {
+        "objective_keys": ["int_rand_to_source_on_source", "minus_target_kl"],
+        "fitness_schedule": [{"gens": 1, "keys": ["int_rand_to_source_on_source", "minus_target_kl"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "kl_kl": {
+        "objective_keys": ["minus_control_kl", "minus_target_kl"],
+        "fitness_schedule": [{"gens": 1, "keys": ["minus_control_kl", "minus_target_kl"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "auc_value_diff": {
+        "objective_keys": ["auc_p1_source", "minus_value_diff"],
+        "fitness_schedule": [{"gens": 1, "keys": ["auc_p1_source", "minus_value_diff"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "auc_auc_kl": {
+        "objective_keys": ["auc_p1_source", "auc_p2", "minus_target_kl"],
+        "fitness_schedule": [{"gens": 1, "keys": ["auc_p1_source", "auc_p2", "minus_target_kl"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "auc_auc_value_diff": {
+        "objective_keys": ["auc_p1_source", "auc_p2", "minus_value_diff"],
+        "fitness_schedule": [{"gens": 1, "keys": ["auc_p1_source", "auc_p2", "minus_value_diff"]}],
+        "eval_schedule": [{"every": 1, "offset": 0, "keys": "*"}],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_int_int": {
+        "objective_keys": [
+            "int_rand_to_source_on_source", "int_source_to_target",
+        ],
+        "fitness_schedule": [
+            {"gens": 1, "keys": ["int_rand_to_source_on_source", "int_source_to_target",]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1, "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_int_kl": {
+        "objective_keys": [
+            "int_rand_to_source_on_source", "minus_target_kl",
+        ],
+        "fitness_schedule": [
+            {"gens": 1, "keys": ["int_rand_to_source_on_source", "minus_target_kl",]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1, "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_auc__int": {
+        "objective_keys": [
+            "auc_p2",
+            "int_source_to_target",
+        ],
+        "fitness_schedule": [
+            {"gens": 9, "keys": ["int_source_to_target"]},
+            {"gens": 1, "keys": ["auc_p2"]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1, "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_auc_auc__int_int": {
+        "objective_keys": [
+            "auc_p1_source", "auc_p2",
+            "int_rand_to_source_on_source", "int_source_to_target",
+        ],
+        "fitness_schedule": [
+            {"gens": 9, "keys": ["int_rand_to_source_on_source", "int_source_to_target"]},
+            {"gens": 1, "keys": ["auc_p1_source", "auc_p2"]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1,  "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_auc_kl__int_kl": {
+        "objective_keys": [
+            "auc_p1_source",
+            "int_rand_to_source_on_source",
+            "minus_target_kl",
+        ],
+        "fitness_schedule": [
+            {"gens": 9, "keys": ["int_rand_to_source_on_source", "minus_target_kl"]},
+            {"gens": 1, "keys": ["auc_p1_source", "minus_target_kl"]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1, "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_auc_valdiff__int_valdiff": {
+        "objective_keys": [
+            "auc_p1_source",
+            "int_rand_to_source_on_source",
+            "minus_value_diff",
+        ],
+        "fitness_schedule": [
+            {"gens": 9, "keys": ["int_rand_to_source_on_source", "minus_value_diff"]},
+            {"gens": 1, "keys": ["auc_p1_source", "minus_value_diff"]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1, "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_auc_auc_kl__int_int_kl": {
+        "objective_keys": [
+            "auc_p1_source", "auc_p2",
+            "int_rand_to_source_on_source", "int_source_to_target",
+            "minus_target_kl",
+        ],
+        "fitness_schedule": [
+            {"gens": 9, "keys": ["int_rand_to_source_on_source", "int_source_to_target", "minus_target_kl"]},
+            {"gens": 1, "keys": ["auc_p1_source", "auc_p2", "minus_target_kl"]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1, "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
+    "comb_auc_auc_valdiff__int_int_valdiff": {
+        "objective_keys": [
+            "auc_p1_source", "auc_p2",
+            "int_rand_to_source_on_source", "int_source_to_target",
+            "minus_value_diff",
+        ],
+        "fitness_schedule": [
+            {"gens": 9, "keys": ["int_rand_to_source_on_source", "int_source_to_target", "minus_value_diff"]},
+            {"gens": 1, "keys": ["auc_p1_source", "auc_p2", "minus_value_diff"]},
+        ],
+        "eval_schedule": [
+            {"gens": 9, "keys": [
+                "int_rand_to_source_on_source", "int_rand_to_source", "int_source_to_target",
+                "control_kl", "target_kl", "minus_control_kl", "minus_target_kl",
+                "value_diff", "minus_value_diff"
+            ]},
+            {"gens": 1, "keys": "*"},
+        ],
+        "eval_at_begin": "*",
+        "eval_at_end": "*",
+    },
 }
-SELECTED_MAX_METRIC_KEYS = ["auc_p2", "minus_target_kl", "minus_value_diff",]
+
+# Only upload "best-of" summaries for these keys on generations when they were actually computed.
+SELECTED_MAX_METRIC_KEYS = ["auc_p2", "minus_target_kl", "minus_value_diff"]
 
 
 def _build_native_mdp(map_name: str, slippery: bool) -> MDPNetwork:
@@ -459,11 +685,6 @@ def stage_visualize(args, wandb_actor: Optional[ActorHandle], json_files: List[P
                 wandb_actor.log_image.remote(f"images/vis/{stem}/{fn.stem}", str(fn))
 
 
-# =============================================================================
-# Argparse / main
-# =============================================================================
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="End-to-end GA → Curriculum → Visualization with W&B (via WandbWriter)."
@@ -472,7 +693,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # W&B
     p.add_argument("--outdir", type=str, default="./outputs")
     p.add_argument("--run-name", type=str, default=None)
-    p.add_argument("--wandb-project", type=str, default="full-frozenlake")
+    # p.add_argument("--wandb-project", type=str, default="full-frozenlake")
+    p.add_argument("--wandb-project", type=str, default="comb-full-frozenlake")
     p.add_argument("--wandb-entity", type=str, default=None)
     p.add_argument(
         "--wandb-mode", type=str, choices=["online", "offline"], default="online"
@@ -488,9 +710,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--slippery", type=str2bool, default=True)
     p.add_argument("--max-steps", type=int, default=1000)
 
-    # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=100)
-    p.add_argument("--ga-generations", type=int, default=100)
+    # GA (passed directly to run_ga_deap_ray)
+    p.add_argument("--ga-pop-size", type=int, default=500)
+    p.add_argument("--ga-generations", type=int, default=250)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-crossover", type=float, default=0.5)
 
@@ -524,12 +746,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ga-policy-temperature", type=float, default=0.01)
     p.add_argument("--ga-tie-tol", type=float, default=1e-2)
 
-    # Objective group (name → list of metric keys)
+    # Objective group name (now maps to objectives + schedules)
     p.add_argument(
         "--obj-group",
         type=str,
-        default="auc_source_target",
-        help="Objective group name to select metric keys for GA.",
+        default="auc_auc",
+        help="Objective group name selecting objectives + schedules.",
     )
 
     # Training (flattened agent kwargs; fed to CL API)
@@ -605,13 +827,18 @@ def main():
     parser = build_arg_parser()
     args = resolve_args(parser)
 
-    # Select objective group
+    # Select group (objectives + schedules)
     if args.obj_group not in OBJECTIVE_GROUPS:
         raise ValueError(
             f"Unknown --obj-group '{args.obj_group}'. "
             f"Available: {', '.join(sorted(OBJECTIVE_GROUPS))}"
         )
-    selected_objective_keys: List[str] = OBJECTIVE_GROUPS[args.obj_group]
+    grp = OBJECTIVE_GROUPS[args.obj_group]
+    selected_objective_keys: List[str] = list(grp["objective_keys"])
+    fitness_schedule = list(grp["fitness_schedule"])
+    eval_schedule = list(grp["eval_schedule"])
+    eval_at_begin = grp["eval_at_begin"]
+    eval_at_end = grp["eval_at_end"]
     selected_max_metric_keys: List[str] = SELECTED_MAX_METRIC_KEYS
 
     # Make run name obj_group-aware
@@ -696,7 +923,7 @@ def main():
                 "policy_tie_tol": args.ga_tie_tol,
             }
 
-            # score_spec with per-score resources
+            # score_spec with per-score resources (unchanged)
             score_spec = [
                 {
                     "name": "obj_cl_phase_mean",
@@ -710,7 +937,7 @@ def main():
                         "item_factory_path": SOURCE_FACTORY_PATH,
                         "item_max_steps": int(args.max_steps),
                         "phase_steps": (20_000, 80_000),
-                        "seeds": 3,
+                        "seeds": 5,
                         "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                         "agent_kwargs": {
                             "learning_rate": 0.1, "gamma": 0.99,
@@ -773,6 +1000,11 @@ def main():
                 ops=ops, distance=distance, solver=solver,
                 output_dir=args.outdir,
                 wandb_writer=wandb_actor,
+                # NEW: schedules taken from group
+                fitness_schedule=fitness_schedule,
+                eval_schedule=eval_schedule,
+                eval_at_begin=eval_at_begin,
+                eval_at_end=eval_at_end,
             )
 
             mdp_out_dir = Path(args.outdir) / "ga" / "mdps"
@@ -875,7 +1107,7 @@ def main():
 
     # ----------------------------- Visualization -----------------------------
     if not args.skip_vis:
-        stage_visualize(args, wandb_actor, json_files)
+        stage_visualize(args, wandb_actor, json_files)  # assumed existing in your codebase
     else:
         print("[MAIN] Visualization skipped.")
 
