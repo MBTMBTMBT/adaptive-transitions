@@ -711,7 +711,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=1000)
 
     # GA (passed directly to run_ga_deap_ray)
-    p.add_argument("--ga-pop-size", type=int, default=250)
+    p.add_argument("--ga-pop-size", type=int, default=150)
     p.add_argument("--ga-generations", type=int, default=250)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-crossover", type=float, default=0.5)
