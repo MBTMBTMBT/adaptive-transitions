@@ -486,10 +486,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Env
     p.add_argument("--map", type=str, default="8x8")
-    p.add_argument("--max-steps", type=int, default=100)
+    p.add_argument("--max-steps", type=int, default=50)
 
     # GA (complete; passed directly to run_ga via grouped dicts)
-    p.add_argument("--ga-pop-size", type=int, default=10)
+    p.add_argument("--ga-pop-size", type=int, default=100)
     p.add_argument("--ga-generations", type=int, default=25)
     p.add_argument("--ga-tournament-k", type=int, default=2)
     p.add_argument("--ga-crossover", type=float, default=0.5)
@@ -559,7 +559,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--phase-steps",
         type=str,
-        default="5000,15000",
+        default="7500,7500",
         help="Comma-separated curriculum steps per phase; e.g., 'X,Y' means 2 phases.",
     )
     p.add_argument("--eval-every", type=int, default=100)
@@ -706,7 +706,7 @@ def main():
                         "target_cfg": {"map_name": args.map, "max_steps": int(args.max_steps)},
                         "item_factory_path": SOURCE_FACTORY_PATH,
                         "item_max_steps": int(args.max_steps),
-                        "phase_steps": (5000, 10000),
+                        "phase_steps": (7500, 7500),
                         "seeds": 5,
                         "agent_ctor_path": "simple_agents.tabular_q_agent:TabularQAgent",
                         "agent_kwargs": {
